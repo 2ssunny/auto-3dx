@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-3dx"
+version = "0.1.0"
+description = "Python library for driving the 3DEXPERIENCE CATIA Automation object model over Windows COM."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["pywin32"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires a running 3DEXPERIENCE session",
+]
+addopts = "-m 'not integration'"
