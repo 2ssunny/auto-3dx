@@ -35,6 +35,27 @@ def _format_com_error(error: pywintypes.com_error) -> str:
     return f" (HRESULT: {hresult & 0xFFFFFFFF:#010x})"
 
 
+def _selection_of(editor: Any) -> Any:
+    """Return the editor's ``Selection``, or ``None`` when it is unavailable.
+
+    Only geometry deletion needs the selection, because neither ``Sketches`` nor
+    ``Shapes`` exposes a ``Remove`` method. A session that will not hand one over
+    should therefore still yield a usable Part -- read, create and update all
+    work without it -- so this degrades to ``None`` instead of failing
+    :meth:`Catia.active_part`.
+
+    Args:
+        editor: The raw CATIA ``Editor`` COM object.
+
+    Returns:
+        The raw ``Selection`` COM object, or ``None``.
+    """
+    try:
+        return editor.Selection
+    except (AttributeError, pywintypes.com_error):
+        return None
+
+
 class Catia:
     """Wrapper around the 3DEXPERIENCE ``Application`` COM object.
 
@@ -145,7 +166,7 @@ class Catia:
                 f"The active object is a {type_name}, not a Part. Switch to a "
                 "Part editor (not an Assembly) and try again."
             )
-        return Part(active_object)
+        return Part(active_object, selection=_selection_of(editor))
 
     def __repr__(self) -> str:
         """str: Debug representation showing the wrapped Application's name."""

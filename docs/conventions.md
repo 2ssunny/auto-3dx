@@ -131,6 +131,112 @@ CATIA UI f(x) 로 만든 것                -> Name == "AUTO3DX_TEST_LENGTH"    
 `Parameters.Remove(name)`는 정규화 이름으로 동작하고, 제거 후 `Count`가 정상적으로
 줄어든다. `Part.Update()`도 제거 후 성공한다.
 
+### 1.2 Sketch와 Pad (실측, `scripts/probes/12_sketch_and_pad.py`, `13_sketch_identity.py`)
+
+type library가 고정한 signature:
+
+```text
+OriginElements.PlaneXY / PlaneYZ / PlaneZX   -> Plane
+Body.Sketches.Add(iPlane)                    -> Sketch
+Sketch.OpenEdition()                         -> Factory2D
+Sketch.CloseEdition()                        -> void
+Factory2D.CreateLine(iX1, iY1, iX2, iY2)     -> Line2D
+Factory2D.CreateClosedCircle(iCx, iCy, iR)   -> Circle2D
+Factory2D.CreatePoint(iX, iY)                -> Point2D
+ShapeFactory.AddNewPad(iSketch, iHeight)     -> Pad
+```
+
+검증된 흐름:
+
+```text
+PlaneXY -> Sketches.Add -> OpenEdition -> CreateLine x4 (닫힌 사각형)
+  -> CloseEdition -> Part.Update() -> AddNewPad(sketch, 20) -> Part.Update()
+```
+
+Sketch 좌표와 Pad 높이는 **mm**다. 제약(Constraint) 없는 사각형 프로파일도 pad된다.
+
+**평면은 타입으로 식별할 수 없다.** `OriginElements.PlaneXY`의 wrapper 타입은 `Plane`이
+아니라 `AnyObject`이고 `Name`은 `"xy plane"`이다. 반드시 `OriginElements`의 속성으로
+접근한다.
+
+`Sketch`가 읽을 수 있는 것:
+
+```text
+AbsoluteAxis, Constraints, Factory2D, GeometricElements, Name, Parent
+GetAbsoluteAxisData(oAxisData) -> 9 doubles
+쓰기 가능: Name, CenterLine
+```
+
+**`Sketch`에는 support/plane 속성이 없다.** 어느 평면에 붙었는지는
+`GetAbsoluteAxisData`로만 알 수 있고, 실측값은 support마다 다음과 같이 구분된다
+(origin 3 + X방향 3 + Y방향 3):
+
+```text
+XY -> (0,0,0,  1,0,0,  0,1,0)
+YZ -> (0,0,0,  0,1,0,  0,0,1)
+ZX -> (0,0,0,  0,0,1,  1,0,0)
+```
+
+`Pad`가 읽을 수 있는 것:
+
+```text
+Name, Sketch, FirstLimit, SecondLimit, IsSymmetric, IsThin, MergeEnd,
+NeutralFiber, DirectionType, DirectionOrientation
+FirstLimit.Dimension.Value == AddNewPad에 넘긴 높이   (실측 15.0)
+```
+
+**형상 삭제는 `Editor.Selection`으로만 된다.** type library와 라이브 세션 양쪽에서 확인:
+
+```text
+Sketches methods : Add, GetBoundary, GetItem, Item        <- Remove 없음
+Shapes   methods : GetBoundary, GetItem, Item             <- Remove 없음, Add도 없음
+Selection methods: Add, Clear, Delete, Copy, Cut, Paste, Search, ...
+Part.Parent      : VPMRepReference                        <- Selection 없음
+```
+
+`Parameters.Remove(name)`가 있다고 해서 `Shapes.Remove`도 있으리라 유추하면 안 된다.
+실제로 호출하면 `AttributeError`다. 삭제 순서는 다음과 같다.
+
+```text
+Selection.Clear() -> Selection.Add(com_object) -> Selection.Delete() -> Selection.Clear()
+```
+
+마지막 `Clear()`를 빠뜨리면 지운 객체가 선택된 채 남아 다음 삭제 범위가 넓어진다.
+
+이 때문에 삭제는 Part가 아니라 **editor의 기능**이다. `SketchCollection`과 `PartDesign`은
+생성자에서 `selection`을 받고, `Catia.active_part()`가 `editor.Selection`을 넣어 준다.
+`selection` 없이 만든 객체도 읽기·생성·update는 전부 되고 삭제만 막힌다.
+
+**Pad를 지우면 그 Sketch까지 연쇄 삭제된다**(실측: Shapes 1->0, Sketches 1->0). 그래서 Pad를
+먼저 지운 뒤 Sketch 삭제가 실패하는 것은 정상이다.
+
+쓰기 가능 속성 (실측):
+
+```text
+Sketch : Name, CenterLine
+Pad    : Name, DirectionOrientation, DirectionType, IsSymmetric, IsThin,
+         MergeEnd, NeutralFiber
+```
+
+### 1.3 `ensure_*` 정책 (형상)
+
+이름만 같다고 형상을 재사용하면 안 된다. 아래 비교는 모두 실측으로 읽을 수 있는 값이다.
+
+```text
+ensure_sketch(name, support)
+  이름 없음                          -> 생성
+  이름 있음 + 축 데이터 일치          -> 기존 재사용
+  이름 있음 + 축 데이터 불일치        -> SketchSupportMismatchError
+
+ensure_pad(name, sketch, height)
+  이름 없음                          -> 생성
+  이름 있음 + 같은 Sketch + 높이 같음 -> 그대로 재사용
+  이름 있음 + 같은 Sketch + 높이 다름 -> FirstLimit.Dimension.Value 갱신
+  이름 있음 + 다른 Sketch            -> FeatureConflictError
+```
+
+부동소수 비교는 `math.isclose`를 쓰고 절대 허용오차를 상수로 둔다.
+
 ---
 
 ## 2. 코드 스타일
@@ -281,7 +387,8 @@ class Catia:
 
 ```python
 class Part:
-    def __init__(self, com_object: Any) -> None: ...
+    # selection은 형상 삭제에만 필요하다. Catia.active_part()가 넣어 준다.
+    def __init__(self, com_object: Any, selection: Any = None) -> None: ...
 
     @property
     def com_object(self) -> Any: ...
@@ -289,8 +396,15 @@ class Part:
     @property
     def name(self) -> str: ...
 
+    # 아래 셋은 모두 최초 접근 시 생성 후 캐시
     @property
-    def parameters(self) -> "ParameterCollection": ...   # 최초 접근 시 생성 후 캐시
+    def parameters(self) -> "ParameterCollection": ...
+
+    @property
+    def sketches(self) -> "SketchCollection": ...
+
+    @property
+    def part_design(self) -> "PartDesign": ...
 
     def update(self) -> None: ...            # 실패 시 PartUpdateError. save 호출 금지.
 ```
@@ -298,13 +412,21 @@ class Part:
 ### 6.5 `auto_3dx/parameters/parameter.py`
 
 ```python
-LENGTH_KIND: str = "Length"
+LENGTH_KIND: str = "Length"                  # type(com_object).__name__
+LENGTH_MAGNITUDE: str = "Length"             # CreateDimension의 iMagnitude
 MILLIMETRE: str = "mm"
 SUPPORTED_LENGTH_UNITS: frozenset[str] = frozenset({MILLIMETRE})
+NAME_SEPARATOR: str = "\\"
+
+# 모듈 수준 validator. create/ensure와 set이 공유한다.
+def validate_length_unit(unit: str) -> None: ...      # UnsupportedUnitError
+def validate_length_value(value: float) -> float: ... # ParameterTypeError, float 반환
+def validate_parameter_name(name: str) -> str: ...    # ParameterNameError
 
 @dataclasses.dataclass(frozen=True)
 class ParameterInfo:
     name: str
+    short_name: str
     kind: str
     value: Any
     unit: str | None
@@ -316,7 +438,10 @@ class Parameter:
     def com_object(self) -> Any: ...
 
     @property
-    def name(self) -> str: ...
+    def name(self) -> str: ...               # CATIA가 준 값 그대로 (정규화될 수 있음)
+
+    @property
+    def short_name(self) -> str: ...         # 마지막 NAME_SEPARATOR 뒤
 
     @property
     def kind(self) -> str: ...               # type(com_object).__name__
@@ -362,6 +487,11 @@ class ParameterCollection:
     def names(self) -> list[str]: ...
     def get(self, name: str) -> Parameter: ...
     def set(self, name: str, value: float, unit: str = MILLIMETRE) -> None: ...
+    def create_length(self, name: str, value: float,
+                      unit: str = MILLIMETRE) -> Parameter: ...
+    def ensure_length(self, name: str, value: float,
+                      unit: str = MILLIMETRE) -> Parameter: ...
+    def remove(self, name: str) -> None: ...   # Parameters.Remove(정규화 이름)
 
     def __len__(self) -> int: ...
     def __iter__(self) -> Iterator[Parameter]: ...
@@ -386,25 +516,131 @@ set(...)   -> get(name).set(value, unit)      # update는 호출하지 않는다
 __contains__ -> get()이 성공하면 True, ParameterNotFoundError면 False
 ```
 
-### 6.7 `auto_3dx/__init__.py`
+### 6.9 `auto_3dx/geometry/sketch.py`
 
 ```python
-__all__ = [
-    "Catia",
-    "Part",
-    "Parameter",
-    "ParameterCollection",
-    "ParameterInfo",
-    "Auto3dxError",
-    "CatiaConnectionError",
-    "Com3dxNotFoundError",
-    "NoActiveEditorError",
-    "NoActivePartError",
-    "ParameterNotFoundError",
-    "ParameterTypeError",
-    "PartUpdateError",
-    "UnsupportedUnitError",
-]
+SUPPORT_XY: str = "XY"
+SUPPORT_YZ: str = "YZ"
+SUPPORT_ZX: str = "ZX"
+SUPPORTED_SKETCH_SUPPORTS: frozenset[str] = frozenset({SUPPORT_XY, SUPPORT_YZ, SUPPORT_ZX})
+AXIS_TOLERANCE: float = 1e-9
+
+class SketchEditor:
+    """Only valid inside `Sketch.edit()`. Wraps Factory2D."""
+    @property
+    def com_object(self) -> Any: ...
+    def point(self, x: float, y: float) -> Any: ...
+    def line(self, x1: float, y1: float, x2: float, y2: float) -> Any: ...
+    def circle(self, center_x: float, center_y: float, radius: float) -> Any: ...
+    def rectangle(
+        self,
+        width: float,
+        height: float,
+        origin_x: float = 0.0,
+        origin_y: float = 0.0,
+    ) -> list[Any]: ...
+
+class Sketch:
+    def __init__(self, com_object: Any) -> None: ...
+    @property
+    def com_object(self) -> Any: ...
+    @property
+    def name(self) -> str: ...
+    def rename(self, name: str) -> None: ...
+    def support(self) -> str | None: ...        # "XY"/"YZ"/"ZX", None if unrecognised
+    def axis_data(self) -> tuple[float, ...]: ...
+    def element_names(self) -> list[str]: ...
+    @contextlib.contextmanager
+    def edit(self) -> Iterator[SketchEditor]: ...   # CloseEdition in finally
+    def __repr__(self) -> str: ...
+
+class SketchCollection:
+    # needs Part for OriginElements + MainBody; selection only for remove()
+    def __init__(self, part_com_object: Any, selection: Any = None) -> None: ...
+    @property
+    def count(self) -> int: ...
+    def list(self) -> list[Sketch]: ...
+    def names(self) -> list[str]: ...
+    def get(self, name: str) -> Sketch: ...          # SketchNotFoundError
+    def create(self, name: str, support: str = SUPPORT_XY) -> Sketch: ...
+    def ensure(self, name: str, support: str = SUPPORT_XY) -> Sketch: ...
+    def remove(self, name: str) -> None: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[Sketch]: ...
+    def __contains__(self, name: object) -> bool: ...
+```
+
+`edit()`은 `OpenEdition()`으로 얻은 `Factory2D`를 넘기고, 예외가 나도 `finally`에서
+`CloseEdition()`을 호출한다. 열린 편집 상태를 남기면 안 된다.
+
+`create()`는 `Sketches.Add(plane)` 직후 `Name`을 설정한다(이름 쓰기는 실측 가능).
+이름이 이미 있으면 `SketchAlreadyExistsError`.
+
+### 6.10 `auto_3dx/geometry/part_design.py`
+
+```python
+LENGTH_TOLERANCE: float = 1e-9
+
+class Pad:
+    def __init__(self, com_object: Any) -> None: ...
+    @property
+    def com_object(self) -> Any: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def height(self) -> float: ...               # FirstLimit.Dimension.Value
+    def set_height(self, height: float, unit: str = MILLIMETRE) -> None: ...
+    def sketch(self) -> Sketch: ...              # Pad.Sketch
+    def __repr__(self) -> str: ...
+
+class PartDesign:
+    # selection only for remove_pad()
+    def __init__(self, part_com_object: Any, selection: Any = None) -> None: ...
+    @property
+    def pads(self) -> list[Pad]: ...
+    def get_pad(self, name: str) -> Pad: ...     # FeatureNotFoundError
+    def create_pad(self, name: str, sketch: Sketch, height: float,
+                   unit: str = MILLIMETRE) -> Pad: ...
+    def ensure_pad(self, name: str, sketch: Sketch, height: float,
+                   unit: str = MILLIMETRE) -> Pad: ...
+    def remove_pad(self, name: str) -> None: ...
+```
+
+`Part`는 다음을 추가로 노출한다(둘 다 최초 접근 시 생성 후 캐시):
+
+```python
+part.sketches      -> SketchCollection
+part.part_design   -> PartDesign
+```
+
+추가 예외:
+
+```text
+SketchNotFoundError(Auto3dxError)
+SketchAlreadyExistsError(Auto3dxError)
+SketchSupportMismatchError(Auto3dxError)
+FeatureNotFoundError(Auto3dxError)
+FeatureConflictError(Auto3dxError)
+UnsupportedSupportError(Auto3dxError)
+```
+
+### 6.7 `auto_3dx/__init__.py`
+
+공개 이름은 wrapper 타입 전체와 예외 계층 전체다.
+
+```python
+# wrappers
+Catia, Part, Parameter, ParameterCollection, ParameterInfo,
+Sketch, SketchCollection, SketchEditor, Pad, PartDesign
+
+# errors
+Auto3dxError, CatiaConnectionError, Com3dxNotFoundError,
+FeatureConflictError, FeatureNotFoundError,
+NoActiveEditorError, NoActivePartError,
+ParameterAlreadyExistsError, ParameterNameError, ParameterNotFoundError,
+ParameterTypeError, PartUpdateError,
+SketchAlreadyExistsError, SketchNotFoundError, SketchSupportMismatchError,
+UnsupportedSupportError, UnsupportedUnitError
 ```
 
 ### 6.8 목표 사용 예

@@ -1,8 +1,9 @@
 """Wrapper around the 3DEXPERIENCE ``Part`` COM object.
 
 :class:`Part` exposes only the verified surface of the CATIA ``Part`` object:
-its name, its parameters, and ``Update()``. Bodies, Sketches, Relations, and
-other unverified members are intentionally not wrapped here.
+its name, its parameters, its sketches, its Part Design features, and
+``Update()``. Relations, ``HybridShapeFactory``, ``IsUpToDate`` and other
+unverified members are intentionally not wrapped here.
 """
 
 from typing import Any
@@ -10,6 +11,8 @@ from typing import Any
 import pywintypes
 
 from auto_3dx.errors import Auto3dxError, PartUpdateError
+from auto_3dx.geometry.part_design import PartDesign
+from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.parameters.collection import ParameterCollection
 
 
@@ -38,14 +41,22 @@ class Part:
         com_object: Read-only access to the raw ``Part`` COM object.
     """
 
-    def __init__(self, com_object: Any) -> None:
-        """Store the raw Part COM object and reset the cached parameter collection.
+    def __init__(self, com_object: Any, selection: Any = None) -> None:
+        """Store the raw Part COM object and reset the cached collections.
 
         Args:
             com_object: The raw CATIA ``Part`` COM object.
+            selection: The raw CATIA ``Selection`` COM object from the editor
+                that is editing this Part. Only geometry deletion needs it,
+                because neither ``Sketches`` nor ``Shapes`` has a ``Remove``
+                method. :meth:`Catia.active_part` supplies it; a Part
+                constructed directly without one can still read and create.
         """
         self._com_object = com_object
+        self._selection = selection
         self._parameters: ParameterCollection | None = None
+        self._sketches: SketchCollection | None = None
+        self._part_design: PartDesign | None = None
 
     @property
     def com_object(self) -> Any:
@@ -88,6 +99,28 @@ class Part:
                 ) from error
             self._parameters = ParameterCollection(parameters_com_object)
         return self._parameters
+
+    @property
+    def sketches(self) -> SketchCollection:
+        """SketchCollection: The sketches on the Part's main body.
+
+        Built on first access and cached afterwards. The collection is given the
+        raw ``Part`` object because it needs both ``OriginElements`` (for the
+        support planes) and ``MainBody`` (for the sketches themselves).
+        """
+        if self._sketches is None:
+            self._sketches = SketchCollection(self._com_object, self._selection)
+        return self._sketches
+
+    @property
+    def part_design(self) -> PartDesign:
+        """PartDesign: The Part Design features (pads) on the Part's main body.
+
+        Built on first access and cached afterwards.
+        """
+        if self._part_design is None:
+            self._part_design = PartDesign(self._com_object, self._selection)
+        return self._part_design
 
     def update(self) -> None:
         """Recompute the Part by calling ``Part.Update()``.

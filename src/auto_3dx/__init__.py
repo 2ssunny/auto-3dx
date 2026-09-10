@@ -6,6 +6,8 @@ from auto_3dx.errors import (
     Auto3dxError,
     CatiaConnectionError,
     Com3dxNotFoundError,
+    FeatureConflictError,
+    FeatureNotFoundError,
     NoActiveEditorError,
     NoActivePartError,
     ParameterAlreadyExistsError,
@@ -13,8 +15,14 @@ from auto_3dx.errors import (
     ParameterNotFoundError,
     ParameterTypeError,
     PartUpdateError,
+    SketchAlreadyExistsError,
+    SketchNotFoundError,
+    SketchSupportMismatchError,
+    UnsupportedSupportError,
     UnsupportedUnitError,
 )
+from auto_3dx.geometry.part_design import Pad, PartDesign
+from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
 from auto_3dx.parameters.collection import ParameterCollection
 from auto_3dx.parameters.parameter import Parameter, ParameterInfo
 
@@ -24,9 +32,16 @@ __all__ = [
     "Parameter",
     "ParameterCollection",
     "ParameterInfo",
+    "Pad",
+    "PartDesign",
+    "Sketch",
+    "SketchCollection",
+    "SketchEditor",
     "Auto3dxError",
     "CatiaConnectionError",
     "Com3dxNotFoundError",
+    "FeatureConflictError",
+    "FeatureNotFoundError",
     "NoActiveEditorError",
     "NoActivePartError",
     "ParameterAlreadyExistsError",
@@ -34,5 +49,9 @@ __all__ = [
     "ParameterNotFoundError",
     "ParameterTypeError",
     "PartUpdateError",
+    "SketchAlreadyExistsError",
+    "SketchNotFoundError",
+    "SketchSupportMismatchError",
+    "UnsupportedSupportError",
     "UnsupportedUnitError",
 ]

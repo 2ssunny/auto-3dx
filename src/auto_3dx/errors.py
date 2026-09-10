@@ -50,3 +50,40 @@ class UnsupportedUnitError(Auto3dxError):
 
 class PartUpdateError(Auto3dxError):
     """Raised when Part.Update() fails."""
+
+
+class SketchNotFoundError(Auto3dxError):
+    """Raised when a sketch cannot be found by name in a Sketches collection."""
+
+
+class SketchAlreadyExistsError(Auto3dxError):
+    """Raised when creating a sketch whose name is already taken.
+
+    CATIA does not guard against duplicate sketch names, so the library
+    refuses instead of creating a second, indistinguishable sketch.
+    """
+
+
+class SketchSupportMismatchError(Auto3dxError):
+    """Raised when an existing sketch's plane does not match the requested support.
+
+    A name match alone is not enough to reuse a sketch: its axis data (from
+    `GetAbsoluteAxisData`) must also match the requested support, or the
+    caller would silently draw on the wrong plane.
+    """
+
+
+class FeatureNotFoundError(Auto3dxError):
+    """Raised when a Part Design feature (e.g. a Pad) cannot be found by name."""
+
+
+class FeatureConflictError(Auto3dxError):
+    """Raised when an existing feature conflicts with a requested operation.
+
+    For example, a pad whose name matches but whose underlying sketch differs
+    from the one requested.
+    """
+
+
+class UnsupportedSupportError(Auto3dxError):
+    """Raised when a sketch support string is not one of the supported planes."""

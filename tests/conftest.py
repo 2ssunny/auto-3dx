@@ -152,12 +152,31 @@ class Part:
     an immediate, loud failure if that rule is ever broken.
     """
 
-    def __init__(self, name: str = "Part1", parameters: Any = None) -> None:
+    def __init__(
+        self,
+        name: str = "Part1",
+        parameters: Any = None,
+        origin_elements: Any = None,
+        main_body: Any = None,
+        shape_factory: Any = None,
+    ) -> None:
         self.Name = name
         self._parameters = parameters
         self.parameters_access_count = 0
         self.update_calls = 0
         self.update_exception: BaseException | None = None
+        # Geometry layer additions (docs/conventions.md sections 6.9/6.10).
+        # All default to freshly built fakes so existing callers that only
+        # pass `name`/`parameters` are unaffected.
+        self.OriginElements = origin_elements if origin_elements is not None else OriginElements()
+        self.MainBody = main_body if main_body is not None else Body()
+        # Wire the factory to this body's Shapes so a created pad is findable,
+        # as it is in a real session.
+        self.ShapeFactory = (
+            shape_factory
+            if shape_factory is not None
+            else ShapeFactory(shapes=self.MainBody.Shapes)
+        )
 
     @property
     def Parameters(self) -> Any:
@@ -180,12 +199,48 @@ class VPMRootOccurrence:
         self.Name = name
 
 
+class Selection:
+    """Fake CATIA `Selection`, as returned by `Editor.Selection`.
+
+    This is the ONLY verified way to delete geometry: neither `Sketches` nor
+    `Shapes` has a `Remove` method. The fake records the call order so tests can
+    assert the `Clear` -> `Add` -> `Delete` sequence, and `deleted` holds the
+    objects that were actually removed.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.added: list[Any] = []
+        self.deleted: list[Any] = []
+        self.delete_exception: BaseException | None = None
+
+    def Clear(self) -> None:
+        self.calls.append("Clear")
+        self.added.clear()
+
+    def Add(self, com_object: Any) -> None:
+        self.calls.append("Add")
+        self.added.append(com_object)
+
+    def Delete(self) -> None:
+        self.calls.append("Delete")
+        if self.delete_exception is not None:
+            raise self.delete_exception
+        self.deleted.extend(self.added)
+
+
 class Editor:
     """Fake CATIA `Editor`, as returned by `Application.ActiveEditor`."""
 
-    def __init__(self, active_object: Any = None, name: str = "Editor1") -> None:
+    def __init__(
+        self,
+        active_object: Any = None,
+        name: str = "Editor1",
+        selection: Any = None,
+    ) -> None:
         self.ActiveObject = active_object
         self.Name = name
+        self.Selection = selection if selection is not None else Selection()
 
 
 class Application:
@@ -260,3 +315,370 @@ def fake_length(length_parameter_factory: Callable[..., Length]) -> Length:
 def fake_real(real_parameter_factory: Callable[..., Real]) -> Real:
     """A single fake non-Length parameter with default name/value."""
     return real_parameter_factory()
+
+
+# ---------------------------------------------------------------------------
+# Geometry fakes (docs/conventions.md sections 1.2, 1.3, 6.9, 6.10).
+#
+# These mimic the COM objects touched by the sketch/pad ("geometry") layer.
+# As with the parameter fakes above, "kind" identification is purely by
+# `type(obj).__name__`, so plain classes are sufficient fakes.
+# ---------------------------------------------------------------------------
+
+XY_AXIS_DATA: tuple[float, ...] = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+"""9-tuple `GetAbsoluteAxisData` returns for a sketch built on `PlaneXY` (verified)."""
+
+YZ_AXIS_DATA: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+"""9-tuple `GetAbsoluteAxisData` returns for a sketch built on `PlaneYZ` (verified)."""
+
+ZX_AXIS_DATA: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0)
+"""9-tuple `GetAbsoluteAxisData` returns for a sketch built on `PlaneZX` (verified)."""
+
+UNRECOGNISED_AXIS_DATA: tuple[float, ...] = (1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+"""An axis frame matching none of the three verified supports (offset origin)."""
+
+
+class AnyObject:
+    """Fake CATIA `AnyObject` wrapper.
+
+    Real `OriginElements` planes come back typed this way, NOT as `Plane`
+    (docs/conventions.md 1.2). `type(obj).__name__ == "AnyObject"`, matching
+    the real, unhelpful wrapper type CATIA hands back for them.
+    """
+
+    def __init__(self, name: str = "xy plane") -> None:
+        self.Name = name
+
+
+class OriginElements:
+    """Fake CATIA `OriginElements`, exposing the three origin planes.
+
+    Each plane is an `AnyObject` (never a `Plane`), and must be looked up by
+    attribute (`PlaneXY`/`PlaneYZ`/`PlaneZX`), never by type.
+    """
+
+    def __init__(self) -> None:
+        self.PlaneXY = AnyObject("xy plane")
+        self.PlaneYZ = AnyObject("yz plane")
+        self.PlaneZX = AnyObject("zx plane")
+
+
+_PLANE_NAME_TO_AXIS_DATA: dict[str, tuple[float, ...]] = {
+    "xy plane": XY_AXIS_DATA,
+    "yz plane": YZ_AXIS_DATA,
+    "zx plane": ZX_AXIS_DATA,
+}
+
+
+class Line2D:
+    """Fake CATIA `Line2D`, as returned by `Factory2D.CreateLine`."""
+
+    def __init__(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        self.X1, self.Y1, self.X2, self.Y2 = x1, y1, x2, y2
+
+
+class Circle2D:
+    """Fake CATIA `Circle2D`, as returned by `Factory2D.CreateClosedCircle`."""
+
+    def __init__(self, center_x: float, center_y: float, radius: float) -> None:
+        self.CenterX, self.CenterY, self.Radius = center_x, center_y, radius
+
+
+class Point2D:
+    """Fake CATIA `Point2D`, as returned by `Factory2D.CreatePoint`."""
+
+    def __init__(self, x: float, y: float) -> None:
+        self.X, self.Y = x, y
+
+
+class Factory2D:
+    """Fake CATIA `Factory2D`, as returned by `Sketch.OpenEdition()`.
+
+    Records every `CreateLine` / `CreateClosedCircle` / `CreatePoint` call
+    (in argument order) so tests can assert the exact coordinates emitted.
+    """
+
+    def __init__(self) -> None:
+        self.line_calls: list[tuple[float, float, float, float]] = []
+        self.circle_calls: list[tuple[float, float, float]] = []
+        self.point_calls: list[tuple[float, float]] = []
+
+    def CreateLine(self, iX1: float, iY1: float, iX2: float, iY2: float) -> Line2D:
+        self.line_calls.append((iX1, iY1, iX2, iY2))
+        return Line2D(iX1, iY1, iX2, iY2)
+
+    def CreateClosedCircle(self, iCx: float, iCy: float, iR: float) -> Circle2D:
+        self.circle_calls.append((iCx, iCy, iR))
+        return Circle2D(iCx, iCy, iR)
+
+    def CreatePoint(self, iX: float, iY: float) -> Point2D:
+        self.point_calls.append((iX, iY))
+        return Point2D(iX, iY)
+
+
+class GeometricElements:
+    """Fake CATIA `GeometricElements` collection, exposed by a `Sketch`."""
+
+    def __init__(self, items: list[Any] | None = None) -> None:
+        self._items: list[Any] = list(items or [])
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def Item(self, index: int) -> Any:
+        position = index - 1
+        if 0 <= position < len(self._items):
+            return self._items[position]
+        raise make_com_error()
+
+
+class Sketch:
+    """Fake CATIA `Sketch`.
+
+    `Name` is writable, matching the real object. `GetAbsoluteAxisData`
+    returns whichever 9-tuple the sketch was constructed with, mimicking one
+    of the three verified support frames (or an unrecognised one). Every
+    `OpenEdition`/`CloseEdition` call is counted so tests can pin the
+    open-edition lifecycle (docs/conventions.md 6.9: `edit()` must always
+    close, even when the caller's block raises).
+    """
+
+    def __init__(
+        self,
+        name: str = "Sketch.1",
+        axis_data: tuple[float, ...] = XY_AXIS_DATA,
+    ) -> None:
+        self.Name = name
+        self._axis_data = axis_data
+        self.open_edition_calls = 0
+        self.close_edition_calls = 0
+        self.factory2d = Factory2D()
+        self.GeometricElements = GeometricElements()
+
+    def GetAbsoluteAxisData(self, oAxisData: Any = None) -> tuple[float, ...]:
+        return self._axis_data
+
+    def OpenEdition(self) -> Factory2D:
+        self.open_edition_calls += 1
+        return self.factory2d
+
+    def CloseEdition(self) -> None:
+        self.close_edition_calls += 1
+
+
+class Sketches:
+    """Fake CATIA `Sketches` collection (1-based `Item`, `Count`, `Add`).
+
+    `Add(plane)` returns a new fake `Sketch` whose `GetAbsoluteAxisData`
+    matches the plane passed in, keyed off the plane's `Name` -- exactly the
+    only signal a real `AnyObject` plane carries (docs/conventions.md 1.2).
+    Every call is recorded in `add_calls` so tests can assert which plane was
+    used to create a sketch.
+    """
+
+    def __init__(self, items: list[tuple[str, Any]] | None = None) -> None:
+        self._items: list[tuple[str, Any]] = list(items or [])
+        self.add_calls: list[Any] = []
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def Item(self, key: Any) -> Any:
+        if isinstance(key, int):
+            index = key - 1
+            if 0 <= index < len(self._items):
+                return self._items[index][1]
+            raise make_com_error()
+        # Look up by the sketch's CURRENT Name, not the key recorded at Add
+        # time: `SketchCollection.create` renames the sketch right after adding
+        # it, so a stored key would immediately go stale.
+        for _, obj in self._items:
+            if getattr(obj, "Name", None) == key:
+                return obj
+        raise make_com_error()
+
+    def Remove_is_deliberately_absent(self) -> None:
+        """`Sketches` has no `Remove` in the real type library (conventions 1.2).
+
+        Named so it cannot be mistaken for the COM method. Deletion goes through
+        `Editor.Selection`; see tests/unit/test_geometry_deletion.py.
+        """
+
+    def _discard(self, com_object: Any) -> None:
+        """Drops a sketch, as a selection-based delete does. Test-only helper."""
+        self._items = [entry for entry in self._items if entry[1] is not com_object]
+
+    def Add(self, plane: Any) -> Sketch:
+        self.add_calls.append(plane)
+        axis_data = _PLANE_NAME_TO_AXIS_DATA.get(
+            getattr(plane, "Name", None), UNRECOGNISED_AXIS_DATA
+        )
+        sketch = Sketch(name=f"Sketch.{len(self._items) + 1}", axis_data=axis_data)
+        self._items.append((sketch.Name, sketch))
+        return sketch
+
+
+class Dimension:
+    """Fake CATIA `Dimension`, as exposed by `Limit.Dimension`."""
+
+    def __init__(self, value: float = 0.0) -> None:
+        self.Value = value
+
+
+class Limit:
+    """Fake CATIA `Limit`, as exposed by `Pad.FirstLimit`/`Pad.SecondLimit`."""
+
+    def __init__(self, value: float = 0.0) -> None:
+        self.Dimension = Dimension(value)
+
+
+class Pad:
+    """Fake CATIA `Pad`, as returned by `ShapeFactory.AddNewPad`.
+
+    `FirstLimit.Dimension.Value` carries the pad's height, matching the real
+    object (docs/conventions.md 1.2: verified `Value == 15.0` for a pad made
+    with `AddNewPad(sketch, 15)`).
+    """
+
+    def __init__(self, name: str = "Pad.1", sketch: Any = None, height: float = 0.0) -> None:
+        self.Name = name
+        self.Sketch = sketch
+        self.FirstLimit = Limit(height)
+        self.SecondLimit = Limit(0.0)
+
+
+class Shapes:
+    """Fake CATIA `Shapes` collection (1-based `Item`, `Count`), holding Pads."""
+
+    def __init__(self, items: list[tuple[str, Any]] | None = None) -> None:
+        self._items: list[tuple[str, Any]] = list(items or [])
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def Item(self, key: Any) -> Any:
+        if isinstance(key, int):
+            index = key - 1
+            if 0 <= index < len(self._items):
+                return self._items[index][1]
+            raise make_com_error()
+        # By current Name: `create_pad` renames the pad after `AddNewPad`.
+        for _, obj in self._items:
+            if getattr(obj, "Name", None) == key:
+                return obj
+        raise make_com_error()
+
+    def _append(self, com_object: Any) -> None:
+        """Registers a pad, as the real `AddNewPad` does. Test-only helper."""
+        self._items.append((getattr(com_object, "Name", ""), com_object))
+
+    def _discard(self, com_object: Any) -> None:
+        """Drops a pad, as a selection-based delete does. Test-only helper."""
+        self._items = [entry for entry in self._items if entry[1] is not com_object]
+
+
+class Body:
+    """Fake CATIA `Body` (`Part.MainBody`), exposing `Sketches` and `Shapes`."""
+
+    def __init__(self, sketches: Any = None, shapes: Any = None) -> None:
+        self.Sketches = sketches if sketches is not None else Sketches()
+        self.Shapes = shapes if shapes is not None else Shapes()
+
+
+class ShapeFactory:
+    """Fake CATIA `ShapeFactory`.
+
+    Records every `AddNewPad` call (sketch, height) so tests can assert the
+    exact arguments -- in particular, that the height arrived as a `float`
+    and that the raw COM sketch object (not a wrapper) was passed.
+    """
+
+    def __init__(self, shapes: Any = None) -> None:
+        self.add_new_pad_calls: list[tuple[Any, float]] = []
+        self._pad_count = 0
+        # The real AddNewPad registers the pad in the body's Shapes collection,
+        # which is how `PartDesign.get_pad` finds it afterwards.
+        self.shapes = shapes
+
+    def AddNewPad(self, iSketch: Any, iHeight: float) -> Pad:
+        self.add_new_pad_calls.append((iSketch, iHeight))
+        self._pad_count += 1
+        pad = Pad(name=f"Pad.{self._pad_count}", sketch=iSketch, height=iHeight)
+        if self.shapes is not None:
+            self.shapes._append(pad)
+        return pad
+
+
+@pytest.fixture
+def any_object_factory() -> Callable[..., AnyObject]:
+    """Returns a factory for fake `AnyObject` planes."""
+    return AnyObject
+
+
+@pytest.fixture
+def origin_elements_factory() -> Callable[..., OriginElements]:
+    """Returns a factory for fake `OriginElements`."""
+    return OriginElements
+
+
+@pytest.fixture
+def factory2d_factory() -> Callable[..., Factory2D]:
+    """Returns a factory for fake `Factory2D` objects."""
+    return Factory2D
+
+
+@pytest.fixture
+def sketch_factory() -> Callable[..., Sketch]:
+    """Returns a factory for fake `Sketch` objects."""
+    return Sketch
+
+
+@pytest.fixture
+def sketches_factory() -> Callable[..., Sketches]:
+    """Returns a factory for fake `Sketches` collections."""
+    return Sketches
+
+
+@pytest.fixture
+def dimension_factory() -> Callable[..., Dimension]:
+    """Returns a factory for fake `Dimension` objects."""
+    return Dimension
+
+
+@pytest.fixture
+def limit_factory() -> Callable[..., Limit]:
+    """Returns a factory for fake `Limit` objects."""
+    return Limit
+
+
+@pytest.fixture
+def pad_factory() -> Callable[..., Pad]:
+    """Returns a factory for fake `Pad` objects."""
+    return Pad
+
+
+@pytest.fixture
+def shapes_factory() -> Callable[..., Shapes]:
+    """Returns a factory for fake `Shapes` collections."""
+    return Shapes
+
+
+@pytest.fixture
+def body_factory() -> Callable[..., Body]:
+    """Returns a factory for fake `Body` objects (`Part.MainBody`)."""
+    return Body
+
+
+@pytest.fixture
+def shape_factory_factory() -> Callable[..., ShapeFactory]:
+    """Returns a factory for fake `ShapeFactory` objects."""
+    return ShapeFactory
+
+
+@pytest.fixture
+def selection_factory() -> Callable[..., Selection]:
+    """Returns a factory for fake `Selection` objects."""
+    return Selection

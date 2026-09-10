@@ -1,0 +1,674 @@
+"""Wrappers around CATIA `Sketch` and `Sketches` COM objects.
+
+A `Sketch` is a 2D profile attached to one of the three origin planes
+(`OriginElements.PlaneXY` / `PlaneYZ` / `PlaneZX`). Those planes are wrapped
+as generic `AnyObject` COM objects, not a dedicated `Plane` type, so a plane
+is never identified by `type(obj).__name__`; instead callers pass one of the
+`SUPPORT_*` strings and this module resolves it to the matching
+`OriginElements` attribute.
+
+`Sketch` itself has no support/plane property. Which plane a sketch is on can
+only be recovered by comparing `GetAbsoluteAxisData` against the three
+verified reference frames (see `docs/conventions.md` section 1.2).
+"""
+
+import contextlib
+import math
+from collections.abc import Iterator
+from typing import Any
+
+import pywintypes
+
+from auto_3dx.errors import (
+    Auto3dxError,
+    SketchAlreadyExistsError,
+    SketchNotFoundError,
+    SketchSupportMismatchError,
+    UnsupportedSupportError,
+)
+from auto_3dx.geometry.deletion import delete_via_selection
+from auto_3dx.parameters.parameter import validate_length_value, validate_parameter_name
+
+SUPPORT_XY: str = "XY"
+"""Support string for `OriginElements.PlaneXY`."""
+
+SUPPORT_YZ: str = "YZ"
+"""Support string for `OriginElements.PlaneYZ`."""
+
+SUPPORT_ZX: str = "ZX"
+"""Support string for `OriginElements.PlaneZX`."""
+
+SUPPORTED_SKETCH_SUPPORTS: frozenset[str] = frozenset({SUPPORT_XY, SUPPORT_YZ, SUPPORT_ZX})
+"""The only support strings a sketch can be created on or matched against."""
+
+AXIS_TOLERANCE: float = 1e-9
+"""Absolute tolerance used to compare `GetAbsoluteAxisData` results with `math.isclose`."""
+
+_AXIS_DATA_SEED: list[float] = [0.0] * 9
+"""Seed buffer passed to `GetAbsoluteAxisData`, which returns the filled 9-tuple."""
+
+_PLANE_ATTRIBUTE_BY_SUPPORT: dict[str, str] = {
+    SUPPORT_XY: "PlaneXY",
+    SUPPORT_YZ: "PlaneYZ",
+    SUPPORT_ZX: "PlaneZX",
+}
+"""Maps a support string to the `OriginElements` attribute holding that plane."""
+
+_AXIS_DATA_BY_SUPPORT: dict[str, tuple[float, ...]] = {
+    SUPPORT_XY: (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+    SUPPORT_YZ: (0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    SUPPORT_ZX: (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0),
+}
+"""Verified `GetAbsoluteAxisData` reference frames (origin + X axis + Y axis) per support."""
+
+
+def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
+    """Converts an unmapped `pywintypes.com_error` into an `Auto3dxError`.
+
+    Args:
+        error: The COM error to convert.
+
+    Returns:
+        An `Auto3dxError` whose message includes the failure's HRESULT in
+        hexadecimal form.
+    """
+    hresult = error.args[0] if error.args else None
+    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
+    return Auto3dxError(f"Unexpected COM failure (HRESULT={hresult_hex}).")
+
+
+def _axis_data_matches(actual: tuple[float, ...], expected: tuple[float, ...]) -> bool:
+    """Compares two 9-tuples of axis data within `AXIS_TOLERANCE`.
+
+    Args:
+        actual: The axis data read from a sketch.
+        expected: The reference axis data for a support.
+
+    Returns:
+        `True` if every component is within `AXIS_TOLERANCE` of its counterpart.
+    """
+    return len(actual) == len(expected) and all(
+        math.isclose(a, b, abs_tol=AXIS_TOLERANCE) for a, b in zip(actual, expected)
+    )
+
+
+class SketchEditor:
+    """Wraps a `Factory2D` obtained from `Sketch.OpenEdition()`.
+
+    Only valid for the lifetime of the `Sketch.edit()` context manager that
+    created it. Every method here is a thin, validated pass-through to the
+    verified `Factory2D` COM methods (`CreatePoint`, `CreateLine`,
+    `CreateClosedCircle`) -- no constraints, relations, or other unverified
+    2D geometry APIs are exposed.
+    """
+
+    def __init__(self, com_object: Any) -> None:
+        """Initializes the wrapper.
+
+        Args:
+            com_object: The raw `Factory2D` COM object to wrap.
+        """
+        self._com_object = com_object
+
+    @property
+    def com_object(self) -> Any:
+        """Returns the raw underlying COM object.
+
+        This is an escape hatch for callers that need direct COM access, and
+        is useful in tests.
+
+        Returns:
+            The wrapped raw COM object.
+        """
+        return self._com_object
+
+    def point(self, x: float, y: float) -> Any:
+        """Creates a 2D point in the sketch.
+
+        Args:
+            x: The point's X coordinate, in millimetres.
+            y: The point's Y coordinate, in millimetres.
+
+        Returns:
+            The raw `Point2D` COM object.
+
+        Raises:
+            ParameterTypeError: If `x` or `y` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        x_value = validate_length_value(x)
+        y_value = validate_length_value(y)
+        try:
+            return self._com_object.CreatePoint(x_value, y_value)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def line(self, x1: float, y1: float, x2: float, y2: float) -> Any:
+        """Creates a 2D line segment in the sketch.
+
+        Args:
+            x1: The start point's X coordinate, in millimetres.
+            y1: The start point's Y coordinate, in millimetres.
+            x2: The end point's X coordinate, in millimetres.
+            y2: The end point's Y coordinate, in millimetres.
+
+        Returns:
+            The raw `Line2D` COM object.
+
+        Raises:
+            ParameterTypeError: If any coordinate is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        x1_value = validate_length_value(x1)
+        y1_value = validate_length_value(y1)
+        x2_value = validate_length_value(x2)
+        y2_value = validate_length_value(y2)
+        try:
+            return self._com_object.CreateLine(x1_value, y1_value, x2_value, y2_value)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def circle(self, center_x: float, center_y: float, radius: float) -> Any:
+        """Creates a closed 2D circle in the sketch.
+
+        Args:
+            center_x: The circle centre's X coordinate, in millimetres.
+            center_y: The circle centre's Y coordinate, in millimetres.
+            radius: The circle radius, in millimetres.
+
+        Returns:
+            The raw `Circle2D` COM object.
+
+        Raises:
+            ParameterTypeError: If `center_x`, `center_y`, or `radius` is not an
+                `int`/`float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        center_x_value = validate_length_value(center_x)
+        center_y_value = validate_length_value(center_y)
+        radius_value = validate_length_value(radius)
+        try:
+            return self._com_object.CreateClosedCircle(
+                center_x_value, center_y_value, radius_value
+            )
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def rectangle(
+        self,
+        width: float,
+        height: float,
+        origin_x: float = 0.0,
+        origin_y: float = 0.0,
+    ) -> "list[Any]":
+        """Creates a closed rectangular profile from four lines.
+
+        The rectangle spans from `(origin_x, origin_y)` to
+        `(origin_x + width, origin_y + height)`. A closed, unconstrained
+        profile like this one is verified to pad successfully, so no
+        constraints are added.
+
+        Args:
+            width: The rectangle's width along X, in millimetres.
+            height: The rectangle's height along Y, in millimetres.
+            origin_x: The X coordinate of the rectangle's lower-left corner.
+                Defaults to `0.0`.
+            origin_y: The Y coordinate of the rectangle's lower-left corner.
+                Defaults to `0.0`.
+
+        Returns:
+            The four raw `Line2D` COM objects forming the closed loop, in
+            counter-clockwise order starting from `(origin_x, origin_y)`.
+
+        Raises:
+            ParameterTypeError: If any argument is not an `int`/`float` (or is
+                a `bool`).
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        width_value = validate_length_value(width)
+        height_value = validate_length_value(height)
+        origin_x_value = validate_length_value(origin_x)
+        origin_y_value = validate_length_value(origin_y)
+        far_x = origin_x_value + width_value
+        far_y = origin_y_value + height_value
+        return [
+            self.line(origin_x_value, origin_y_value, far_x, origin_y_value),
+            self.line(far_x, origin_y_value, far_x, far_y),
+            self.line(far_x, far_y, origin_x_value, far_y),
+            self.line(origin_x_value, far_y, origin_x_value, origin_y_value),
+        ]
+
+
+class Sketch:
+    """Wraps a raw CATIA `Sketch` COM object.
+
+    A sketch has no support/plane property of its own; `support()` derives it
+    by comparing `GetAbsoluteAxisData` against the verified reference frames
+    in `_AXIS_DATA_BY_SUPPORT`.
+    """
+
+    def __init__(self, com_object: Any) -> None:
+        """Initializes the wrapper.
+
+        Args:
+            com_object: The raw CATIA `Sketch` COM object to wrap.
+        """
+        self._com_object = com_object
+
+    @property
+    def com_object(self) -> Any:
+        """Returns the raw underlying COM object.
+
+        This is an escape hatch for callers that need direct COM access, and
+        is useful in tests.
+
+        Returns:
+            The wrapped raw COM object.
+        """
+        return self._com_object
+
+    @property
+    def name(self) -> str:
+        """Returns the sketch's name.
+
+        Returns:
+            The sketch's `Name`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return self._com_object.Name
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def rename(self, name: str) -> None:
+        """Renames the sketch.
+
+        `Sketch.Name` is verified writable; this is how `SketchCollection.create()`
+        names a sketch right after `Sketches.Add(plane)`.
+
+        Args:
+            name: The new name. Must be non-empty, without surrounding
+                whitespace, and must not contain `"\\"`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        try:
+            self._com_object.Name = name
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def axis_data(self) -> "tuple[float, ...]":
+        """Reads the sketch's absolute axis data.
+
+        Returns:
+            The 9-tuple `(origin_x, origin_y, origin_z, x_axis_x, x_axis_y,
+            x_axis_z, y_axis_x, y_axis_y, y_axis_z)` returned by
+            `GetAbsoluteAxisData`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return tuple(self._com_object.GetAbsoluteAxisData(list(_AXIS_DATA_SEED)))
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def support(self) -> str | None:
+        """Derives which origin plane this sketch is attached to.
+
+        Compares `axis_data()` against the verified reference frames for
+        `SUPPORT_XY`/`SUPPORT_YZ`/`SUPPORT_ZX` using `math.isclose` and
+        `AXIS_TOLERANCE`.
+
+        Returns:
+            `SUPPORT_XY`, `SUPPORT_YZ`, or `SUPPORT_ZX` on a match, or `None`
+            if the sketch's axis frame does not match any of them (for
+            example, a sketch on a user-made plane).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        actual = self.axis_data()
+        for support, reference in _AXIS_DATA_BY_SUPPORT.items():
+            if _axis_data_matches(actual, reference):
+                return support
+        return None
+
+    def element_names(self) -> "list[str]":
+        """Lists the names of this sketch's geometric elements.
+
+        Uses the same 1-based `Count`/`Item(i)` collection protocol already
+        verified for `Parameters` (`docs/conventions.md` section 1.1), applied
+        to the sketch's `GeometricElements` collection.
+
+        Returns:
+            The `Name` of each item in `GeometricElements`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            elements = self._com_object.GeometricElements
+            count = elements.Count
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        names: list[str] = []
+        for index in range(1, count + 1):
+            try:
+                names.append(elements.Item(index).Name)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        return names
+
+    @contextlib.contextmanager
+    def edit(self) -> Iterator[SketchEditor]:
+        """Opens the sketch for editing and yields a `SketchEditor`.
+
+        Wraps `OpenEdition()`/`CloseEdition()`. `CloseEdition()` is always
+        called in a `finally` block, so an exception raised while the caller
+        is drawing cannot leave the sketch stuck in open-edition state.
+
+        Yields:
+            A `SketchEditor` wrapping the `Factory2D` from `OpenEdition()`.
+
+        Raises:
+            Auto3dxError: If `OpenEdition()` or `CloseEdition()` fails unexpectedly.
+        """
+        try:
+            factory = self._com_object.OpenEdition()
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        try:
+            yield SketchEditor(factory)
+        finally:
+            try:
+                self._com_object.CloseEdition()
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    def __repr__(self) -> str:
+        """Returns a debugging representation.
+
+        Returns:
+            A string such as ``Sketch(name='Sketch.1')``.
+        """
+        try:
+            name = self.name
+        except Auto3dxError:
+            name = "<unavailable>"
+        return f"Sketch(name={name!r})"
+
+
+class SketchCollection:
+    """Wraps the sketches living on a Part's `MainBody`.
+
+    Sketches are read from `part_com_object.MainBody.Sketches`, and planes are
+    read from `part_com_object.OriginElements`, so this wrapper is constructed
+    from the Part's raw COM object rather than the `Sketches` collection alone.
+    """
+
+    def __init__(self, part_com_object: Any, selection: Any = None) -> None:
+        """Initializes the wrapper.
+
+        Args:
+            part_com_object: The raw CATIA `Part` COM object. Both
+                `OriginElements` (for planes) and `MainBody.Sketches` (for
+                sketches) are read from it.
+            selection: The raw CATIA `Selection` COM object from the editor.
+                Required only by `remove`, because `Sketches` has no `Remove`
+                method and deletion has to go through the editor's selection.
+                Reading and creating work without it.
+        """
+        self._part_com_object = part_com_object
+        self._selection = selection
+
+    def _sketches(self) -> Any:
+        """Returns the raw `MainBody.Sketches` collection.
+
+        Returns:
+            The raw CATIA `Sketches` collection.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return self._part_com_object.MainBody.Sketches
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _plane(self, support: str) -> Any:
+        """Resolves a support string to its raw `OriginElements` plane.
+
+        Args:
+            support: One of `SUPPORTED_SKETCH_SUPPORTS`.
+
+        Returns:
+            The raw plane COM object (wrapper type `AnyObject`, not `Plane`).
+
+        Raises:
+            UnsupportedSupportError: If `support` is not a supported value.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        if support not in SUPPORTED_SKETCH_SUPPORTS:
+            raise UnsupportedSupportError(
+                f"Support {support!r} is not supported; supported supports are "
+                f"{sorted(SUPPORTED_SKETCH_SUPPORTS)}."
+            )
+        attribute = _PLANE_ATTRIBUTE_BY_SUPPORT[support]
+        try:
+            return getattr(self._part_com_object.OriginElements, attribute)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    @property
+    def count(self) -> int:
+        """Returns the number of sketches in the collection.
+
+        Returns:
+            `MainBody.Sketches.Count`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return self._sketches().Count
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def list(self) -> "list[Sketch]":
+        """Lists every sketch in the collection.
+
+        Returns:
+            A `Sketch` wrapper for each item, in the collection's 1-based
+            `Item(i)` order. An empty collection returns `[]`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        sketches = self._sketches()
+        try:
+            count = sketches.Count
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        result: list[Sketch] = []
+        for index in range(1, count + 1):
+            try:
+                com_object = sketches.Item(index)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            result.append(Sketch(com_object))
+        return result
+
+    # Return annotation is quoted: by this point `list` is already shadowed in
+    # the class namespace by the `list` method above, so the bare subscript
+    # `list[str]` would resolve to that method, not the builtin.
+    def names(self) -> "list[str]":
+        """Lists the names of every sketch in the collection.
+
+        Returns:
+            The `name` of each sketch, in the same order as `list()`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return [sketch.name for sketch in self.list()]
+
+    def get(self, name: str) -> Sketch:
+        """Looks up a sketch by name.
+
+        Args:
+            name: The sketch's name.
+
+        Returns:
+            The `Sketch` wrapping the matching COM object.
+
+        Raises:
+            SketchNotFoundError: If no sketch named `name` exists.
+        """
+        try:
+            com_object = self._sketches().Item(name)
+        except pywintypes.com_error as error:
+            raise SketchNotFoundError(f"No sketch named {name!r} was found.") from error
+        return Sketch(com_object)
+
+    def create(self, name: str, support: str = SUPPORT_XY) -> Sketch:
+        """Creates a new sketch on the given support plane.
+
+        The existence check happens before any COM call, mirroring the
+        `ParameterCollection.create_length` duplicate-name guard: a retried
+        `create` must not silently add a second, indistinguishable sketch.
+
+        Args:
+            name: The new sketch's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            support: One of `SUPPORTED_SKETCH_SUPPORTS`. Defaults to `SUPPORT_XY`.
+
+        Returns:
+            The newly created `Sketch`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            UnsupportedSupportError: If `support` is not a supported value.
+            SketchAlreadyExistsError: If a sketch named `name` already exists.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        if name in self:
+            raise SketchAlreadyExistsError(f"A sketch named {name!r} already exists.")
+        plane = self._plane(support)
+        try:
+            com_object = self._sketches().Add(plane)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        sketch = Sketch(com_object)
+        sketch.rename(name)
+        return sketch
+
+    def ensure(self, name: str, support: str = SUPPORT_XY) -> Sketch:
+        """Creates a sketch, or reuses it if one with the same name and support exists.
+
+        A name match alone does not authorise reuse: the existing sketch's
+        axis data must also match the requested support (see
+        `docs/conventions.md` section 1.3).
+
+        Args:
+            name: The sketch's name.
+            support: One of `SUPPORTED_SKETCH_SUPPORTS`. Defaults to `SUPPORT_XY`.
+
+        Returns:
+            The existing or newly created `Sketch`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            UnsupportedSupportError: If `support` is not a supported value.
+            SketchSupportMismatchError: If a sketch named `name` already
+                exists but its axis data does not match `support`.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        if support not in SUPPORTED_SKETCH_SUPPORTS:
+            raise UnsupportedSupportError(
+                f"Support {support!r} is not supported; supported supports are "
+                f"{sorted(SUPPORTED_SKETCH_SUPPORTS)}."
+            )
+        try:
+            existing = self.get(name)
+        except SketchNotFoundError:
+            return self.create(name, support)
+
+        if not _axis_data_matches(existing.axis_data(), _AXIS_DATA_BY_SUPPORT[support]):
+            raise SketchSupportMismatchError(
+                f"Sketch {name!r} already exists but is not on support {support!r}."
+            )
+        return existing
+
+    def remove(self, name: str) -> None:
+        """Removes a sketch from the model.
+
+        `Sketches` exposes no `Remove` method, so deletion goes through the
+        editor's `Selection`. That means this method needs the `selection` the
+        collection was constructed with; obtain the Part via
+        `Catia.active_part()` to get one wired in.
+
+        The sketch is looked up first so a missing name is reported as
+        `SketchNotFoundError`. Removing a sketch that still carries a pad is
+        expected to fail; remove the pad first (see `PartDesign.remove_pad`),
+        which cascade-deletes its sketch anyway.
+
+        This deletes model content. It does not call `Part.Update()`, and it
+        never saves.
+
+        Args:
+            name: The sketch's name.
+
+        Raises:
+            SketchNotFoundError: If no sketch named `name` exists.
+            Auto3dxError: If no editor selection is available, or the deletion
+                failed.
+        """
+        target = self.get(name)
+        delete_via_selection(
+            self._selection, target.com_object, f"sketch {name!r}"
+        )
+
+    def __len__(self) -> int:
+        """Returns the number of sketches in the collection.
+
+        Returns:
+            Same as `count`.
+        """
+        return self.count
+
+    def __iter__(self) -> Iterator[Sketch]:
+        """Iterates over the sketches in the collection.
+
+        Returns:
+            An iterator over `Sketch` wrappers, in `list()` order.
+        """
+        return iter(self.list())
+
+    def __contains__(self, name: object) -> bool:
+        """Checks whether a sketch with the given name exists.
+
+        A non-`str` argument is accepted and simply reported as absent,
+        rather than raising.
+
+        Args:
+            name: The candidate sketch name.
+
+        Returns:
+            `True` if `get(name)` succeeds, `False` otherwise (including
+            when `name` is not a `str`).
+        """
+        if not isinstance(name, str):
+            return False
+        try:
+            self.get(name)
+        except SketchNotFoundError:
+            return False
+        return True
