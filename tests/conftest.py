@@ -17,6 +17,10 @@ import pytest
 import pywintypes
 
 
+_UNSET: Any = object()
+"""Sentinel for "no override supplied", so `None` can itself be a test value."""
+
+
 def make_com_error() -> pywintypes.com_error:
     """Builds a realistic `pywintypes.com_error`, as raised by a failed COM call.
 
@@ -213,9 +217,18 @@ class Selection:
         self.added: list[Any] = []
         self.deleted: list[Any] = []
         self.delete_exception: BaseException | None = None
+        # Fails the Nth Clear (1-based). The trailing cleanup Clear is the one
+        # whose failure used to be swallowed, leaving a dirty live selection.
+        self.clear_exception: BaseException | None = None
+        self.failing_clear_ordinal: int | None = None
 
     def Clear(self) -> None:
         self.calls.append("Clear")
+        ordinal = self.calls.count("Clear")
+        if self.clear_exception is not None and (
+            self.failing_clear_ordinal is None or ordinal == self.failing_clear_ordinal
+        ):
+            raise self.clear_exception
         self.added.clear()
 
     def Add(self, com_object: Any) -> None:
@@ -448,15 +461,52 @@ class Sketch:
         self,
         name: str = "Sketch.1",
         axis_data: tuple[float, ...] = XY_AXIS_DATA,
+        identity: Any = None,
+        name_write_exception: BaseException | None = None,
+        axis_data_result: Any = _UNSET,
     ) -> None:
-        self.Name = name
+        self._identity = identity if identity is not None else object()
+        self._name = name
         self._axis_data = axis_data
+        self._axis_data_result = axis_data_result
+        self.name_write_exception = name_write_exception
         self.open_edition_calls = 0
         self.close_edition_calls = 0
         self.factory2d = Factory2D()
         self.GeometricElements = GeometricElements()
 
-    def GetAbsoluteAxisData(self, oAxisData: Any = None) -> tuple[float, ...]:
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        # The real Name write can fail after Sketches.Add already mutated the
+        # model, which is the partial-creation case the library must report.
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
+
+    def __eq__(self, other: object) -> bool:
+        """Models COM identity: `==` compares the underlying object, `is` does not.
+
+        Verified in scripts/probes/14_identity_and_duplicates.py -- two wrappers
+        for the same CATIA object compare equal while `a is b` is False.
+        """
+        if not isinstance(other, Sketch):
+            return NotImplemented
+        return other._identity is self._identity
+
+    def __hash__(self) -> int:
+        return id(self._identity)
+
+    def another_wrapper(self) -> "Sketch":
+        """Returns a DISTINCT wrapper for the same underlying sketch."""
+        return Sketch(name=self._name, axis_data=self._axis_data, identity=self._identity)
+
+    def GetAbsoluteAxisData(self, oAxisData: Any = None) -> Any:
+        if self._axis_data_result is not _UNSET:
+            return self._axis_data_result
         return self._axis_data
 
     def OpenEdition(self) -> Factory2D:
@@ -477,20 +527,39 @@ class Sketches:
     used to create a sketch.
     """
 
-    def __init__(self, items: list[tuple[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        items: list[tuple[str, Any]] | None = None,
+        item_by_name_exception: BaseException | None = None,
+        enumeration_exception: BaseException | None = None,
+        added_name_write_exception: BaseException | None = None,
+    ) -> None:
         self._items: list[tuple[str, Any]] = list(items or [])
         self.add_calls: list[Any] = []
+        self.added_name_write_exception = added_name_write_exception
+        # A COM failure on Item(name) must NOT be read as "does not exist":
+        # doing so creates a duplicate on a retry (fail-open).
+        self.item_by_name_exception = item_by_name_exception
+        # A COM failure during enumeration must surface as Auto3dxError, never
+        # as a not-found error.
+        self.enumeration_exception = enumeration_exception
 
     @property
     def Count(self) -> int:
+        if self.enumeration_exception is not None:
+            raise self.enumeration_exception
         return len(self._items)
 
     def Item(self, key: Any) -> Any:
         if isinstance(key, int):
+            if self.enumeration_exception is not None:
+                raise self.enumeration_exception
             index = key - 1
             if 0 <= index < len(self._items):
                 return self._items[index][1]
             raise make_com_error()
+        if self.item_by_name_exception is not None:
+            raise self.item_by_name_exception
         # Look up by the sketch's CURRENT Name, not the key recorded at Add
         # time: `SketchCollection.create` renames the sketch right after adding
         # it, so a stored key would immediately go stale.
@@ -515,7 +584,13 @@ class Sketches:
         axis_data = _PLANE_NAME_TO_AXIS_DATA.get(
             getattr(plane, "Name", None), UNRECOGNISED_AXIS_DATA
         )
-        sketch = Sketch(name=f"Sketch.{len(self._items) + 1}", axis_data=axis_data)
+        sketch = Sketch(
+            name=f"Sketch.{len(self._items) + 1}",
+            axis_data=axis_data,
+            # The model is already mutated at this point; a failing Name write
+            # afterwards is the partial-creation case.
+            name_write_exception=self.added_name_write_exception,
+        )
         self._items.append((sketch.Name, sketch))
         return sketch
 
@@ -542,11 +617,30 @@ class Pad:
     with `AddNewPad(sketch, 15)`).
     """
 
-    def __init__(self, name: str = "Pad.1", sketch: Any = None, height: float = 0.0) -> None:
-        self.Name = name
+    def __init__(
+        self,
+        name: str = "Pad.1",
+        sketch: Any = None,
+        height: float = 0.0,
+        name_write_exception: BaseException | None = None,
+    ) -> None:
+        self._name = name
+        self.name_write_exception = name_write_exception
         self.Sketch = sketch
         self.FirstLimit = Limit(height)
         self.SecondLimit = Limit(0.0)
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        # AddNewPad already added solid material before this write; a failure
+        # here is the partial-creation case the library must report.
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
 
 
 class Shapes:
@@ -596,17 +690,27 @@ class ShapeFactory:
     and that the raw COM sketch object (not a wrapper) was passed.
     """
 
-    def __init__(self, shapes: Any = None) -> None:
+    def __init__(
+        self,
+        shapes: Any = None,
+        pad_name_write_exception: BaseException | None = None,
+    ) -> None:
         self.add_new_pad_calls: list[tuple[Any, float]] = []
         self._pad_count = 0
         # The real AddNewPad registers the pad in the body's Shapes collection,
         # which is how `PartDesign.get_pad` finds it afterwards.
         self.shapes = shapes
+        self.pad_name_write_exception = pad_name_write_exception
 
     def AddNewPad(self, iSketch: Any, iHeight: float) -> Pad:
         self.add_new_pad_calls.append((iSketch, iHeight))
         self._pad_count += 1
-        pad = Pad(name=f"Pad.{self._pad_count}", sketch=iSketch, height=iHeight)
+        pad = Pad(
+            name=f"Pad.{self._pad_count}",
+            sketch=iSketch,
+            height=iHeight,
+            name_write_exception=self.pad_name_write_exception,
+        )
         if self.shapes is not None:
             self.shapes._append(pad)
         return pad

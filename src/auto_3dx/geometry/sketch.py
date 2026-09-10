@@ -20,7 +20,9 @@ from typing import Any
 import pywintypes
 
 from auto_3dx.errors import (
+    AmbiguousNameError,
     Auto3dxError,
+    PartialCreationError,
     SketchAlreadyExistsError,
     SketchNotFoundError,
     SketchSupportMismatchError,
@@ -80,16 +82,36 @@ def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
 def _axis_data_matches(actual: tuple[float, ...], expected: tuple[float, ...]) -> bool:
     """Compares two 9-tuples of axis data within `AXIS_TOLERANCE`.
 
+    `rel_tol=0.0` is passed explicitly to `math.isclose`: omitting it leaves
+    Python's default `rel_tol=1e-09` active, which widens the effective
+    tolerance for large coordinate values and can hide a real mismatch.
+
     Args:
         actual: The axis data read from a sketch.
         expected: The reference axis data for a support.
 
     Returns:
-        `True` if every component is within `AXIS_TOLERANCE` of its counterpart.
+        `True` if every component is within `AXIS_TOLERANCE` of its
+        counterpart. A length mismatch is treated as a plain "no match"
+        (`False`) rather than an error, so `support()` can keep returning
+        `None` instead of guessing.
+
+    Raises:
+        Auto3dxError: If `actual` contains a non-numeric entry that
+            `math.isclose` cannot compare.
     """
-    return len(actual) == len(expected) and all(
-        math.isclose(a, b, abs_tol=AXIS_TOLERANCE) for a, b in zip(actual, expected)
-    )
+    if len(actual) != len(expected):
+        return False
+    try:
+        return all(
+            math.isclose(a, b, rel_tol=0.0, abs_tol=AXIS_TOLERANCE)
+            for a, b in zip(actual, expected)
+        )
+    except TypeError as error:
+        raise Auto3dxError(
+            "Axis data contains a non-numeric entry; expected 9 floats from "
+            "GetAbsoluteAxisData."
+        ) from error
 
 
 class SketchEditor:
@@ -254,6 +276,7 @@ class Sketch:
             com_object: The raw CATIA `Sketch` COM object to wrap.
         """
         self._com_object = com_object
+        self._editing = False
 
     @property
     def com_object(self) -> Any:
@@ -311,12 +334,21 @@ class Sketch:
             `GetAbsoluteAxisData`.
 
         Raises:
-            Auto3dxError: If the underlying COM call fails unexpectedly.
+            Auto3dxError: If the underlying COM call fails unexpectedly, or if
+                `GetAbsoluteAxisData` returns `None` or another non-iterable
+                result.
         """
         try:
-            return tuple(self._com_object.GetAbsoluteAxisData(list(_AXIS_DATA_SEED)))
+            raw = self._com_object.GetAbsoluteAxisData(list(_AXIS_DATA_SEED))
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        try:
+            return tuple(raw)
+        except TypeError as error:
+            raise Auto3dxError(
+                "GetAbsoluteAxisData returned a non-iterable result; expected "
+                "9 floats."
+            ) from error
 
     def support(self) -> str | None:
         """Derives which origin plane this sketch is attached to.
@@ -373,15 +405,32 @@ class Sketch:
         called in a `finally` block, so an exception raised while the caller
         is drawing cannot leave the sketch stuck in open-edition state.
 
+        Re-entrant use is refused: nested `OpenEdition()` is unverified, and if
+        CATIA keeps a single edition state per sketch, an inner `CloseEdition()`
+        would close the outer session and leave the outer `edit()` block's own
+        `CloseEdition()` mismatched. The re-entry check happens before any COM
+        call, and the instance flag is always reset in the same `finally` that
+        calls `CloseEdition()`, so a failed block never leaves the sketch
+        permanently locked out of `edit()`.
+
         Yields:
             A `SketchEditor` wrapping the `Factory2D` from `OpenEdition()`.
 
         Raises:
-            Auto3dxError: If `OpenEdition()` or `CloseEdition()` fails unexpectedly.
+            Auto3dxError: If `edit()` is called while already active for this
+                `Sketch`, or if `OpenEdition()` or `CloseEdition()` fails
+                unexpectedly.
         """
+        if self._editing:
+            raise Auto3dxError(
+                "This sketch is already being edited; edit() does not support "
+                "re-entrant or concurrent use."
+            )
+        self._editing = True
         try:
             factory = self._com_object.OpenEdition()
         except pywintypes.com_error as error:
+            self._editing = False
             raise _wrap_com_error(error) from error
         try:
             yield SketchEditor(factory)
@@ -390,6 +439,8 @@ class Sketch:
                 self._com_object.CloseEdition()
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
+            finally:
+                self._editing = False
 
     def __repr__(self) -> str:
         """Returns a debugging representation.
@@ -518,8 +569,35 @@ class SketchCollection:
         """
         return [sketch.name for sketch in self.list()]
 
+    def _matching(self, name: str) -> "list[Sketch]":
+        """Enumerates the collection and returns every sketch named `name`.
+
+        Existence must be positive evidence, not a caught exception:
+        `Item(name)` raising does not distinguish "no such sketch" from "a
+        transient COM failure", and misreading the latter as absence would
+        create a duplicate on a retried `create`. Enumerating with `Count`/
+        `Item(i)` and comparing `Name` avoids that, and also lets duplicate
+        names (which CATIA permits) be counted rather than silently
+        collapsed to one.
+
+        Args:
+            name: The sketch name to match against.
+
+        Returns:
+            Every `Sketch` in the collection whose `name` equals `name`, in
+            `list()` order. Empty if none match.
+
+        Raises:
+            Auto3dxError: If the underlying enumeration fails unexpectedly.
+        """
+        return [sketch for sketch in self.list() if sketch.name == name]
+
     def get(self, name: str) -> Sketch:
         """Looks up a sketch by name.
+
+        Names are not unique in CATIA, so this enumerates the collection
+        (see `_matching`) instead of trusting `Item(name)`, and refuses to
+        guess when more than one sketch shares the name.
 
         Args:
             name: The sketch's name.
@@ -529,19 +607,32 @@ class SketchCollection:
 
         Raises:
             SketchNotFoundError: If no sketch named `name` exists.
+            AmbiguousNameError: If two or more sketches named `name` exist.
+            Auto3dxError: If the underlying enumeration fails unexpectedly.
         """
-        try:
-            com_object = self._sketches().Item(name)
-        except pywintypes.com_error as error:
-            raise SketchNotFoundError(f"No sketch named {name!r} was found.") from error
-        return Sketch(com_object)
+        matches = self._matching(name)
+        if not matches:
+            raise SketchNotFoundError(f"No sketch named {name!r} was found.")
+        if len(matches) > 1:
+            raise AmbiguousNameError(
+                f"{len(matches)} sketches named {name!r} exist; a name-based "
+                "lookup cannot safely pick one."
+            )
+        return matches[0]
 
     def create(self, name: str, support: str = SUPPORT_XY) -> Sketch:
         """Creates a new sketch on the given support plane.
 
-        The existence check happens before any COM call, mirroring the
+        The existence check enumerates the collection (see `_matching`)
+        before any mutating COM call, mirroring the
         `ParameterCollection.create_length` duplicate-name guard: a retried
         `create` must not silently add a second, indistinguishable sketch.
+
+        `Sketches.Add` creates the sketch before its name is set. If the
+        follow-up rename fails, the default-named sketch is left in the
+        model rather than rolled back (deleting it is a separate, explicit
+        operation the caller controls), and `PartialCreationError` reports
+        its actual name so a retry does not add another one on top of it.
 
         Args:
             name: The new sketch's name. Must be non-empty, without
@@ -555,10 +646,12 @@ class SketchCollection:
             ParameterNameError: If `name` is not usable as a name.
             UnsupportedSupportError: If `support` is not a supported value.
             SketchAlreadyExistsError: If a sketch named `name` already exists.
+            PartialCreationError: If the sketch was created but the follow-up
+                rename failed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         validate_parameter_name(name)
-        if name in self:
+        if self._matching(name):
             raise SketchAlreadyExistsError(f"A sketch named {name!r} already exists.")
         plane = self._plane(support)
         try:
@@ -566,7 +659,19 @@ class SketchCollection:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
         sketch = Sketch(com_object)
-        sketch.rename(name)
+        try:
+            sketch.rename(name)
+        except Auto3dxError as error:
+            try:
+                actual_name = sketch.name
+            except Auto3dxError:
+                actual_name = "unknown"
+            raise PartialCreationError(
+                f"Created a sketch but failed to rename it to {name!r}; it "
+                f"currently exists in the model as {actual_name!r}. Do not "
+                "retry blindly: retrying would create another sketch instead "
+                "of fixing this one."
+            ) from error
         return sketch
 
     def ensure(self, name: str, support: str = SUPPORT_XY) -> Sketch:
@@ -574,7 +679,8 @@ class SketchCollection:
 
         A name match alone does not authorise reuse: the existing sketch's
         axis data must also match the requested support (see
-        `docs/conventions.md` section 1.3).
+        `docs/conventions.md` section 1.3). The ambiguous-name check inside
+        `get()` runs first, before any axis comparison.
 
         Args:
             name: The sketch's name.
@@ -586,8 +692,11 @@ class SketchCollection:
         Raises:
             ParameterNameError: If `name` is not usable as a name.
             UnsupportedSupportError: If `support` is not a supported value.
+            AmbiguousNameError: If two or more sketches named `name` exist.
             SketchSupportMismatchError: If a sketch named `name` already
                 exists but its axis data does not match `support`.
+            PartialCreationError: If a new sketch had to be created and its
+                follow-up rename failed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         validate_parameter_name(name)

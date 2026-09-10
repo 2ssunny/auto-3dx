@@ -3,6 +3,7 @@
 from auto_3dx.core.application import Catia
 from auto_3dx.core.part import Part
 from auto_3dx.errors import (
+    AmbiguousNameError,
     Auto3dxError,
     CatiaConnectionError,
     Com3dxNotFoundError,
@@ -14,6 +15,7 @@ from auto_3dx.errors import (
     ParameterNameError,
     ParameterNotFoundError,
     ParameterTypeError,
+    PartialCreationError,
     PartUpdateError,
     SketchAlreadyExistsError,
     SketchNotFoundError,
@@ -37,6 +39,7 @@ __all__ = [
     "Sketch",
     "SketchCollection",
     "SketchEditor",
+    "AmbiguousNameError",
     "Auto3dxError",
     "CatiaConnectionError",
     "Com3dxNotFoundError",
@@ -48,6 +51,7 @@ __all__ = [
     "ParameterNameError",
     "ParameterNotFoundError",
     "ParameterTypeError",
+    "PartialCreationError",
     "PartUpdateError",
     "SketchAlreadyExistsError",
     "SketchNotFoundError",

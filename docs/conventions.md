@@ -218,24 +218,76 @@ Pad    : Name, DirectionOrientation, DirectionType, IsSymmetric, IsThin,
          MergeEnd, NeutralFiber
 ```
 
+추가 실측 (`scripts/probes/14_identity_and_duplicates.py`):
+
+**이름은 유일하지 않다.** `Sketch.Name`이 쓰기 가능하므로 두 스케치에 같은 이름을 줄 수 있고,
+CATIA는 이를 거부하지 않는다.
+
+```text
+sketches: ['AUTO3DX_DUP_SKETCH', 'AUTO3DX_DUP_SKETCH']   <- 둘 다 수락됨
+Sketches.Item('AUTO3DX_DUP_SKETCH') -> 둘 중 하나만 반환
+```
+
+따라서 이름 조회만으로 형상을 재사용하면 엉뚱한 프로파일을 잡을 수 있다. 이름으로 찾을 때는
+**전체를 열거해 일치 개수를 세고, 2개 이상이면 거부**해야 한다.
+
+**COM 객체 동일성 비교는 동작한다.**
+
+```text
+같은 객체를 두 번 가져와 비교  : a == b  -> True   (a is b는 False)
+서로 다른 객체                 : a == b  -> False
+pad.Sketch == 원본 sketch      : True
+```
+
+`is`는 쓰면 안 되고 `==`를 쓴다. wrapper는 매번 새로 생성되지만 `==`는 아래의 `_oleobj_`
+동일성으로 내려간다. 이름 비교보다 이쪽이 정본이다.
+
+**컬렉션 프로토콜 (실측 확인).** 모두 1-based `Item(i)` + `Count`.
+
+```text
+Sketches.Count / Item(i)            OK
+Shapes.Count / Item(i)              OK   (Item(i).Name 읽기 가능)
+GeometricElements.Count / Item(i)   OK   (Item(1).Name == 'AbsoluteAxis')
+```
+
 ### 1.3 `ensure_*` 정책 (형상)
 
 이름만 같다고 형상을 재사용하면 안 된다. 아래 비교는 모두 실측으로 읽을 수 있는 값이다.
 
 ```text
 ensure_sketch(name, support)
+  이름 2개 이상                      -> AmbiguousNameError   (먼저 검사)
   이름 없음                          -> 생성
   이름 있음 + 축 데이터 일치          -> 기존 재사용
   이름 있음 + 축 데이터 불일치        -> SketchSupportMismatchError
 
 ensure_pad(name, sketch, height)
+  이름 2개 이상                      -> AmbiguousNameError   (먼저 검사)
   이름 없음                          -> 생성
   이름 있음 + 같은 Sketch + 높이 같음 -> 그대로 재사용
   이름 있음 + 같은 Sketch + 높이 다름 -> FirstLimit.Dimension.Value 갱신
   이름 있음 + 다른 Sketch            -> FeatureConflictError
 ```
 
-부동소수 비교는 `math.isclose`를 쓰고 절대 허용오차를 상수로 둔다.
+"같은 Sketch"는 **COM 동일성(`==`)** 으로 판정한다. 이름 비교는 위조 가능하다.
+
+**존재 여부는 열거로 판정한다.** `Item(name)`이 던지는 예외를 "없음"의 근거로 삼으면 안 된다.
+COM 오류는 "없음"과 "일시적 실패"를 구분해 주지 않으므로, 실패를 없음으로 읽으면 중복 생성으로
+이어진다(fail-open). `Count` + `Item(i)`로 열거해 이름을 비교하는 쪽이 positive evidence다.
+
+부동소수 비교는 `math.isclose(a, b, rel_tol=0.0, abs_tol=TOLERANCE)`로 한다.
+**`rel_tol=0.0`을 반드시 명시한다.** 생략하면 기본 `rel_tol=1e-09`가 살아 있어 값이 커질수록
+허용 오차가 함께 커지고, 큰 pad 높이의 갱신 요청이 조용히 무시된다.
+
+`edit()`은 **재진입을 금지**한다. 중첩 `OpenEdition`의 의미는 검증되지 않았고, CATIA가 편집
+상태를 하나만 유지한다면 안쪽 `CloseEdition`이 바깥 세션을 먼저 닫아 짝이 어긋난다.
+
+생성은 원자적이지 않다. `Sketches.Add`/`AddNewPad`가 성공한 뒤 `Name` 쓰기가 실패하면 기본
+이름의 형상이 모델에 남는다. Pad를 지우면 Sketch까지 연쇄 삭제되므로 자동 롤백은 오히려
+위험하다. 이 경우 **남은 객체의 실제 이름을 담아 보고**해서 호출자가 재시도로 형상을 더 쌓지
+않게 한다.
+
+추가 예외: `AmbiguousNameError(Auto3dxError)`, `PartialCreationError(Auto3dxError)`.
 
 ---
 

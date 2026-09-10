@@ -21,10 +21,26 @@ import pywintypes
 from auto_3dx.errors import Auto3dxError
 
 _NO_SELECTION_MESSAGE = (
-    "Deleting geometry requires the editor's Selection, which this object was "
-    "not given. Obtain the Part through Catia.active_part() so the editor's "
-    "Selection is wired in."
+    "Deleting geometry requires the editor's Selection, which is not "
+    "available here. This happens either because the object was constructed "
+    "without a selection, or because the current 3DEXPERIENCE session did "
+    "not supply one even through Catia.active_part()."
 )
+
+
+def _hresult_suffix(error: pywintypes.com_error) -> str:
+    """Renders a COM error's HRESULT as a hex suffix for an error message.
+
+    Args:
+        error: The caught `pywintypes.com_error`.
+
+    Returns:
+        A string like `" (HRESULT: 0x80020009)"`, or `""` if unavailable.
+    """
+    hresult = error.args[0] if error.args else None
+    if not isinstance(hresult, int):
+        return ""
+    return f" (HRESULT: {hresult & 0xFFFFFFFF:#010x})"
 
 
 def require_selection(selection: Any) -> Any:
@@ -49,7 +65,13 @@ def delete_via_selection(selection: Any, com_object: Any, description: str) -> N
 
     The selection is cleared both before and after the delete so a stale
     selection can never widen what gets removed, and so the model is not left
-    with the deleted object still selected.
+    with the deleted object still selected. A failure of that trailing clear
+    is never swallowed: if it is left silent, the caller believes the editor
+    is clean when a stale selection actually remains and could widen a later
+    delete. When both the delete and the trailing clear fail, the delete
+    failure is what gets raised (chained), with a note that the selection may
+    still be dirty -- the primary failure must not be masked by the cleanup
+    failure.
 
     Args:
         selection: The raw CATIA ``Selection`` COM object.
@@ -58,24 +80,32 @@ def delete_via_selection(selection: Any, com_object: Any, description: str) -> N
             ``"sketch 'Base'"``).
 
     Raises:
-        Auto3dxError: If `selection` is ``None`` or the deletion failed.
+        Auto3dxError: If `selection` is ``None``, the deletion failed, or the
+            deletion succeeded but the trailing ``Selection.Clear()`` failed.
     """
     require_selection(selection)
     try:
         selection.Clear()
         selection.Add(com_object)
         selection.Delete()
-    except pywintypes.com_error as error:
-        hresult = error.args[0] if error.args else None
-        suffix = (
-            f" (HRESULT: {hresult & 0xFFFFFFFF:#010x})"
-            if isinstance(hresult, int)
-            else ""
-        )
-        raise Auto3dxError(f"Could not delete {description}.{suffix}") from error
-    finally:
-        # Leaving the deleted object selected would affect the next delete.
+    except pywintypes.com_error as delete_error:
+        delete_suffix = _hresult_suffix(delete_error)
         try:
             selection.Clear()
-        except pywintypes.com_error:
-            pass
+        except pywintypes.com_error as cleanup_error:
+            raise Auto3dxError(
+                f"Could not delete {description}.{delete_suffix} The "
+                f"selection could also not be cleared afterward"
+                f"{_hresult_suffix(cleanup_error)}, so the selection may "
+                "still be dirty."
+            ) from delete_error
+        raise Auto3dxError(f"Could not delete {description}.{delete_suffix}") from delete_error
+    else:
+        try:
+            selection.Clear()
+        except pywintypes.com_error as cleanup_error:
+            raise Auto3dxError(
+                f"Deleted {description}, but the selection could not be "
+                f"cleared afterward{_hresult_suffix(cleanup_error)}. The "
+                "selection may still be dirty and could widen a later delete."
+            ) from cleanup_error

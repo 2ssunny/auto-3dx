@@ -87,3 +87,25 @@ class FeatureConflictError(Auto3dxError):
 
 class UnsupportedSupportError(Auto3dxError):
     """Raised when a sketch support string is not one of the supported planes."""
+
+
+class AmbiguousNameError(Auto3dxError):
+    """Raised when a name-based lookup matches two or more items.
+
+    CATIA does not enforce unique names for sketches (`Sketch.Name` is
+    writable and a duplicate is accepted silently), so `Sketches.Item(name)`
+    can arbitrarily return one of several same-named objects. Any lookup that
+    could reuse or mutate geometry must enumerate the collection and count
+    matches first; two or more is refused rather than guessing which one the
+    caller meant.
+    """
+
+
+class PartialCreationError(Auto3dxError):
+    """Raised when a create operation leaves a partially-formed object behind.
+
+    `Sketches.Add` / `AddNewPad` mutate the model before the follow-up `Name`
+    write. If that write fails, a default-named sketch or pad is left in the
+    model even though the caller sees an error. Retrying naively would then
+    add more geometry on top of the leftover object instead of replacing it.
+    """

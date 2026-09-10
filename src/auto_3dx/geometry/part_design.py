@@ -11,7 +11,13 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.errors import Auto3dxError, FeatureConflictError, FeatureNotFoundError
+from auto_3dx.errors import (
+    AmbiguousNameError,
+    Auto3dxError,
+    FeatureConflictError,
+    FeatureNotFoundError,
+    PartialCreationError,
+)
 from auto_3dx.geometry.deletion import delete_via_selection
 from auto_3dx.geometry.sketch import Sketch, _wrap_com_error
 from auto_3dx.parameters.parameter import (
@@ -201,6 +207,11 @@ class PartDesign:
     def get_pad(self, name: str) -> Pad:
         """Looks up a pad by name.
 
+        Names are not guaranteed unique (CATIA does not enforce it for
+        sketches, and pads carry no stronger guarantee), so every pad in
+        `pads` is checked and the match count decides the outcome rather than
+        returning on the first hit.
+
         Args:
             name: The pad's name.
 
@@ -209,12 +220,18 @@ class PartDesign:
 
         Raises:
             FeatureNotFoundError: If no pad named `name` exists.
+            AmbiguousNameError: If two or more pads named `name` exist.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        for pad in self.pads:
-            if pad.name == name:
-                return pad
-        raise FeatureNotFoundError(f"No pad named {name!r} was found.")
+        matches = [pad for pad in self.pads if pad.name == name]
+        if not matches:
+            raise FeatureNotFoundError(f"No pad named {name!r} was found.")
+        if len(matches) > 1:
+            raise AmbiguousNameError(
+                f"{len(matches)} pads named {name!r} exist; a name-based "
+                "lookup cannot safely pick one."
+            )
+        return matches[0]
 
     def create_pad(
         self,
@@ -243,6 +260,9 @@ class PartDesign:
             UnsupportedUnitError: If `unit` is not a supported unit.
             ParameterTypeError: If `height` is not an `int`/`float` (or is a `bool`).
             FeatureConflictError: If a pad named `name` already exists.
+            AmbiguousNameError: If two or more pads named `name` already exist.
+            PartialCreationError: If the pad was created but the follow-up
+                rename failed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         validate_parameter_name(name)
@@ -263,10 +283,23 @@ class PartDesign:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
         pad = Pad(com_object)
+        # AddNewPad already mutated the model; if the rename below fails, a
+        # default-named pad is left behind rather than rolled back (deleting a
+        # pad cascade-deletes its sketch, which makes automatic rollback more
+        # dangerous than reporting).
         try:
             pad.com_object.Name = name
         except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+            try:
+                actual_name = pad.name
+            except Auto3dxError:
+                actual_name = "unknown"
+            raise PartialCreationError(
+                f"Created a pad but failed to rename it to {name!r}; it "
+                f"currently exists in the model as {actual_name!r}. Do not "
+                "retry blindly: retrying would create another pad instead of "
+                "fixing this one."
+            ) from error
         return pad
 
     def ensure_pad(
@@ -293,6 +326,16 @@ class PartDesign:
             height: The extrusion height.
             unit: The unit `height` is expressed in. Defaults to `MILLIMETRE`.
 
+        "Same sketch" is judged by COM identity (`==` on the raw `Sketch.Sketch`
+        objects), not by name: names are writable and CATIA does not reject a
+        duplicate, so a name match alone would be forgeable.
+
+        Args:
+            name: The pad's name.
+            sketch: The `Sketch` the pad must extrude.
+            height: The extrusion height.
+            unit: The unit `height` is expressed in. Defaults to `MILLIMETRE`.
+
         Returns:
             The existing (possibly updated) or newly created `Pad`.
 
@@ -300,8 +343,11 @@ class PartDesign:
             ParameterNameError: If `name` is not usable as a name.
             UnsupportedUnitError: If `unit` is not a supported unit.
             ParameterTypeError: If `height` is not an `int`/`float` (or is a `bool`).
+            AmbiguousNameError: If two or more pads named `name` already exist.
             FeatureConflictError: If a pad named `name` already exists on a
                 different sketch.
+            PartialCreationError: If a new pad had to be created and its
+                follow-up rename failed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         validate_parameter_name(name)
@@ -313,13 +359,17 @@ class PartDesign:
         except FeatureNotFoundError:
             return self.create_pad(name, sketch, height, unit)
 
-        if existing.sketch().name != sketch.name:
+        try:
+            same_sketch = existing.sketch().com_object == sketch.com_object
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if not same_sketch:
             raise FeatureConflictError(
                 f"Pad {name!r} already exists on a different sketch "
                 f"({existing.sketch().name!r} instead of {sketch.name!r})."
             )
 
-        if not math.isclose(existing.height, coerced, abs_tol=LENGTH_TOLERANCE):
+        if not math.isclose(existing.height, coerced, rel_tol=0.0, abs_tol=LENGTH_TOLERANCE):
             existing.set_height(height, unit)
         return existing
 
