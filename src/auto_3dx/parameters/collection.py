@@ -5,8 +5,22 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.errors import Auto3dxError, ParameterNotFoundError
-from auto_3dx.parameters.parameter import MILLIMETRE, Parameter, _wrap_com_error
+from auto_3dx.errors import (
+    Auto3dxError,
+    ParameterAlreadyExistsError,
+    ParameterNotFoundError,
+    ParameterTypeError,
+)
+from auto_3dx.parameters.parameter import (
+    LENGTH_KIND,
+    LENGTH_MAGNITUDE,
+    MILLIMETRE,
+    Parameter,
+    _wrap_com_error,
+    validate_length_unit,
+    validate_length_value,
+    validate_parameter_name,
+)
 
 
 class ParameterCollection:
@@ -123,6 +137,132 @@ class ParameterCollection:
             UnsupportedUnitError: If `unit` is not a supported unit.
         """
         self.get(name).set(value, unit)
+
+    def create_length(
+        self,
+        name: str,
+        value: float,
+        unit: str = MILLIMETRE,
+    ) -> Parameter:
+        """Creates a new Length parameter in this collection.
+
+        The existence check is not a convenience: CATIA silently accepts a
+        duplicate name and creates a second parameter reporting the identical
+        name, which no lookup can then distinguish. A retried `create_length`
+        would quietly litter the model, so an existing name is refused.
+
+        The created parameter's `name` comes back container-qualified
+        (``"<container>\\<name>"``), which is not the string that was passed in.
+        Use `Parameter.short_name` to get the requested name back.
+
+        This does not call `Part.Update()`.
+
+        Args:
+            name: The new parameter's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            value: The initial value.
+            unit: The unit `value` is expressed in. Defaults to `MILLIMETRE`.
+
+        Returns:
+            The `Parameter` wrapping the newly created COM object.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a parameter name.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `value` is not an `int`/`float`, or is a `bool`.
+            ParameterAlreadyExistsError: If a parameter named `name` already exists.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        validate_length_unit(unit)
+        coerced = validate_length_value(value)
+
+        if name in self:
+            raise ParameterAlreadyExistsError(
+                f"A parameter named {name!r} already exists. CATIA would accept "
+                "a duplicate and create a second parameter with the same name, "
+                "so creation is refused; use ensure_length() to set the "
+                "existing parameter instead."
+            )
+
+        try:
+            com_object = self._com_object.CreateDimension(
+                name, LENGTH_MAGNITUDE, coerced
+            )
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return Parameter(com_object)
+
+    def ensure_length(
+        self,
+        name: str,
+        value: float,
+        unit: str = MILLIMETRE,
+    ) -> Parameter:
+        """Creates a Length parameter, or sets it if it already exists.
+
+        A name that already belongs to a parameter of a different kind is an
+        error rather than something to overwrite, so a model is never silently
+        repurposed.
+
+        This does not call `Part.Update()`.
+
+        Args:
+            name: The parameter's name, subject to the same rules as
+                `create_length`.
+            value: The value to create with or assign.
+            unit: The unit `value` is expressed in. Defaults to `MILLIMETRE`.
+
+        Returns:
+            The created or updated `Parameter`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a parameter name.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `value` is not an `int`/`float`, is a `bool`,
+                or an existing parameter named `name` is not a Length.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        validate_length_unit(unit)
+        validate_length_value(value)
+
+        try:
+            existing = self.get(name)
+        except ParameterNotFoundError:
+            return self.create_length(name, value, unit)
+
+        if existing.kind != LENGTH_KIND:
+            raise ParameterTypeError(
+                f"Parameter {name!r} already exists with kind "
+                f"{existing.kind!r}, not {LENGTH_KIND!r}, so it will not be "
+                "overwritten."
+            )
+        existing.set(value, unit)
+        return existing
+
+    def remove(self, name: str) -> None:
+        """Removes a parameter from the model.
+
+        The parameter is looked up first so a missing name is reported as
+        `ParameterNotFoundError`, and so removal targets the authoritative
+        qualified name rather than whatever the caller passed.
+
+        This deletes model content. It does not call `Part.Update()`, and it
+        never saves.
+
+        Args:
+            name: The parameter's name, qualified or short.
+
+        Raises:
+            ParameterNotFoundError: If no parameter named `name` exists.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        target = self.get(name)
+        try:
+            self._com_object.Remove(target.name)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
 
     def __len__(self) -> int:
         """Returns the number of parameters in the collection.

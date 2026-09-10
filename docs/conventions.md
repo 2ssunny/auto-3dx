@@ -77,13 +77,59 @@ UI 대응          : Value == 150.0  <->  CATIA UI 표시 150mm
 | `Parameters.Count`, `Item(i)`, `Item(name)` | 검증 완료 |
 | `Length.Value` 읽기 / 쓰기 | 검증 완료 |
 | `Part.Update()` | 검증 완료 |
-| Parameter 생성 (`CreateDimension` 등) | **미검증 — 구현 금지** |
+| Length parameter 생성 / ensure / remove | 검증 완료 (아래 1.1) |
+| 그 외 Parameter 생성 (`CreateReal` 등) | **미검증 — 구현 금지** |
 | Formula / Relations | **미검증 — 구현 금지** |
 | Sketch / Pad / GSD | **미검증 — 구현 금지** |
 | 새 Part 생성 | **미검증 — 구현 금지** |
 | Save / PLM propagate | **미검증 — 호출 금지** |
 
 > **Save는 어떤 코드 경로에서도 호출하지 않는다.** 이 규칙에는 예외가 없다.
+
+### 1.1 Parameter 생성 (실측, `scripts/probes/11_create_dimension.py`)
+
+type library가 고정한 signature:
+
+```text
+CreateDimension(iName: BSTR, iMagnitude: BSTR, iValue: double) -> Dimension
+CreateReal(iName: BSTR, iValue: double)                        -> RealParam
+```
+
+`iMagnitude`는 `Parameters.Units` 컬렉션의 `Magnitude` 값이다. 이 설치본은 **대문자가
+아니라 첫 글자만 대문자인 이름**을 쓴다. `"LENGTH"`가 아니라 `"Length"`다.
+
+```text
+Units.Count == 1887
+Unit 항목: Name='Millimeter', Magnitude='Length', Symbol='mm'
+Magnitude 예: Length, Angle, Time, Mass, Volume, Velocity, ...
+```
+
+`CreateDimension(name, "Length", v)`가 돌려주는 wrapper 타입은 `Dimension`이 아니라
+파생 타입 **`Length`** 다 (`com3dx`의 `Dispatch3dx`가 파생 타입으로 cast해 준다).
+
+**이름이 생성 경로에 따라 다르다.**
+
+```text
+CreateDimension("Span", ...) 로 만든 것 -> Name == "3D Shape00422533\Span"   (정규화)
+CATIA UI f(x) 로 만든 것                -> Name == "AUTO3DX_TEST_LENGTH"      (짧은 이름)
+조회는 짧은 이름과 정규화 이름 둘 다 동작한다.
+```
+
+그래서 `Parameter.name`은 CATIA가 준 값을 그대로 두고, `short_name`이 마지막
+`\` 뒤만 돌려준다. 파라미터 셋을 쓰면 짧은 이름은 유일하지 않으므로 `name`이 정본이다.
+
+**반드시 막아야 하는 CATIA 동작 3가지** (모두 실측):
+
+| 입력 | CATIA 동작 | 라이브러리 대응 |
+|---|---|---|
+| 이미 있는 이름 | **조용히 수락**, 같은 이름의 파라미터가 2개 생김 | 사전 존재 검사 후 `ParameterAlreadyExistsError` |
+| 빈 이름 | 수락 후 `Length.3`으로 자동 명명 | `ParameterNameError` |
+| 이름에 `\` 포함 | 수락, `A\B`가 되어 정규화 이름과 구분 불가 | `ParameterNameError` |
+
+중복 이름 가드는 **COM 호출 전에** 동작해야 한다. 도달하는 것 자체가 버그다.
+
+`Parameters.Remove(name)`는 정규화 이름으로 동작하고, 제거 후 `Count`가 정상적으로
+줄어든다. `Part.Update()`도 제거 후 성공한다.
 
 ---
 

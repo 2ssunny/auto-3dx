@@ -116,6 +116,7 @@ def test_parameter_info_returns_matching_parameter_info(fake_length: Any) -> Non
 
     assert info == ParameterInfo(
         name=fake_length.Name,
+        short_name=fake_length.Name,
         kind="Length",
         value=fake_length.Value,
         unit=MILLIMETRE,

@@ -90,9 +90,16 @@ class Parameters:
     (e.g. to pin the 1-based indexing contract).
     """
 
-    def __init__(self, items: list[tuple[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        items: list[tuple[str, Any]] | None = None,
+        container: str = "3D Shape00422533",
+    ) -> None:
         self._items: list[tuple[str, Any]] = list(items or [])
+        self.container = container
         self.item_calls: list[Any] = []
+        self.create_calls: list[tuple[str, str, Any]] = []
+        self.remove_calls: list[str] = []
 
     @property
     def Count(self) -> int:
@@ -108,6 +115,31 @@ class Parameters:
         for name, obj in self._items:
             if name == key:
                 return obj
+        # A qualified name resolves too, matching the real collection, which
+        # accepts both "Span" and "3D Shape00422533\\Span".
+        for name, obj in self._items:
+            if name.rsplit("\\", 1)[-1] == str(key).rsplit("\\", 1)[-1]:
+                return obj
+        raise make_com_error()
+
+    def CreateDimension(self, iName: str, iMagnitude: str, iValue: float) -> Any:
+        """Mimics the real method, which qualifies the stored name.
+
+        The real `CreateDimension` also accepts a duplicate name and creates a
+        second parameter with the identical name. This fake reproduces that so a
+        test can prove the library refuses before ever reaching COM.
+        """
+        self.create_calls.append((iName, iMagnitude, iValue))
+        created = Length(name=f"{self.container}\\{iName}", value=iValue)
+        self._items.append((created.Name, created))
+        return created
+
+    def Remove(self, iIndex: Any) -> None:
+        self.remove_calls.append(iIndex)
+        for position, (name, _) in enumerate(self._items):
+            if name == iIndex:
+                del self._items[position]
+                return
         raise make_com_error()
 
 

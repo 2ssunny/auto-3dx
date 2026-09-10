@@ -11,10 +11,23 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.errors import Auto3dxError, ParameterTypeError, UnsupportedUnitError
+from auto_3dx.errors import (
+    Auto3dxError,
+    ParameterNameError,
+    ParameterTypeError,
+    UnsupportedUnitError,
+)
 
 LENGTH_KIND: str = "Length"
 """The `type(com_object).__name__` value for a CATIA Length parameter."""
+
+LENGTH_MAGNITUDE: str = "Length"
+"""The `iMagnitude` string `Parameters.CreateDimension` expects for a length.
+
+Verified against this installation's `Parameters.Units` collection, whose
+magnitudes are capitalised names (`Length`, `Angle`, `Mass`, ...) rather than
+the upper-case forms used by older CATIA documentation.
+"""
 
 MILLIMETRE: str = "mm"
 """The only supported unit string for Length parameters."""
@@ -22,19 +35,26 @@ MILLIMETRE: str = "mm"
 SUPPORTED_LENGTH_UNITS: frozenset[str] = frozenset({MILLIMETRE})
 """Units accepted by :meth:`Parameter.set` for Length parameters."""
 
+NAME_SEPARATOR: str = "\\"
+"""Separator CATIA uses between a parameter's container path and its own name."""
+
 
 @dataclasses.dataclass(frozen=True)
 class ParameterInfo:
     """Immutable snapshot of a parameter's identity and current state.
 
     Attributes:
-        name: The parameter's name, as reported by CATIA.
+        name: The parameter's name exactly as reported by CATIA. This may be
+            container-qualified (``"3D Shape00422533\\Span"``) or bare
+            (``"Span"``) depending on how the parameter was created.
+        short_name: `name` with any container path stripped.
         kind: The COM wrapper type name (e.g. ``"Length"``).
         value: The parameter's current value.
         unit: The unit the value is expressed in, or `None` if unknown.
     """
 
     name: str
+    short_name: str
     kind: str
     value: Any
     unit: str | None
@@ -82,6 +102,27 @@ class Parameter:
             return self._com_object.Name
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    @property
+    def short_name(self) -> str:
+        """Returns the parameter's name without its container path.
+
+        CATIA reports `Name` differently depending on how the parameter was
+        created: a parameter made by `Parameters.CreateDimension` reports a
+        qualified ``"<container>\\<name>"``, while one added through the CATIA
+        f(x) dialog reports just ``"<name>"``. This property normalises both to
+        the trailing segment.
+
+        Short names are not guaranteed unique once parameter sets are involved,
+        so `name` remains the authoritative identifier.
+
+        Returns:
+            The segment of `name` after the last `NAME_SEPARATOR`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self.name.rsplit(NAME_SEPARATOR, 1)[-1]
 
     @property
     def kind(self) -> str:
@@ -152,24 +193,10 @@ class Parameter:
                 f"Parameter kind {kind!r} is not supported for set(); "
                 f"only {LENGTH_KIND!r} parameters can be set."
             )
-        # The isinstance guard comes first because `in` on a frozenset hashes the
-        # candidate, so an unhashable unit would raise TypeError instead of
-        # UnsupportedUnitError.
-        if not isinstance(unit, str) or unit not in SUPPORTED_LENGTH_UNITS:
-            raise UnsupportedUnitError(
-                f"Unit {unit!r} is not supported; supported units are "
-                f"{sorted(SUPPORTED_LENGTH_UNITS)}."
-            )
-        if isinstance(value, bool):
-            raise ParameterTypeError(
-                f"Value must be an int or float, not bool ({value!r})."
-            )
-        if not isinstance(value, (int, float)):
-            raise ParameterTypeError(
-                f"Value must be an int or float, got {type(value).__name__}."
-            )
+        validate_length_unit(unit)
+        coerced = validate_length_value(value)
         try:
-            self._com_object.Value = float(value)
+            self._com_object.Value = coerced
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -183,8 +210,10 @@ class Parameter:
         Raises:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
+        name = self.name
         return ParameterInfo(
-            name=self.name,
+            name=name,
+            short_name=name.rsplit(NAME_SEPARATOR, 1)[-1],
             kind=self.kind,
             value=self.value,
             unit=self.unit,
@@ -204,6 +233,83 @@ class Parameter:
             name = "<unavailable>"
             value = "<unavailable>"
         return f"Parameter(name={name!r}, kind={self.kind!r}, value={value!r})"
+
+
+def validate_length_unit(unit: str) -> None:
+    """Checks that a unit is one this library can write a Length in.
+
+    Args:
+        unit: The unit string to check.
+
+    Raises:
+        UnsupportedUnitError: If `unit` is not a supported unit string.
+    """
+    # The isinstance guard comes first because `in` on a frozenset hashes the
+    # candidate, so an unhashable unit would raise TypeError instead of
+    # UnsupportedUnitError.
+    if not isinstance(unit, str) or unit not in SUPPORTED_LENGTH_UNITS:
+        raise UnsupportedUnitError(
+            f"Unit {unit!r} is not supported; supported units are "
+            f"{sorted(SUPPORTED_LENGTH_UNITS)}."
+        )
+
+
+def validate_length_value(value: float) -> float:
+    """Checks a Length value and coerces it to `float`.
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        `value` as a `float`.
+
+    Raises:
+        ParameterTypeError: If `value` is a `bool` or is not an `int`/`float`.
+    """
+    # bool is a subclass of int, so without this branch True would silently
+    # become 1.0.
+    if isinstance(value, bool):
+        raise ParameterTypeError(f"Value must be an int or float, not bool ({value!r}).")
+    if not isinstance(value, (int, float)):
+        raise ParameterTypeError(
+            f"Value must be an int or float, got {type(value).__name__}."
+        )
+    return float(value)
+
+
+def validate_parameter_name(name: str) -> str:
+    """Checks that a requested new-parameter name is addressable afterwards.
+
+    CATIA accepts names the caller cannot then reliably look up: an empty name
+    is auto-numbered (``Length.3``), and a name containing the container
+    separator produces something indistinguishable from a qualified name. Both
+    are rejected here rather than silently creating an unreachable parameter.
+
+    Args:
+        name: The requested parameter name.
+
+    Returns:
+        `name` unchanged.
+
+    Raises:
+        ParameterNameError: If `name` is not a non-empty `str` without
+            surrounding whitespace and without `NAME_SEPARATOR`.
+    """
+    if not isinstance(name, str):
+        raise ParameterNameError(
+            f"Parameter name must be a str, got {type(name).__name__}."
+        )
+    if not name or name != name.strip():
+        raise ParameterNameError(
+            f"Parameter name must be non-empty and free of surrounding "
+            f"whitespace, got {name!r}."
+        )
+    if NAME_SEPARATOR in name:
+        raise ParameterNameError(
+            f"Parameter name must not contain {NAME_SEPARATOR!r}, which CATIA "
+            f"uses as the container separator, got {name!r}."
+        )
+    return name
 
 
 def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
