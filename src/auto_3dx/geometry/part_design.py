@@ -34,6 +34,17 @@ None of these features has a dedicated typed sub-collection in the verified
 API surface, so `PartDesign` finds them all by scanning `MainBody.Shapes` and
 keeping items whose `type(item).__name__` matches the relevant `*_KIND`
 constant.
+
+`ConstRadEdgeFillet` and `Chamfer` (`docs/conventions.md` section 1.2.2.2) are
+the first two Part Design features built on a face/edge reference rather than
+a sketch. Getting there required a separate reference layer -- `geometry.edges`
+-- because the only verified way to name an edge is a `Reference` read from a
+`Selection.Search("Topology.Edge,all")` hit, and that reference's identity is
+far less durable than a `Sketch`'s: see `geometry.edges` for the full set of
+measured limits (index and BRep name are both non-durable; there is no way to
+scope the search to one feature) and for why neither feature ships an
+`ensure_*`. Both still reduce to nothing more than `com_object`/`name`, exactly
+like `Mirror`/`Rib`/`Slot`, via the same `_NamedFeature` base.
 """
 
 import math
@@ -48,9 +59,11 @@ from auto_3dx.errors import (
     FeatureNotFoundError,
     PartialCreationError,
     ParameterTypeError,
+    StaleEdgeSnapshotError,
     UnsupportedSupportError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
+from auto_3dx.geometry.edges import Edge, EdgeSnapshot, take_edge_snapshot
 from auto_3dx.geometry.sketch import (
     SUPPORT_YZ,
     SUPPORTED_SKETCH_SUPPORTS,
@@ -92,6 +105,67 @@ RIB_KIND: str = "Rib"
 
 SLOT_KIND: str = "Slot"
 """The `type(com_object).__name__` value for a CATIA Slot feature."""
+
+EDGE_FILLET_KIND: str = "ConstRadEdgeFillet"
+"""The `type(com_object).__name__` value for a CATIA constant-radius edge fillet."""
+
+CHAMFER_KIND: str = "Chamfer"
+"""The `type(com_object).__name__` value for a CATIA Chamfer feature."""
+
+EDGE_FILLET_PROPAGATION_VERIFIED: int = 1
+"""The only `iPropagMode` value verified for `AddNewEdgeFilletWithConstantRadius`.
+
+Verified against a live session (`docs/conventions.md` section 1.2.2.2):
+creating a fillet with this propagation mode and then calling
+`Part.Update()` succeeded. No other value has been tried against a real
+session, so it is the only one `create_edge_fillet` accepts today.
+"""
+
+SUPPORTED_EDGE_FILLET_PROPAGATIONS: frozenset[int] = frozenset({EDGE_FILLET_PROPAGATION_VERIFIED})
+"""The `iPropagMode` values `create_edge_fillet` accepts. Currently just one."""
+
+CHAMFER_MODE_VERIFIED: int = 1
+"""The only working `iMode` value for `AddNewChamfer`.
+
+Verified against a live session (`docs/conventions.md` section 1.2.2.2):
+mode 0 creates a feature whose `Part.Update()` fails, and mode 2 fails at
+creation. Only mode 1 both creates and updates successfully. `create_chamfer`
+always passes this value and does not expose `mode` as a parameter at all --
+neither 0 nor 2 is offered under any name.
+"""
+
+CHAMFER_PROPAGATION_0: int = 0
+CHAMFER_PROPAGATION_1: int = 1
+"""The two `iPropagation` values verified for `AddNewChamfer`.
+
+The type library attaches no enum metadata to `iPropagation` (it is a plain
+`VT_I4` with no `IID`), so its meaning is not recorded anywhere this library
+can read -- only that both 0 and 1 create a feature that then updates
+successfully, for both `iOrientation` values (`docs/conventions.md` section
+1.2.2.2). Do not infer a meaning (e.g. "minimal" vs. "all tangent") from
+these names; they are named by value, not by behavior, because the behavior
+is not known.
+"""
+
+SUPPORTED_CHAMFER_PROPAGATIONS: frozenset[int] = frozenset(
+    {CHAMFER_PROPAGATION_0, CHAMFER_PROPAGATION_1}
+)
+"""The `iPropagation` values `create_chamfer` accepts."""
+
+CHAMFER_ORIENTATION_0: int = 0
+CHAMFER_ORIENTATION_1: int = 1
+"""The two `iOrientation` values verified for `AddNewChamfer`.
+
+Same caveat as `CHAMFER_PROPAGATION_0`/`CHAMFER_PROPAGATION_1`: no enum
+metadata exists for this integer either, so these are named by value, not by
+a guessed meaning. Both values updated successfully for every verified
+`iPropagation` value.
+"""
+
+SUPPORTED_CHAMFER_ORIENTATIONS: frozenset[int] = frozenset(
+    {CHAMFER_ORIENTATION_0, CHAMFER_ORIENTATION_1}
+)
+"""The `iOrientation` values `create_chamfer` accepts."""
 
 RECTANGULAR_PATTERN_KIND: str = "RectPattern"
 """The `type(com_object).__name__` value for a CATIA rectangular pattern."""
@@ -177,6 +251,32 @@ def _scan_shapes(shapes: Any, kind: str) -> "list[Any]":
         if type(item).__name__ == kind:
             result.append(item)
     return result
+
+
+def _validate_positive_length(value: float, label: str) -> float:
+    """Validates a strictly positive length-like value before a COM call.
+
+    Shared by `create_edge_fillet` (radius) and `create_chamfer` (both
+    length arguments), which all need "finite, positive, coerced to float"
+    on top of what `validate_length_value` alone enforces (numeric, not a
+    `bool`).
+
+    Args:
+        value: The candidate value.
+        label: What this value represents (e.g. `"radius"`), used only in
+            the error message.
+
+    Returns:
+        `value` coerced to `float`.
+
+    Raises:
+        ParameterTypeError: If `value` is a `bool`, is not an `int`/`float`,
+            or is not finite and strictly positive.
+    """
+    coerced = validate_length_value(value)
+    if not math.isfinite(coerced) or coerced <= 0.0:
+        raise ParameterTypeError(f"{label} must be finite and positive, not {value!r}.")
+    return coerced
 
 
 class SketchFeature:
@@ -668,6 +768,35 @@ class Slot(_NamedFeature):
             raise _wrap_com_error(error) from error
 
 
+class ConstRadEdgeFillet(_NamedFeature):
+    """Wraps a raw CATIA `ConstRadEdgeFillet` COM object.
+
+    Created by `AddNewEdgeFilletWithConstantRadius(edge_reference,
+    propagation, radius)` from one edge `Reference` (`geometry.edges.Edge`),
+    never a face (`docs/conventions.md` section 1.2.2.2: a face reference is
+    rejected by this factory for every propagation mode tried). Reduces to
+    nothing more than `com_object`/`name`, exactly like `Mirror`/`Rib`/`Slot`:
+    there is no verified way to read the source edge back from a fillet, so
+    -- unlike `Pad`/`Shaft`, which can compare their source `Sketch` -- this
+    wrapper carries no accessor that could tempt a caller into comparing it
+    against a stored `Edge`. See `geometry.edges` for why that also means
+    there is no `ensure_edge_fillet`.
+    """
+
+
+class Chamfer(_NamedFeature):
+    """Wraps a raw CATIA `Chamfer` COM object.
+
+    Created by `AddNewChamfer(edge_reference, propagation, mode, orientation,
+    length1, length2_or_angle)` with `mode` always `CHAMFER_MODE_VERIFIED`
+    (`docs/conventions.md` section 1.2.2.2): mode 0 creates a feature whose
+    `Part.Update()` fails and mode 2 fails at creation, so this library never
+    passes either. Reduces to `com_object`/`name` only, for the same reason
+    as `ConstRadEdgeFillet`: there is no verified way to read the source edge
+    back, so there is no `ensure_chamfer` either (`geometry.edges`).
+    """
+
+
 class RectangularPattern:
     """Wraps a raw CATIA `RectPattern` COM object.
 
@@ -721,6 +850,15 @@ class PartDesign:
 
     Rectangular patterns are different: only creation and exact-wrapper
     cleanup are verified. They are not scanned or looked up by name.
+
+    Edge fillets and chamfers (`ConstRadEdgeFillet`/`Chamfer`) are read and
+    created the same way -- `_list`/`_get`/`_create_feature`/`_remove` with
+    `EDGE_FILLET_KIND`/`CHAMFER_KIND` -- but they take an edge `Reference`
+    (`geometry.edges.Edge`) instead of a `Sketch`, obtained through
+    `snapshot_edges()`. There is no `ensure_edge_fillet`/`ensure_chamfer`:
+    unlike a `Sketch`, an edge has no verified, stable handle a caller can
+    read back and compare, so `_ensure_by_sketch` does not apply and no
+    truthful substitute exists (`geometry.edges` explains why in full).
     """
 
     def __init__(self, part_com_object: Any, selection: Any = None) -> None:
@@ -738,6 +876,48 @@ class PartDesign:
         """
         self._part_com_object = part_com_object
         self._selection = selection
+        # Bumped by every method that changes the model, so an edge snapshot
+        # taken before a change can be recognised as stale. Reusing one is the
+        # single sharpest edge in this API: it sometimes works and sometimes
+        # fails, at creation or at update, depending on whether that particular
+        # edge survived the change (`geometry.edges`, fact 1).
+        self._generation = 0
+
+    @property
+    def snapshot_generation(self) -> int:
+        """int: How many model changes this wrapper has made.
+
+        An `EdgeSnapshot` is stamped with this value when it is taken, and is
+        refused once the two no longer agree. Exposed so a caller can tell
+        whether a snapshot it is holding is still current without having to
+        catch `StaleEdgeSnapshotError`.
+        """
+        return self._generation
+
+    def _record_model_change(self) -> None:
+        """Marks every outstanding edge snapshot as describing an older model."""
+        self._generation += 1
+
+    def _require_current_edge(self, edge: Edge, noun: str) -> None:
+        """Refuses an `Edge` whose snapshot predates the latest model change.
+
+        Args:
+            edge: The edge the caller passed.
+            noun: What is being created, for the error message.
+
+        Raises:
+            StaleEdgeSnapshotError: If the edge came from a snapshot taken
+                before this `PartDesign` last changed the model.
+        """
+        if edge.generation != self._generation:
+            raise StaleEdgeSnapshotError(
+                f"This edge came from a snapshot of an older model "
+                f"(generation {edge.generation}, now {self._generation}), so it "
+                f"cannot be used to create a {noun}. CATIA would accept it "
+                "sometimes and fail unpredictably at creation or at update. "
+                "Call snapshot_edges() again and pick the edge from the new "
+                "snapshot."
+            )
 
     def _shapes(self) -> Any:
         """Returns the raw `MainBody.Shapes` collection.
@@ -914,6 +1094,10 @@ class PartDesign:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
         feature = wrapper_cls(com_object)
+        # The model has changed the moment AddNew* returns, so any outstanding
+        # edge snapshot is already stale -- including on the rename failure
+        # below, which leaves the feature in the tree.
+        self._record_model_change()
         # AddNew* already mutated the model; if the rename below fails, a
         # default-named feature is left behind rather than rolled back
         # (deleting a pad/pocket cascade-deletes its sketch, which makes
@@ -1107,6 +1291,7 @@ class PartDesign:
         """
         target = get_method(name)
         delete_via_selection(self._selection, target.com_object, f"{noun} {name!r}")
+        self._record_model_change()
 
     @property
     def pads(self) -> "list[Pad]":
@@ -2007,6 +2192,296 @@ class PartDesign:
                 failed.
         """
         self._remove(name, self.get_slot, "slot")
+
+    def snapshot_edges(self) -> EdgeSnapshot:
+        """Takes a fresh snapshot of every edge of the Part's solid.
+
+        This is the only verified way to obtain an edge reference
+        (`docs/conventions.md` section 1.2.2.2, `geometry.edges`):
+        `Selection.Clear()`, `Selection.Search("Topology.Edge,all")`, then
+        `SelectedElement.Reference` for each hit. The result describes the
+        model exactly as it stands right now -- edge count and search order
+        both change after any modification (measured: 29, then 32 after one
+        fillet, then 38, then 41) -- so take a new snapshot after a
+        `create_edge_fillet`/`create_chamfer` call rather than reusing an old
+        one across a model change. See `geometry.edges` for the full
+        rationale, including why an `Edge` from an older snapshot remains
+        usable even though its `index` does not.
+
+        Returns:
+            A fresh `EdgeSnapshot`.
+
+        Raises:
+            Auto3dxError: If no editor selection is available, or the
+                underlying COM call fails unexpectedly.
+        """
+        return take_edge_snapshot(self._selection, self._generation)
+
+    @property
+    def edge_fillets(self) -> "list[ConstRadEdgeFillet]":
+        """Lists every constant-radius edge fillet on the Part's `MainBody`.
+
+        Returns:
+            A `ConstRadEdgeFillet` wrapper for each item in `MainBody.Shapes`
+            whose wrapper type is `EDGE_FILLET_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(EDGE_FILLET_KIND, ConstRadEdgeFillet)
+
+    def get_edge_fillet(self, name: str) -> ConstRadEdgeFillet:
+        """Looks up an edge fillet by name.
+
+        Args:
+            name: The fillet's name.
+
+        Returns:
+            The matching `ConstRadEdgeFillet`.
+
+        Raises:
+            FeatureNotFoundError: If no edge fillet named `name` exists.
+            AmbiguousNameError: If two or more edge fillets named `name`
+                exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(EDGE_FILLET_KIND, ConstRadEdgeFillet, "edge fillet", name)
+
+    def create_edge_fillet(
+        self,
+        name: str,
+        edge: Edge,
+        radius: float,
+        unit: str = MILLIMETRE,
+        propagation: int = EDGE_FILLET_PROPAGATION_VERIFIED,
+    ) -> ConstRadEdgeFillet:
+        """Creates a new constant-radius fillet on one edge.
+
+        Verified (`docs/conventions.md` section 1.2.2.2):
+        `AddNewEdgeFilletWithConstantRadius(edge_reference, propagation,
+        radius)` both created the feature and survived `Part.Update()`, with
+        `propagation = EDGE_FILLET_PROPAGATION_VERIFIED` (1). No other
+        propagation value has been tried against a live session, so it is
+        the only one this method accepts.
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle
+        `PartUpdateError`. **A failed update leaves the fillet in the tree,
+        and every later `Part.Update()` fails too until it is removed** --
+        this is exactly what made an earlier probe look like a cascade of
+        unrelated failures. Remove it with `remove_edge_fillet` before
+        retrying; do not retry blindly.
+
+        Args:
+            name: The new fillet's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            edge: The `Edge` to fillet, from `snapshot_edges()`.
+            radius: The fillet radius. Must be finite and positive.
+            unit: The unit `radius` is expressed in. Defaults to
+                `MILLIMETRE`.
+            propagation: One of `SUPPORTED_EDGE_FILLET_PROPAGATIONS`.
+                Defaults to `EDGE_FILLET_PROPAGATION_VERIFIED`, the only
+                value verified against a live session.
+
+        Returns:
+            The newly created `ConstRadEdgeFillet`, already renamed to
+            `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `edge` is not an `Edge`, `radius` is not
+                finite and positive, or `propagation` is not supported.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            FeatureConflictError: If an edge fillet named `name` already
+                exists.
+            AmbiguousNameError: If two or more edge fillets named `name`
+                already exist.
+            PartialCreationError: If the fillet was created but the
+                follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, `edge` no longer resolves to a real edge).
+        """
+        validate_parameter_name(name)
+        if not isinstance(edge, Edge):
+            raise ParameterTypeError(
+                "edge must be an Edge from PartDesign.snapshot_edges(), not "
+                f"{type(edge).__name__}."
+            )
+        self._require_current_edge(edge, "fillet")
+        if propagation not in SUPPORTED_EDGE_FILLET_PROPAGATIONS:
+            raise ParameterTypeError(
+                f"propagation must be one of {sorted(SUPPORTED_EDGE_FILLET_PROPAGATIONS)}, "
+                f"not {propagation!r}."
+            )
+        validate_length_unit(unit)
+        coerced_radius = _validate_positive_length(radius, "radius")
+        return self._create_feature(
+            name,
+            EDGE_FILLET_KIND,
+            "AddNewEdgeFilletWithConstantRadius",
+            (edge.com_object, propagation, coerced_radius),
+            ConstRadEdgeFillet,
+            "edge fillet",
+        )
+
+    def remove_edge_fillet(self, name: str) -> None:
+        """Removes an edge fillet from the model.
+
+        Args:
+            name: The fillet's name.
+
+        Raises:
+            FeatureNotFoundError: If no edge fillet named `name` exists.
+            Auto3dxError: If no editor selection is available, or the
+                deletion failed.
+        """
+        self._remove(name, self.get_edge_fillet, "edge fillet")
+
+    @property
+    def chamfers(self) -> "list[Chamfer]":
+        """Lists every chamfer on the Part's `MainBody`.
+
+        Returns:
+            A `Chamfer` wrapper for each item in `MainBody.Shapes` whose
+            wrapper type is `CHAMFER_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(CHAMFER_KIND, Chamfer)
+
+    def get_chamfer(self, name: str) -> Chamfer:
+        """Looks up a chamfer by name.
+
+        Args:
+            name: The chamfer's name.
+
+        Returns:
+            The matching `Chamfer`.
+
+        Raises:
+            FeatureNotFoundError: If no chamfer named `name` exists.
+            AmbiguousNameError: If two or more chamfers named `name` exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(CHAMFER_KIND, Chamfer, "chamfer", name)
+
+    def create_chamfer(
+        self,
+        name: str,
+        edge: Edge,
+        length1: float,
+        length2_or_angle: float,
+        propagation: int,
+        orientation: int,
+        unit: str = MILLIMETRE,
+    ) -> Chamfer:
+        """Creates a new chamfer on one edge.
+
+        Verified (`docs/conventions.md` section 1.2.2.2):
+        `AddNewChamfer(edge_reference, propagation, mode, orientation,
+        length1, length2_or_angle)` created the feature AND survived
+        `Part.Update()` for every combination of `propagation` in
+        `SUPPORTED_CHAMFER_PROPAGATIONS` (0, 1) and `orientation` in
+        `SUPPORTED_CHAMFER_ORIENTATIONS` (0, 1), with `length1 = 1.5` and
+        `length2_or_angle = 45.0`. `mode` is always `CHAMFER_MODE_VERIFIED`
+        (1): mode 0 creates a feature whose update fails, and mode 2 fails at
+        creation, so this method does not expose `mode` as a parameter at
+        all -- neither 0 nor 2 is offered under any name.
+
+        Neither `propagation` nor `orientation` carries attached enum
+        metadata in the type library (both are plain `VT_I4`), so their
+        meaning is unknown; only their verified-safe integer values are
+        recorded as constants here (`CHAMFER_PROPAGATION_0`/`_1`,
+        `CHAMFER_ORIENTATION_0`/`_1`).
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle
+        `PartUpdateError`. **A failed update leaves the chamfer in the tree,
+        and every later `Part.Update()` fails too until it is removed** --
+        this is exactly what made an earlier probe look like a cascade of
+        unrelated failures. Remove it with `remove_chamfer` before retrying;
+        do not retry blindly.
+
+        Args:
+            name: The new chamfer's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            edge: The `Edge` to chamfer, from `snapshot_edges()`.
+            length1: The first chamfer length. Must be finite and positive.
+            length2_or_angle: The second chamfer length or angle. Must be
+                finite and positive.
+            propagation: One of `SUPPORTED_CHAMFER_PROPAGATIONS`.
+            orientation: One of `SUPPORTED_CHAMFER_ORIENTATIONS`.
+            unit: The unit `length1`/`length2_or_angle` are expressed in.
+                Defaults to `MILLIMETRE`.
+
+        Returns:
+            The newly created `Chamfer`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `edge` is not an `Edge`, `length1`/
+                `length2_or_angle` is not finite and positive, or
+                `propagation`/`orientation` is not supported.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            FeatureConflictError: If a chamfer named `name` already exists.
+            AmbiguousNameError: If two or more chamfers named `name` already
+                exist.
+            PartialCreationError: If the chamfer was created but the
+                follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, `edge` no longer resolves to a real edge).
+        """
+        validate_parameter_name(name)
+        if not isinstance(edge, Edge):
+            raise ParameterTypeError(
+                "edge must be an Edge from PartDesign.snapshot_edges(), not "
+                f"{type(edge).__name__}."
+            )
+        self._require_current_edge(edge, "chamfer")
+        if propagation not in SUPPORTED_CHAMFER_PROPAGATIONS:
+            raise ParameterTypeError(
+                f"propagation must be one of {sorted(SUPPORTED_CHAMFER_PROPAGATIONS)}, "
+                f"not {propagation!r}."
+            )
+        if orientation not in SUPPORTED_CHAMFER_ORIENTATIONS:
+            raise ParameterTypeError(
+                f"orientation must be one of {sorted(SUPPORTED_CHAMFER_ORIENTATIONS)}, "
+                f"not {orientation!r}."
+            )
+        validate_length_unit(unit)
+        coerced_length1 = _validate_positive_length(length1, "length1")
+        coerced_length2 = _validate_positive_length(length2_or_angle, "length2_or_angle")
+        return self._create_feature(
+            name,
+            CHAMFER_KIND,
+            "AddNewChamfer",
+            (
+                edge.com_object,
+                propagation,
+                CHAMFER_MODE_VERIFIED,
+                orientation,
+                coerced_length1,
+                coerced_length2,
+            ),
+            Chamfer,
+            "chamfer",
+        )
+
+    def remove_chamfer(self, name: str) -> None:
+        """Removes a chamfer from the model.
+
+        Args:
+            name: The chamfer's name.
+
+        Raises:
+            FeatureNotFoundError: If no chamfer named `name` exists.
+            Auto3dxError: If no editor selection is available, or the
+                deletion failed.
+        """
+        self._remove(name, self.get_chamfer, "chamfer")
 
     def create_rectangular_pattern(
         self,

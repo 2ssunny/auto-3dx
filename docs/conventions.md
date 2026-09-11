@@ -681,9 +681,17 @@ AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
 면 Reference를 fillet이나 chamfer에 넣으면 propagation 0·1·2 전부 실패한다. fillet은
 모서리를 요구한다. chamfer도 모서리를 받으며, 인자는 아래에서 확정했다.
 
-**첫 fillet 이후 모든 시도가 update에서 실패한 원인은 stale reference가 아니었다**
-(probe 34). 신선한 검색으로 fillet 3개를 연달아 만들어도 전부 통과하고, **같은 검색 결과로
-2개를 만들어도 통과한다.** 수정 후에도 기존 Reference는 그대로 쓸 수 있다.
+**첫 fillet 이후 모든 시도가 update에서 실패한 원인은 두 가지가 겹친 것이었다** (probes 34·35).
+
+신선한 검색으로 fillet 3개를 연달아 만들면 전부 통과한다. probe 34에서는 같은 검색 결과로
+2개를 만들어도 통과했는데, **그건 우연이었다.** 평면 pad 하나에 fillet을 걸고 나서 같은
+snapshot으로 두 번째를 만들면 다음 모서리·중간 모서리·마지막 모서리 **전부 실패한다**(둘은
+생성 단계에서, 하나는 update에서). 새 snapshot의 첫 모서리는 성공한다.
+
+즉 **수정 후 기존 Reference가 통할지는 예측할 수 없다.** 그 모서리가 변경을 그대로 견뎠는지에
+달려 있고 호출자는 그걸 알 수 없다. 그래서 라이브러리는 `PartDesign`이 모델을 바꾸는 순간
+기존 snapshot을 stale로 표시하고, 이후 사용은 COM에 닿기 전에 `StaleEdgeSnapshotError`로
+거부한다. 되는지 안 되는지 모르는 호출을 그대로 내보내지 않는다.
 
 **실제 원인: update가 한 번 실패하면 그 feature를 지우기 전까지 이후 update가 전부 실패한다.**
 probe 28은 update가 실패한 chamfer를 트리에 남긴 채 다음으로 넘어갔다. 따라서 `create_*` 뒤

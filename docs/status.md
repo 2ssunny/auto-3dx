@@ -125,10 +125,14 @@ AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
 
 probe 34·35에서 나머지가 풀렸다.
 
-첫 fillet 이후의 실패는 stale reference 때문이 아니었다. 신선한 검색으로 fillet 3개를
-연달아 만들어도, 같은 검색 결과로 2개를 만들어도 전부 update가 통과한다. 진짜 원인은
-**update가 한 번 실패하면 그 feature를 지우기 전까지 이후 update가 전부 실패한다**는 것이고,
-probe 28은 update가 실패한 chamfer를 트리에 남긴 채 진행했다.
+첫 fillet 이후의 실패는 두 가지가 겹친 것이었다. 하나는 **update가 한 번 실패하면 그 feature를
+지우기 전까지 이후 update가 전부 실패한다**는 것이고, probe 28은 실패한 chamfer를 남긴 채
+진행했다. 다른 하나는 stale reference가 실제로 문제라는 것이다. probe 34에서 같은 snapshot으로
+2개를 만든 것이 통과했지만 그건 우연이었고, 평면 pad에서 다시 확인하니 다음·중간·마지막 모서리
+전부 실패했다(둘은 생성, 하나는 update). 새 snapshot은 성공한다.
+
+**되는지 안 되는지 예측할 수 없으므로** 라이브러리가 막는다. `PartDesign`이 모델을 바꾸면
+기존 edge snapshot이 stale이 되고, 이후 사용은 COM 전에 `StaleEdgeSnapshotError`가 된다.
 
 chamfer 인자도 확정했다. `iMode=1`만 동작한다(0은 update 실패, 2는 생성 실패). propagation과
 orientation은 0·1 모두 통과한다.
@@ -328,7 +332,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 
 | 순서 | 항목 | 난이도 | 비고 |
 |---|---|---|---|
-| 1 | **모서리 fillet·chamfer API** | 중간 | 두 feature 모두 검증됐다 (2.2). durable selector가 없다는 한계를 드러내는 설계가 핵심 |
+| 1 | 모서리 fillet·chamfer API | 완료 | 두 feature 모두 구현·live 검증. stale snapshot은 COM 전에 거부한다 |
 | 2 | chamfer 인자 확정 | 완료 | `iMode=1`만 동작한다 (probe 35) |
 | 3 | 사용자 정의 평면 API | 중간 | offset·각도 평면 모두 pad까지 검증됐다 (probe 36, conventions 1.2.7) |
 | 4 | `IsUpToDate` 의미 확인 | 완료 | `Part.is_up_to_date()` 구현 및 live false→true 전이 검증 (2.6) |

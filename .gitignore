@@ -8,3 +8,5 @@ dist/
 # Scratch directory another local tool writes into.
 /.codex/
 
+# pytest basetemp, when a run is given one inside the repo.
+/.pytest_temp/

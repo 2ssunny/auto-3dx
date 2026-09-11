@@ -125,3 +125,21 @@ class ConstraintNotFoundError(Auto3dxError):
 
 class UnsupportedMagnitudeError(Auto3dxError):
     """Raised when a `CreateDimension` magnitude is not in the unit catalogue."""
+
+
+class StaleEdgeSnapshotError(Auto3dxError):
+    """Raised when an `Edge` from a snapshot of an older model is used.
+
+    Edge references are the one place in this API where reusing a handle after
+    a model change is genuinely unpredictable. Measured on a plain cube with
+    one fillet already applied, a second fillet from the same snapshot failed
+    for the next edge, the middle edge and the last edge alike -- two of those
+    failed at the creation call and one at `Part.Update()` -- while a fresh
+    snapshot's first edge succeeded. In another model two features from one
+    snapshot both worked. Whether reuse succeeds depends on whether that
+    particular edge survived the change untouched, which a caller cannot know.
+
+    Rather than pass that coin flip on, the library refuses the stale handle
+    before reaching COM. The fix is always the same: take a new snapshot.
+    """
+

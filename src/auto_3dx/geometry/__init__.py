@@ -2,13 +2,14 @@
 
 Exposes `Sketch`/`SketchCollection` (2D profiles on origin planes),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
-`Rib`/`Slot`/`RectangularPattern`/`PartDesign` (extruded, pocketed,
-revolved, mirrored, ribbed, slotted, and patterned solid features), and
-`Constraint`/`ConstraintCollection` (sketch
-constraints, created only through `SketchEditor` inside `Sketch.edit()`),
-matching the verified COM surface documented in `docs/conventions.md`
-sections 1.2/1.2.1/1.2.3/1.2.4/1.2.5/1.3 and the public API contract in
-sections 6.9/6.10/6.11/6.13/6.14/6.16/6.17.
+`Rib`/`Slot`/`RectangularPattern`/`ConstRadEdgeFillet`/`Chamfer`/`PartDesign`
+(extruded, pocketed, revolved, mirrored, ribbed, slotted, patterned, filleted,
+and chamfered solid features), `Edge`/`EdgeSnapshot` (the edge-reference layer
+those last two features are built on), and `Constraint`/`ConstraintCollection`
+(sketch constraints, created only through `SketchEditor` inside
+`Sketch.edit()`), matching the verified COM surface documented in
+`docs/conventions.md` sections 1.2/1.2.1/1.2.2/1.2.2.2/1.2.3/1.2.4/1.2.5/1.3
+and the public API contract in sections 6.9/6.10/6.11/6.13/6.14/6.16/6.17.
 """
 
 from auto_3dx.geometry.constraint import (
@@ -25,7 +26,16 @@ from auto_3dx.geometry.constraint import (
     Constraint,
     ConstraintCollection,
 )
+from auto_3dx.geometry.edges import EDGE_SEARCH_QUERY, Edge, EdgeSnapshot
 from auto_3dx.geometry.part_design import (
+    CHAMFER_KIND,
+    CHAMFER_MODE_VERIFIED,
+    CHAMFER_ORIENTATION_0,
+    CHAMFER_ORIENTATION_1,
+    CHAMFER_PROPAGATION_0,
+    CHAMFER_PROPAGATION_1,
+    EDGE_FILLET_KIND,
+    EDGE_FILLET_PROPAGATION_VERIFIED,
     FULL_REVOLUTION,
     GROOVE_KIND,
     LENGTH_TOLERANCE,
@@ -42,7 +52,12 @@ from auto_3dx.geometry.part_design import (
     RIB_KIND,
     SHAFT_KIND,
     SLOT_KIND,
+    SUPPORTED_CHAMFER_ORIENTATIONS,
+    SUPPORTED_CHAMFER_PROPAGATIONS,
+    SUPPORTED_EDGE_FILLET_PROPAGATIONS,
     SUPPORTED_PATTERN_DIRECTIONS,
+    Chamfer,
+    ConstRadEdgeFillet,
     Groove,
     Mirror,
     Pad,
@@ -102,6 +117,22 @@ __all__ = [
     "Rib",
     "Slot",
     "RectangularPattern",
+    "EDGE_SEARCH_QUERY",
+    "Edge",
+    "EdgeSnapshot",
+    "EDGE_FILLET_KIND",
+    "CHAMFER_KIND",
+    "EDGE_FILLET_PROPAGATION_VERIFIED",
+    "SUPPORTED_EDGE_FILLET_PROPAGATIONS",
+    "CHAMFER_MODE_VERIFIED",
+    "CHAMFER_PROPAGATION_0",
+    "CHAMFER_PROPAGATION_1",
+    "SUPPORTED_CHAMFER_PROPAGATIONS",
+    "CHAMFER_ORIENTATION_0",
+    "CHAMFER_ORIENTATION_1",
+    "SUPPORTED_CHAMFER_ORIENTATIONS",
+    "ConstRadEdgeFillet",
+    "Chamfer",
     "PartDesign",
     "CONSTRAINT_HORIZONTAL",
     "CONSTRAINT_VERTICAL",
