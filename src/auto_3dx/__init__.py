@@ -1,4 +1,4 @@
-"""Public API for auto_3dx: attach to a running 3DEXPERIENCE session and edit Part parameters."""
+"""Public API for automating a running 3DEXPERIENCE CATIA session."""
 
 from auto_3dx.core.application import Catia, EditorInfo
 from auto_3dx.core.part import Part
@@ -33,16 +33,21 @@ from auto_3dx.geometry.constraint import Constraint, ConstraintCollection
 from auto_3dx.geometry.part_design import (
     Groove,
     Mirror,
-    Rib,
     Pad,
     PartDesign,
     Pocket,
+    RectangularPattern,
     RevolvedFeature,
+    Rib,
     Shaft,
-    Slot,
     SketchFeature,
+    Slot,
 )
 from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
+from auto_3dx.measurement import (
+    MassProperties,
+    SolidMeasurement,
+)
 from auto_3dx.parameters.collection import ParameterCollection
 from auto_3dx.parameters.parameter import Parameter, ParameterInfo
 from auto_3dx.parameters.units import UnitCatalogue, UnitInfo
@@ -65,14 +70,17 @@ __all__ = [
     "Pad",
     "PartDesign",
     "Pocket",
+    "RectangularPattern",
     "RevolvedFeature",
     "Rib",
     "Shaft",
-    "Slot",
     "SketchFeature",
+    "Slot",
     "Sketch",
     "SketchCollection",
     "SketchEditor",
+    "MassProperties",
+    "SolidMeasurement",
     "AmbiguousNameError",
     "Auto3dxError",
     "CatiaConnectionError",

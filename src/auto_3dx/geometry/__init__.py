@@ -2,16 +2,18 @@
 
 Exposes `Sketch`/`SketchCollection` (2D profiles on origin planes),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
-`Rib`/`Slot`/`PartDesign` (extruded, pocketed, revolved, mirrored, ribbed,
-and slotted solid features), and `Constraint`/`ConstraintCollection` (sketch
+`Rib`/`Slot`/`RectangularPattern`/`PartDesign` (extruded, pocketed,
+revolved, mirrored, ribbed, slotted, and patterned solid features), and
+`Constraint`/`ConstraintCollection` (sketch
 constraints, created only through `SketchEditor` inside `Sketch.edit()`),
 matching the verified COM surface documented in `docs/conventions.md`
 sections 1.2/1.2.1/1.2.3/1.2.4/1.2.5/1.3 and the public API contract in
-sections 6.9/6.10/6.11/6.13/6.14/6.16.
+sections 6.9/6.10/6.11/6.13/6.14/6.16/6.17.
 """
 
 from auto_3dx.geometry.constraint import (
     CONSTRAINT_COINCIDENT,
+    CONSTRAINT_CONCENTRICITY,
     CONSTRAINT_DISTANCE,
     CONSTRAINT_HORIZONTAL,
     CONSTRAINT_LENGTH,
@@ -29,15 +31,24 @@ from auto_3dx.geometry.part_design import (
     LENGTH_TOLERANCE,
     MIRROR_KIND,
     PAD_KIND,
+    PATTERN_DIRECTION_NEGATIVE_X,
+    PATTERN_DIRECTION_NEGATIVE_Y,
+    PATTERN_DIRECTION_NEGATIVE_Z,
+    PATTERN_DIRECTION_X,
+    PATTERN_DIRECTION_Y,
+    PATTERN_DIRECTION_Z,
     POCKET_KIND,
+    RECTANGULAR_PATTERN_KIND,
     RIB_KIND,
     SHAFT_KIND,
     SLOT_KIND,
+    SUPPORTED_PATTERN_DIRECTIONS,
     Groove,
     Mirror,
     Pad,
     PartDesign,
     Pocket,
+    RectangularPattern,
     RevolvedFeature,
     Rib,
     Shaft,
@@ -70,8 +81,16 @@ __all__ = [
     "SHAFT_KIND",
     "GROOVE_KIND",
     "MIRROR_KIND",
+    "RECTANGULAR_PATTERN_KIND",
     "RIB_KIND",
     "SLOT_KIND",
+    "PATTERN_DIRECTION_X",
+    "PATTERN_DIRECTION_Y",
+    "PATTERN_DIRECTION_Z",
+    "PATTERN_DIRECTION_NEGATIVE_X",
+    "PATTERN_DIRECTION_NEGATIVE_Y",
+    "PATTERN_DIRECTION_NEGATIVE_Z",
+    "SUPPORTED_PATTERN_DIRECTIONS",
     "FULL_REVOLUTION",
     "SketchFeature",
     "Pad",
@@ -82,6 +101,7 @@ __all__ = [
     "Mirror",
     "Rib",
     "Slot",
+    "RectangularPattern",
     "PartDesign",
     "CONSTRAINT_HORIZONTAL",
     "CONSTRAINT_VERTICAL",
@@ -91,6 +111,7 @@ __all__ = [
     "CONSTRAINT_PARALLEL",
     "CONSTRAINT_DISTANCE",
     "CONSTRAINT_COINCIDENT",
+    "CONSTRAINT_CONCENTRICITY",
     "CONSTRAINT_TANGENT",
     "Constraint",
     "ConstraintCollection",

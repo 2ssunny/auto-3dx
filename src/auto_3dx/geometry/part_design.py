@@ -47,6 +47,7 @@ from auto_3dx.errors import (
     FeatureConflictError,
     FeatureNotFoundError,
     PartialCreationError,
+    ParameterTypeError,
     UnsupportedSupportError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
@@ -91,6 +92,55 @@ RIB_KIND: str = "Rib"
 
 SLOT_KIND: str = "Slot"
 """The `type(com_object).__name__` value for a CATIA Slot feature."""
+
+RECTANGULAR_PATTERN_KIND: str = "RectPattern"
+"""The `type(com_object).__name__` value for a CATIA rectangular pattern."""
+
+PATTERN_DIRECTION_X: str = "X"
+PATTERN_DIRECTION_Y: str = "Y"
+PATTERN_DIRECTION_Z: str = "Z"
+PATTERN_DIRECTION_NEGATIVE_X: str = "-X"
+PATTERN_DIRECTION_NEGATIVE_Y: str = "-Y"
+PATTERN_DIRECTION_NEGATIVE_Z: str = "-Z"
+"""The verified signed global axes used by rectangular patterns."""
+
+SUPPORTED_PATTERN_DIRECTIONS: frozenset[str] = frozenset(
+    {
+        PATTERN_DIRECTION_X,
+        PATTERN_DIRECTION_Y,
+        PATTERN_DIRECTION_Z,
+        PATTERN_DIRECTION_NEGATIVE_X,
+        PATTERN_DIRECTION_NEGATIVE_Y,
+        PATTERN_DIRECTION_NEGATIVE_Z,
+    }
+)
+"""The signed global axes accepted by rectangular-pattern creation."""
+
+_PATTERN_DIRECTION_MAPPING: dict[int, dict[str, tuple[str, bool]]] = {
+    1: {
+        PATTERN_DIRECTION_X: ("XY", True),
+        PATTERN_DIRECTION_NEGATIVE_X: ("XY", False),
+        PATTERN_DIRECTION_Y: ("YZ", True),
+        PATTERN_DIRECTION_NEGATIVE_Y: ("YZ", False),
+        PATTERN_DIRECTION_Z: ("ZX", True),
+        PATTERN_DIRECTION_NEGATIVE_Z: ("ZX", False),
+    },
+    2: {
+        PATTERN_DIRECTION_X: ("ZX", True),
+        PATTERN_DIRECTION_NEGATIVE_X: ("ZX", False),
+        PATTERN_DIRECTION_Y: ("XY", True),
+        PATTERN_DIRECTION_NEGATIVE_Y: ("XY", False),
+        PATTERN_DIRECTION_Z: ("YZ", True),
+        PATTERN_DIRECTION_NEGATIVE_Z: ("YZ", False),
+    },
+}
+"""Verified `(origin-plane support, reverse)` mappings by direction slot."""
+
+_PATTERN_COPY_POSITION: int = 1
+"""The verified `iShapeToCopyPositionAlongDir*` value for a new pattern."""
+
+_PATTERN_ROTATION_ANGLE: float = 0.0
+"""The verified `iRotationAngle` value for a new rectangular pattern."""
 
 FULL_REVOLUTION: float = 360.0
 """The verified default `FirstAngle.Value` (degrees) a new Shaft/Groove is created with."""
@@ -618,6 +668,37 @@ class Slot(_NamedFeature):
             raise _wrap_com_error(error) from error
 
 
+class RectangularPattern:
+    """Wraps a raw CATIA `RectPattern` COM object.
+
+    The wrapper intentionally exposes only raw-object identity. There is no
+    verified safe name lookup, rename, ensure, or mutation contract, but the
+    exact returned wrapper can be deleted with
+    :meth:`PartDesign.remove_rectangular_pattern`.
+    """
+
+    def __init__(self, com_object: Any) -> None:
+        """Initializes the wrapper.
+
+        Args:
+            com_object: The raw CATIA `RectPattern` COM object to wrap.
+        """
+        self._com_object = com_object
+
+    @property
+    def com_object(self) -> Any:
+        """Returns the raw underlying COM object.
+
+        Returns:
+            The wrapped raw COM object.
+        """
+        return self._com_object
+
+    def __repr__(self) -> str:
+        """Returns a debugging representation without unverified COM reads."""
+        return "RectangularPattern()"
+
+
 class PartDesign:
     """Wraps Part Design features on a Part's `MainBody`.
 
@@ -637,6 +718,9 @@ class PartDesign:
     Rib/Slot reuse `_ensure_by_sketch` like Pad/Pocket/Shaft/Groove, but pass
     a `sketch_of` accessor because their sketch getter is named `profile()`
     rather than `sketch()`.
+
+    Rectangular patterns are different: only creation and exact-wrapper
+    cleanup are verified. They are not scanned or looked up by name.
     """
 
     def __init__(self, part_com_object: Any, selection: Any = None) -> None:
@@ -1497,6 +1581,71 @@ class PartDesign:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    @staticmethod
+    def _pattern_axis(direction: str) -> str:
+        """Returns the unsigned axis portion of a validated pattern direction."""
+        return direction.removeprefix("-")
+
+    @staticmethod
+    def _validate_pattern_direction(direction: str, slot: int) -> None:
+        """Validates one public rectangular-pattern direction.
+
+        Raises:
+            ParameterTypeError: If `direction` is not a verified signed axis.
+        """
+        if not isinstance(direction, str) or direction not in SUPPORTED_PATTERN_DIRECTIONS:
+            raise ParameterTypeError(
+                f"Direction {slot} must be one of {sorted(SUPPORTED_PATTERN_DIRECTIONS)}, "
+                f"not {direction!r}."
+            )
+
+    @staticmethod
+    def _validate_pattern_count(count: int, slot: int) -> None:
+        """Validates a rectangular-pattern instance count before COM mutation.
+
+        Raises:
+            ParameterTypeError: If `count` is not a positive integer.
+        """
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ParameterTypeError(
+                f"Number of instances in direction {slot} must be a positive integer, "
+                f"not {count!r}."
+            )
+
+    @staticmethod
+    def _validate_pattern_spacing(spacing: float, slot: int) -> float:
+        """Validates one strictly positive rectangular-pattern step in millimetres.
+
+        Args:
+            spacing: The requested instance spacing.
+            slot: CATIA's one-based pattern-direction slot, used only in the
+                validation error.
+
+        Returns:
+            The validated spacing coerced to ``float``.
+
+        Raises:
+            ParameterTypeError: If `spacing` is non-numeric, a bool, zero, or
+                negative.
+        """
+        spacing_value = validate_length_value(spacing)
+        if not math.isfinite(spacing_value) or spacing_value <= 0.0:
+            raise ParameterTypeError(
+                f"Spacing in direction {slot} must be finite and positive, "
+                f"not {spacing!r}."
+            )
+        return spacing_value
+
+    def _pattern_direction_reference(self, direction: str, slot: int) -> tuple[Any, bool]:
+        """Creates the verified origin-plane reference for one direction slot."""
+        support, reverse = _PATTERN_DIRECTION_MAPPING[slot][direction]
+        plane = self._resolve_plane(support)
+        try:
+            reference = self._part_com_object.CreateReferenceFromObject(plane)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return reference, reverse
+
     @property
     def mirrors(self) -> "list[Mirror]":
         """Lists every mirror on the Part's `MainBody`.
@@ -1858,3 +2007,117 @@ class PartDesign:
                 failed.
         """
         self._remove(name, self.get_slot, "slot")
+
+    def create_rectangular_pattern(
+        self,
+        pad: Pad,
+        number_in_direction_1: int,
+        number_in_direction_2: int,
+        spacing_in_direction_1: float,
+        spacing_in_direction_2: float,
+        direction_1: str,
+        direction_2: str,
+    ) -> RectangularPattern:
+        """Creates a verified rectangular pattern of a `Pad`.
+
+        CATIA requires origin-plane references for pattern directions, not raw
+        planes or 2D lines. Its two direction slots interpret a plane
+        differently, so this API accepts signed global axes and chooses both
+        the verified plane reference and its required reverse flag.
+
+        This only uses the measured call form: ``AddNewRectPattern(pad, n1,
+        n2, step1, step2, 1, 1, ref1, ref2, reverse1, reverse2, 0.0)``. It
+        never calls `Part.Update()`, `Save`, or PLM propagation. The caller
+        must update the Part and handle failures, because CATIA leaves a
+        failed pattern in the model; use
+        :meth:`remove_rectangular_pattern` to clean it up.
+
+        Args:
+            pad: The `Pad` to copy; this is the source type verified by probes.
+            number_in_direction_1: Number of instances along direction 1.
+            number_in_direction_2: Number of instances along direction 2.
+            spacing_in_direction_1: Direction-1 instance spacing in mm.
+            spacing_in_direction_2: Direction-2 instance spacing in mm.
+            direction_1: A signed axis from `SUPPORTED_PATTERN_DIRECTIONS`.
+                Its sign is the complete direction choice.
+            direction_2: A signed axis from `SUPPORTED_PATTERN_DIRECTIONS`.
+                Its sign is the complete direction choice.
+
+        Returns:
+            A wrapper around the new `RectPattern` COM object.
+
+        Raises:
+            ParameterTypeError: If the source Pad, a direction, count, or
+                spacing is invalid.
+            FeatureConflictError: If directions are collinear. This is
+                rejected before CATIA can create a broken feature.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        if not isinstance(pad, Pad):
+            raise ParameterTypeError(
+                "A rectangular pattern source must be a Pad created or wrapped "
+                f"by auto_3dx, not {type(pad).__name__}."
+            )
+        self._validate_pattern_direction(direction_1, 1)
+        self._validate_pattern_direction(direction_2, 2)
+        self._validate_pattern_count(number_in_direction_1, 1)
+        self._validate_pattern_count(number_in_direction_2, 2)
+        if self._pattern_axis(direction_1) == self._pattern_axis(direction_2):
+            raise FeatureConflictError(
+                "Rectangular-pattern directions must use distinct axes; "
+                f"{direction_1!r} and {direction_2!r} are collinear."
+            )
+
+        spacing_1 = self._validate_pattern_spacing(spacing_in_direction_1, 1)
+        spacing_2 = self._validate_pattern_spacing(spacing_in_direction_2, 2)
+        reference_1, mapped_reverse_1 = self._pattern_direction_reference(
+            direction_1, 1
+        )
+        reference_2, mapped_reverse_2 = self._pattern_direction_reference(
+            direction_2, 2
+        )
+        try:
+            com_object = self._part_com_object.ShapeFactory.AddNewRectPattern(
+                pad.com_object,
+                number_in_direction_1,
+                number_in_direction_2,
+                spacing_1,
+                spacing_2,
+                _PATTERN_COPY_POSITION,
+                _PATTERN_COPY_POSITION,
+                reference_1,
+                reference_2,
+                mapped_reverse_1,
+                mapped_reverse_2,
+                _PATTERN_ROTATION_ANGLE,
+            )
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return RectangularPattern(com_object)
+
+    def remove_rectangular_pattern(self, pattern: RectangularPattern) -> None:
+        """Removes a rectangular pattern through the owning editor's Selection.
+
+        Rectangular patterns currently have no verified safe name lookup. This
+        method therefore accepts the wrapper returned by
+        :meth:`create_rectangular_pattern`, which also gives callers a public
+        cleanup route when a later :meth:`Part.update` fails.
+
+        Args:
+            pattern: The rectangular pattern wrapper to delete.
+
+        Raises:
+            ParameterTypeError: If `pattern` is not a `RectangularPattern`.
+            Auto3dxError: If no editor selection is available, or deletion
+                failed.
+        """
+        if not isinstance(pattern, RectangularPattern):
+            raise ParameterTypeError(
+                "pattern must be a RectangularPattern returned by "
+                f"create_rectangular_pattern(), not {type(pattern).__name__}."
+            )
+        delete_via_selection(
+            self._selection,
+            pattern.com_object,
+            "rectangular pattern",
+        )
