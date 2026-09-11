@@ -13,8 +13,8 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **205 unit + 13 integration** (integration은 세션 상태에 따라 skip)
-- probe: `scripts/probes/` 19개
+- 테스트: **237 unit + 16 integration** (integration은 세션 상태에 따라 skip)
+- probe: `scripts/probes/` 26개
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -67,7 +67,7 @@ PLMNewService.getLastError()             ->  ('', 0)
 
 ```text
 ShapeFactory.AddNew* : 90개
-구현됨               : Pad, Pocket, Shaft, Groove, Mirror — 5개
+구현됨               : Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot — 7개
 ```
 
 **참조 레이어를 조사한 결과, 기대했던 "80개 일괄 해금"은 일어나지 않았다** (probe 17).
@@ -129,12 +129,18 @@ COM은 이전 파트를 가리킴). 엉뚱한 파트를 조용히 편집할 수 
 수 있고, 각 `Part`에는 그 editor 자신의 `Selection`이 연결된다. `ActiveObject`를 읽을 수
 없는 editor가 섞여 있어도 열거가 죽지 않는다 (실측: 4개 중 1개가 그랬다).
 
-### 2.5 지원 범위가 Length / mm로 제한돼 있다
+### 2.5 파라미터 타입과 단위 — 대부분 해결됨
 
-- 파라미터: `Length`만. `Real`, `Integer`, `String`, `Boolean`, `Angle` 미구현.
-  (`CreateReal` 등 signature는 확인됨)
-- 단위: `mm`만. 이 설치본의 `Parameters.Units`에 **1887개**가 있고 magnitude별로 읽을 수
-  있는 것도 확인했지만, 검증한 건 mm뿐이다.
+- 파라미터 타입: `Length`, `Angle`, 임의 magnitude의 `Dimension`, `Real`, `Integer`,
+  `String`, `Boolean` 전부 지원한다.
+- 단위: `parameters.units`(`UnitCatalogue`)로 339개 magnitude와 1887개 unit을 조회할 수
+  있다. `parameter.magnitude`가 generic `Dimension`의 정체(Mass/Volume 등)를 알려준다.
+- **단위 변환은 하지 않는다.** `Value`는 언제나 파라미터 자신의 내부 단위다. 단위 인자는
+  "네가 의도한 단위가 맞는지" 확인하는 용도로만 쓰고, 다르면 거부한다. 변환을 검증한 적이
+  없으므로 의도적으로 남겨둔 제약이다.
+
+남은 제약:
+
 - 스케치 평면: 원점 3개(XY/YZ/ZX)만. 사용자 정의 평면 불가.
 - 프로파일: 점·선·원·사각형만. 호·스플라인 불가.
 
@@ -191,6 +197,7 @@ CATIA가 **조용히 넘어가는데 모델을 망가뜨리는** 동작들이다
 | `bool`은 `int`의 서브클래스 | `set(True)`가 조용히 1.0이 될 수 있어 명시적으로 거부 |
 | 컬렉션은 1-based | `Item(0)`은 무효 |
 | 클래스 본문의 `list` 섀도잉 | `def list()` 아래의 `-> list[str]` 애노테이션이 죽는다. `py_compile`로는 안 잡힘 |
+| fake가 정규화 이름을 안 쓰면 중복 검사가 통째로 죽는다 | 존재 검사를 `Parameter.name == 요청이름`으로 했더니, `CreateDimension`이 `3D Shape1\Span`으로 저장하므로 **한 번도 일치하지 않았다.** 방금 만든 파라미터를 다시 만들어도 통과했다. unit 318개 전부 초록이었고 라이브 테스트만 잡았다. 기존 unit 테스트가 모두 fake에 정규화 안 된 이름을 미리 심어둔 탓이다. `short_name`까지 비교하도록 고치고, fake가 만드는 정규화 이름 그대로 검사하는 회귀 테스트를 `tests/unit/test_duplicate_name_detection.py`에 추가했다 |
 
 ---
 

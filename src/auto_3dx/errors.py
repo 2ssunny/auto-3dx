@@ -121,3 +121,7 @@ class FormulaAlreadyExistsError(Auto3dxError):
 
 class ConstraintNotFoundError(Auto3dxError):
     """Raised when a constraint cannot be found by name in a Constraints collection."""
+
+
+class UnsupportedMagnitudeError(Auto3dxError):
+    """Raised when a `CreateDimension` magnitude is not in the unit catalogue."""

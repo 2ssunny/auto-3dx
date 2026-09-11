@@ -617,6 +617,19 @@ ensure_pad(name, sketch, height)
 COM 오류는 "없음"과 "일시적 실패"를 구분해 주지 않으므로, 실패를 없음으로 읽으면 중복 생성으로
 이어진다(fail-open). `Count` + `Item(i)`로 열거해 이름을 비교하는 쪽이 positive evidence다.
 
+**파라미터를 열거할 때는 무엇과 무엇을 비교하는지가 결정적이다.** 두 가지를 실측으로 확인했다.
+
+- `CreateDimension`은 이름을 **정규화해서 저장한다.** `"Span"`으로 만든 파라미터의 `name`은
+  `"3D Shape1\Span"`이다. 그래서 `parameter.name == 요청이름`만 비교하면 방금 만든 파라미터도
+  못 찾고, 중복 검사가 **전부 통과한다.** `short_name`까지 함께 비교해야 한다.
+- 열거 대상은 `list()`가 아니라 `user_parameters()`다. feature 내부 파라미터는 feature 경로로
+  이름이 붙어(`Pad.1\FirstLimit\Length`) short name이 `"Length"`처럼 사용자가 쓸 만한 이름과
+  충돌한다. `list()`를 열거하면 정당한 생성을 거부한다.
+
+이 조합은 **unit 테스트로 잡히지 않았다.** 기존 테스트가 모두 fake에 정규화되지 않은 이름을 미리
+심어뒀기 때문이다. fake도 실제 COM처럼 정규화 이름을 만들어야 하고, "만들고 바로 다시 만들기"를
+검사하는 테스트가 있어야 한다(`tests/unit/test_duplicate_name_detection.py`).
+
 부동소수 비교는 `math.isclose(a, b, rel_tol=0.0, abs_tol=TOLERANCE)`로 한다.
 **`rel_tol=0.0`을 반드시 명시한다.** 생략하면 기본 `rel_tol=1e-09`가 살아 있어 값이 커질수록
 허용 오차가 함께 커지고, 큰 pad 높이의 갱신 요청이 조용히 무시된다.

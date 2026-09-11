@@ -23,6 +23,7 @@ from auto_3dx.errors import (
     SketchAlreadyExistsError,
     SketchNotFoundError,
     SketchSupportMismatchError,
+    UnsupportedMagnitudeError,
     UnsupportedSupportError,
     UnsupportedUnitError,
 )
@@ -44,6 +45,7 @@ from auto_3dx.geometry.part_design import (
 from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
 from auto_3dx.parameters.collection import ParameterCollection
 from auto_3dx.parameters.parameter import Parameter, ParameterInfo
+from auto_3dx.parameters.units import UnitCatalogue, UnitInfo
 
 __all__ = [
     "Catia",
@@ -52,6 +54,8 @@ __all__ = [
     "Parameter",
     "ParameterCollection",
     "ParameterInfo",
+    "UnitCatalogue",
+    "UnitInfo",
     "Constraint",
     "ConstraintCollection",
     "Formula",
@@ -89,6 +93,7 @@ __all__ = [
     "SketchAlreadyExistsError",
     "SketchNotFoundError",
     "SketchSupportMismatchError",
+    "UnsupportedMagnitudeError",
     "UnsupportedSupportError",
     "UnsupportedUnitError",
 ]

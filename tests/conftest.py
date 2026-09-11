@@ -84,6 +84,153 @@ class Real:
         self.Value = value
 
 
+# ---------------------------------------------------------------------------
+# Unit catalogue and non-Length parameter fakes (docs/conventions.md 1.1.2, 6.15).
+# ---------------------------------------------------------------------------
+
+
+class Unit:
+    """Fake CATIA `Unit`.
+
+    Exposed both as an entry of `Parameters.Units` (docs/conventions.md 6.15)
+    and as a dimensional parameter's own `.Unit` (1.1.2): e.g.
+    `Name='Millimeter'`, `Magnitude='Length'`, `Symbol='mm'`.
+    """
+
+    def __init__(
+        self,
+        name: str = "Millimeter",
+        magnitude: str = "Length",
+        symbol: str = "mm",
+    ) -> None:
+        self.Name = name
+        self.Magnitude = magnitude
+        self.Symbol = symbol
+
+
+DEFAULT_UNIT_ENTRIES: "list[tuple[str, str, str]]" = [
+    ("Millimeter", "Length", "mm"),
+    ("Meter", "Length", "m"),
+    ("Centimeter", "Length", "cm"),
+    ("Inch", "Length", "in"),
+    ("Degree", "Angle", "deg"),
+    ("Radian", "Angle", "rad"),
+    ("Kilogram", "Mass", "kg"),
+    ("Gram", "Mass", "g"),
+    ("Tonne", "Mass", "T"),
+    ("Cubic meter", "Volume", "m3"),
+    ("Liter", "Volume", "L"),
+]
+"""Seed data for the fake `Units` collection: four magnitudes, several
+symbols each (Length/Angle/Mass/Volume), matching the examples verified
+against a real installation (docs/conventions.md 1.1.2/6.15)."""
+
+
+class Units:
+    """Fake CATIA `Parameters.Units` collection (1-based `Item`, `Count`).
+
+    The real collection has 1887 entries across 339 magnitudes, so
+    re-enumerating it on every query would be a real defect, not just
+    wasteful. `item_calls` records every `Item` access (in order) so a test
+    can pin that `UnitCatalogue` reads this collection exactly once no matter
+    how many queries follow.
+    """
+
+    def __init__(self, entries: "list[tuple[str, str, str]] | None" = None) -> None:
+        source = entries if entries is not None else DEFAULT_UNIT_ENTRIES
+        self._items: list[Unit] = [Unit(name=n, magnitude=m, symbol=s) for n, m, s in source]
+        self.item_calls: list[int] = []
+        self.count_calls: int = 0
+
+    @property
+    def Count(self) -> int:
+        self.count_calls += 1
+        return len(self._items)
+
+    def Item(self, index: int) -> Unit:
+        self.item_calls.append(index)
+        position = index - 1
+        if 0 <= position < len(self._items):
+            return self._items[position]
+        raise make_com_error()
+
+
+def make_dimension_fake(
+    kind_name: str,
+    name: str,
+    value: float,
+    magnitude: str,
+    symbol: str,
+    unit_name: str,
+) -> Any:
+    """Builds a fake dimensional CATIA parameter of an arbitrary wrapper kind.
+
+    Only `Length` and `Angle` get a derived wrapper type; every other
+    magnitude (`Mass`, `Volume`, `Time`, ...) comes back as a generic
+    `Dimension` (verified, docs/conventions.md 1.1.2), so `kind_name` is
+    whatever `type(obj).__name__` the caller needs (`"Angle"` or
+    `"Dimension"`). Built via dynamic type creation, the same trick
+    `make_raising_fake` above uses -- which is why this does not collide with
+    the unrelated `Dimension` fake below (`Limit.Dimension`, a plain
+    magnitude holder with no `Unit`, used for Pad/Pocket depths).
+
+    Args:
+        kind_name: The `type(obj).__name__` the result should report.
+        name: The parameter's `Name`.
+        value: The parameter's `Value`.
+        magnitude: `Unit.Magnitude` (e.g. `"Mass"`).
+        symbol: `Unit.Symbol` (e.g. `"kg"`).
+        unit_name: `Unit.Name` (e.g. `"Kilogram"`).
+
+    Returns:
+        An instance of a dynamically created class named `kind_name`.
+    """
+
+    def _init(self: Any) -> None:
+        self.Name = name
+        self.Value = value
+        self.Unit = Unit(name=unit_name, magnitude=magnitude, symbol=symbol)
+
+    fake_cls = type(kind_name, (), {"__init__": _init})
+    return fake_cls()
+
+
+class RealParam:
+    """Fake CATIA `RealParam` (unitless real).
+
+    No `Unit` at all -- reading it raises `AttributeError`, matching the real
+    object (verified, docs/conventions.md 1.1.2).
+    """
+
+    def __init__(self, name: str = "RealParam1", value: float = 0.0) -> None:
+        self.Name = name
+        self.Value = value
+
+
+class IntParam:
+    """Fake CATIA `IntParam`. No `Unit`, same as `RealParam`."""
+
+    def __init__(self, name: str = "IntParam1", value: int = 0) -> None:
+        self.Name = name
+        self.Value = value
+
+
+class StrParam:
+    """Fake CATIA `StrParam`. No `Unit`, same as `RealParam`."""
+
+    def __init__(self, name: str = "StrParam1", value: str = "") -> None:
+        self.Name = name
+        self.Value = value
+
+
+class BoolParam:
+    """Fake CATIA `BoolParam`. No `Unit`, same as `RealParam`."""
+
+    def __init__(self, name: str = "BoolParam1", value: bool = False) -> None:
+        self.Name = name
+        self.Value = value
+
+
 class Parameters:
     """Fake CATIA `Parameters` collection.
 
@@ -99,6 +246,7 @@ class Parameters:
         items: list[tuple[str, Any]] | None = None,
         container: str = "3D Shape00422533",
         direct_items: list[tuple[str, Any]] | None = None,
+        units: Any = None,
     ) -> None:
         self._items: list[tuple[str, Any]] = list(items or [])
         # Explicitly created parameters only. Seeded items default to being
@@ -110,6 +258,19 @@ class Parameters:
         self.item_calls: list[Any] = []
         self.create_calls: list[tuple[str, str, Any]] = []
         self.remove_calls: list[str] = []
+        # docs/conventions.md 6.15: the unit catalogue and the non-Length
+        # parameter kinds.
+        self._units = units if units is not None else Units()
+        self.units_access_count = 0
+        self.create_real_calls: list[tuple[str, float]] = []
+        self.create_integer_calls: list[tuple[str, int]] = []
+        self.create_string_calls: list[tuple[str, str]] = []
+        self.create_boolean_calls: list[tuple[str, bool]] = []
+
+    @property
+    def Units(self) -> Any:
+        self.units_access_count += 1
+        return self._units
 
     @property
     def Count(self) -> int:
@@ -156,16 +317,72 @@ class Parameters:
         return RootParameterSet(self._direct)
 
     def CreateDimension(self, iName: str, iMagnitude: str, iValue: float) -> Any:
-        """Mimics the real method, which qualifies the stored name.
+        """Mimics the real method, which qualifies the stored name for Length.
 
         The real `CreateDimension` also accepts a duplicate name and creates a
         second parameter with the identical name. This fake reproduces that so a
         test can prove the library refuses before ever reaching COM.
+
+        The `"Length"` branch is UNCHANGED from before this fake grew
+        multi-magnitude support -- many existing tests depend on it. Any other
+        magnitude is looked up in this collection's own `Units` fake: only
+        `"Length"` and `"Angle"` get a derived wrapper type, everything else
+        comes back as a generic `Dimension` carrying a `Unit` (verified,
+        docs/conventions.md 1.1.2). A magnitude this `Units` fake does not
+        know about raises `pywintypes.com_error`, matching the real object's
+        rejection of a bogus magnitude.
         """
         self.create_calls.append((iName, iMagnitude, iValue))
-        created = Length(name=f"{self.container}\\{iName}", value=iValue)
+        if iMagnitude == "Length":
+            created = Length(name=f"{self.container}\\{iName}", value=iValue)
+        else:
+            known = {unit.Magnitude: unit for unit in self._units._items}
+            if iMagnitude not in known:
+                raise make_com_error()
+            unit = known[iMagnitude]
+            kind_name = "Angle" if iMagnitude == "Angle" else "Dimension"
+            created = make_dimension_fake(
+                kind_name,
+                name=iName,
+                value=iValue,
+                magnitude=iMagnitude,
+                symbol=unit.Symbol,
+                unit_name=unit.Name,
+            )
         self._items.append((created.Name, created))
         # An explicitly created parameter shows up in BOTH collections.
+        self._direct.append((created.Name, created))
+        return created
+
+    def CreateReal(self, iName: str, iValue: float) -> RealParam:
+        """Mimics `Parameters.CreateReal` -- a unitless real parameter."""
+        self.create_real_calls.append((iName, iValue))
+        created = RealParam(name=iName, value=iValue)
+        self._items.append((created.Name, created))
+        self._direct.append((created.Name, created))
+        return created
+
+    def CreateInteger(self, iName: str, iValue: int) -> IntParam:
+        """Mimics `Parameters.CreateInteger`."""
+        self.create_integer_calls.append((iName, iValue))
+        created = IntParam(name=iName, value=iValue)
+        self._items.append((created.Name, created))
+        self._direct.append((created.Name, created))
+        return created
+
+    def CreateString(self, iName: str, iValue: str) -> StrParam:
+        """Mimics `Parameters.CreateString`."""
+        self.create_string_calls.append((iName, iValue))
+        created = StrParam(name=iName, value=iValue)
+        self._items.append((created.Name, created))
+        self._direct.append((created.Name, created))
+        return created
+
+    def CreateBoolean(self, iName: str, iValue: bool) -> BoolParam:
+        """Mimics `Parameters.CreateBoolean`."""
+        self.create_boolean_calls.append((iName, iValue))
+        created = BoolParam(name=iName, value=iValue)
+        self._items.append((created.Name, created))
         self._direct.append((created.Name, created))
         return created
 
@@ -431,6 +648,48 @@ def fake_length(length_parameter_factory: Callable[..., Length]) -> Length:
 def fake_real(real_parameter_factory: Callable[..., Real]) -> Real:
     """A single fake non-Length parameter with default name/value."""
     return real_parameter_factory()
+
+
+@pytest.fixture
+def unit_factory() -> Callable[..., Unit]:
+    """Returns a factory for fake `Unit` objects."""
+    return Unit
+
+
+@pytest.fixture
+def units_collection_factory() -> Callable[..., Units]:
+    """Returns a factory for fake `Parameters.Units` collections."""
+    return Units
+
+
+@pytest.fixture
+def dimension_fake_factory() -> Callable[..., Any]:
+    """Returns the `make_dimension_fake` factory (arbitrary-kind Dimension fakes)."""
+    return make_dimension_fake
+
+
+@pytest.fixture
+def real_param_factory() -> Callable[..., RealParam]:
+    """Returns a factory for fake `RealParam` objects."""
+    return RealParam
+
+
+@pytest.fixture
+def int_param_factory() -> Callable[..., IntParam]:
+    """Returns a factory for fake `IntParam` objects."""
+    return IntParam
+
+
+@pytest.fixture
+def str_param_factory() -> Callable[..., StrParam]:
+    """Returns a factory for fake `StrParam` objects."""
+    return StrParam
+
+
+@pytest.fixture
+def bool_param_factory() -> Callable[..., BoolParam]:
+    """Returns a factory for fake `BoolParam` objects."""
+    return BoolParam
 
 
 # ---------------------------------------------------------------------------
@@ -1003,6 +1262,66 @@ class Mirror:
         self._name = value
 
 
+class Rib:
+    """Fake CATIA `Rib`, as returned by `ShapeFactory.AddNewRib`.
+
+    A rib is built from TWO sketches (profile, path), but verified only the
+    profile can be read back afterwards (`Rib.Sketch` -- docs/conventions.md
+    1.2.5); the path sketch has no readable accessor at all, so this fake
+    does not keep one either.
+    """
+
+    def __init__(
+        self,
+        name: str = "Rib.1",
+        sketch: Any = None,
+        name_write_exception: BaseException | None = None,
+    ) -> None:
+        self._name = name
+        self.name_write_exception = name_write_exception
+        self.Sketch = sketch
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        # AddNewRib already changed the model before this write; a failure
+        # here is the partial-creation case the library must report.
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
+
+
+class Slot:
+    """Fake CATIA `Slot`, as returned by `ShapeFactory.AddNewSlot`.
+
+    The cutting twin of `Rib` -- same shape, same profile-only readback
+    (docs/conventions.md 1.2.5).
+    """
+
+    def __init__(
+        self,
+        name: str = "Slot.1",
+        sketch: Any = None,
+        name_write_exception: BaseException | None = None,
+    ) -> None:
+        self._name = name
+        self.name_write_exception = name_write_exception
+        self.Sketch = sketch
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
+
+
 class Formula:
     """Fake CATIA `Formula`, as returned by `Relations.CreateFormula`.
 
@@ -1139,19 +1458,27 @@ class ShapeFactory:
         pad_name_write_exception: BaseException | None = None,
         pocket_name_write_exception: BaseException | None = None,
         revolve_name_write_exception: BaseException | None = None,
+        rib_name_write_exception: BaseException | None = None,
+        slot_name_write_exception: BaseException | None = None,
     ) -> None:
         self.add_new_pad_calls: list[tuple[Any, float]] = []
         self.add_new_pocket_calls: list[tuple[Any, float]] = []
         self.add_new_shaft_calls: list[Any] = []
         self.add_new_groove_calls: list[Any] = []
         self.add_new_mirror_calls: list[Any] = []
+        self.add_new_rib_calls: list[tuple[Any, Any]] = []
+        self.add_new_slot_calls: list[tuple[Any, Any]] = []
         self._pad_count = 0
         self._pocket_count = 0
         self._shaft_count = 0
         self._groove_count = 0
         self._mirror_count = 0
+        self._rib_count = 0
+        self._slot_count = 0
         self.pocket_name_write_exception = pocket_name_write_exception
         self.revolve_name_write_exception = revolve_name_write_exception
+        self.rib_name_write_exception = rib_name_write_exception
+        self.slot_name_write_exception = slot_name_write_exception
         # The real AddNewPad registers the pad in the body's Shapes collection,
         # which is how `PartDesign.get_pad` finds it afterwards.
         self.shapes = shapes
@@ -1214,6 +1541,30 @@ class ShapeFactory:
         if self.shapes is not None:
             self.shapes._append(pocket)
         return pocket
+
+    def AddNewRib(self, iSketch: Any, iCenterCurve: Any) -> Rib:
+        self.add_new_rib_calls.append((iSketch, iCenterCurve))
+        self._rib_count += 1
+        rib = Rib(
+            name=f"Rib.{self._rib_count}",
+            sketch=iSketch,
+            name_write_exception=self.rib_name_write_exception,
+        )
+        if self.shapes is not None:
+            self.shapes._append(rib)
+        return rib
+
+    def AddNewSlot(self, iSketch: Any, iCenterCurve: Any) -> Slot:
+        self.add_new_slot_calls.append((iSketch, iCenterCurve))
+        self._slot_count += 1
+        slot = Slot(
+            name=f"Slot.{self._slot_count}",
+            sketch=iSketch,
+            name_write_exception=self.slot_name_write_exception,
+        )
+        if self.shapes is not None:
+            self.shapes._append(slot)
+        return slot
 
 
 @pytest.fixture
@@ -1328,6 +1679,18 @@ def groove_factory() -> Callable[..., Groove]:
 def mirror_factory() -> Callable[..., Mirror]:
     """Returns a factory for fake `Mirror` objects."""
     return Mirror
+
+
+@pytest.fixture
+def rib_factory() -> Callable[..., Rib]:
+    """Returns a factory for fake `Rib` objects."""
+    return Rib
+
+
+@pytest.fixture
+def slot_factory() -> Callable[..., Slot]:
+    """Returns a factory for fake `Slot` objects."""
+    return Slot
 
 
 @pytest.fixture

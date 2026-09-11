@@ -29,6 +29,9 @@ magnitudes are capitalised names (`Length`, `Angle`, `Mass`, ...) rather than
 the upper-case forms used by older CATIA documentation.
 """
 
+ANGLE_MAGNITUDE: str = "Angle"
+"""The `iMagnitude` string `Parameters.CreateDimension` expects for an angle."""
+
 MILLIMETRE: str = "mm"
 """The only supported unit string for Length parameters."""
 
@@ -43,6 +46,33 @@ SUPPORTED_ANGLE_UNITS: frozenset[str] = frozenset({DEGREE})
 
 NAME_SEPARATOR: str = "\\"
 """Separator CATIA uses between a parameter's container path and its own name."""
+
+REAL_KIND: str = "RealParam"
+"""The `type(com_object).__name__` value for a CATIA unitless real parameter."""
+
+INTEGER_KIND: str = "IntParam"
+"""The `type(com_object).__name__` value for a CATIA integer parameter."""
+
+STRING_KIND: str = "StrParam"
+"""The `type(com_object).__name__` value for a CATIA string parameter."""
+
+BOOLEAN_KIND: str = "BoolParam"
+"""The `type(com_object).__name__` value for a CATIA boolean parameter."""
+
+ANGLE_KIND: str = "Angle"
+"""The `type(com_object).__name__` value for a CATIA Angle parameter."""
+
+DIMENSION_KIND: str = "Dimension"
+"""The `type(com_object).__name__` value for a generic (non-Length/Angle) Dimension.
+
+Only `Length` and `Angle` get a derived wrapper type (verified,
+docs/conventions.md 1.1.2); every other magnitude (`Mass`, `Volume`, `Time`,
+...) comes back as this generic kind, so `type(obj).__name__` alone cannot
+tell them apart -- see `Parameter.magnitude`.
+"""
+
+DIMENSIONAL_KINDS: frozenset[str] = frozenset({LENGTH_KIND, ANGLE_KIND, DIMENSION_KIND})
+"""Kinds whose value is a physical quantity carrying a `Unit`."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,9 +99,10 @@ class ParameterInfo:
 class Parameter:
     """Wraps a raw CATIA `Parameter` COM object.
 
-    Only Length parameters support writing through :meth:`set`. Other kinds
-    can still be read (`name`, `kind`, `value`), but their unit is unverified
-    and therefore reported as `None`.
+    `set()` supports every verified parameter kind: `Length`, `Angle`, generic
+    `Dimension`, `RealParam`, `IntParam`, `StrParam`, and `BoolParam`. Any
+    other kind can still be read (`name`, `kind`, `value`), but writing it is
+    unverified and raises `ParameterTypeError`.
     """
 
     def __init__(self, com_object: Any) -> None:
@@ -159,52 +190,142 @@ class Parameter:
             raise _wrap_com_error(error) from error
 
     @property
+    def magnitude(self) -> str | None:
+        """Returns the physical magnitude this parameter's value is expressed in.
+
+        Only `Length`/`Angle`/generic `Dimension` parameters carry a `Unit`;
+        `RealParam`/`IntParam`/`StrParam`/`BoolParam` have none at all, and
+        reading it fails (verified, docs/conventions.md 1.1.2). `Unit.Magnitude`
+        is the only way to tell a generic `Dimension`'s actual quantity (e.g.
+        `"Mass"` vs `"Volume"`) apart, since both share the same `kind`.
+
+        Returns:
+            `Unit.Magnitude` (e.g. `"Length"`, `"Mass"`), or `None` if the
+            underlying COM object has no readable `Unit`.
+        """
+        try:
+            return self._com_object.Unit.Magnitude
+        except (AttributeError, pywintypes.com_error):
+            return None
+
+    @property
     def unit(self) -> str | None:
         """Returns the unit the parameter's value is expressed in.
 
-        Only Length parameters have a verified unit. Any other kind returns
-        `None` rather than a guessed unit.
+        `Unit.Symbol` is tried first, since it is the verified way to read a
+        dimensional parameter's actual unit (docs/conventions.md 1.1.2). Fakes
+        used in unit tests, and the genuinely unitless kinds (`RealParam`,
+        `IntParam`, `StrParam`, `BoolParam`), have no `Unit` at all, so this
+        falls back to the pre-catalogue behaviour when reading it fails: this
+        keeps existing fakes (which model a Length parameter as a plain object
+        with only `Name`/`Value`) working unchanged.
 
         Returns:
-            `MILLIMETRE` when `kind` is `LENGTH_KIND`, otherwise `None`.
+            `Unit.Symbol` if readable, else `MILLIMETRE` when `kind` is
+            `LENGTH_KIND`, else `None`.
         """
-        if self.kind == LENGTH_KIND:
-            return MILLIMETRE
-        return None
+        try:
+            return self._com_object.Unit.Symbol
+        except (AttributeError, pywintypes.com_error):
+            if self.kind == LENGTH_KIND:
+                return MILLIMETRE
+            return None
 
-    def set(self, value: float, unit: str = MILLIMETRE) -> None:
+    def set(self, value: Any, unit: str | None = None) -> None:
         """Sets the parameter's value.
 
-        Only Length parameters can be set. Validation happens in this exact
-        order: kind, then unit, then value type (rejecting `bool` explicitly
-        before the `int`/`float` check, since `bool` is a subclass of `int`
-        and would otherwise silently become `0.0`/`1.0`).
+        Dispatches on `kind` (docs/conventions.md 6.15):
+
+        - A dimensional kind (`LENGTH_KIND`, `ANGLE_KIND`, or generic
+          `DIMENSION_KIND`) accepts an `int`/`float` (rejecting `bool`). If
+          `unit` is given, it must equal this parameter's actual `unit` --
+          auto_3dx never converts between units, so a mismatch is an error
+          rather than a silent conversion. `unit=None` skips that check
+          entirely, which is what makes `set(150)` and `set(150, unit="mm")`
+          on a millimetre Length behave exactly as before this method grew
+          multi-kind support.
+        - `REAL_KIND` accepts an `int`/`float` (rejecting `bool`); `unit` must
+          be `None`, since a `RealParam` has no unit at all.
+        - `INTEGER_KIND` accepts an `int` (rejecting `bool`); `unit` must be
+          `None`.
+        - `STRING_KIND` accepts a `str`; `unit` must be `None`.
+        - `BOOLEAN_KIND` accepts a `bool`; `unit` must be `None`.
+        - Any other kind raises `ParameterTypeError`.
 
         This method does not call `Part.Update()`. Callers are expected to
         batch several `set()` calls and call `Part.Update()` once afterward.
 
         Args:
-            value: The new numeric value to assign.
-            unit: The unit `value` is expressed in. Defaults to `MILLIMETRE`.
+            value: The new value to assign. Its required type depends on
+                `kind` (see above).
+            unit: The unit `value` is expressed in, or `None` to skip the unit
+                check entirely. Defaults to `None`.
 
         Raises:
-            ParameterTypeError: If the parameter's kind is not `LENGTH_KIND`,
-                or if `value` is not an `int`/`float` (or is a `bool`).
-            UnsupportedUnitError: If `unit` is not in `SUPPORTED_LENGTH_UNITS`.
+            ParameterTypeError: If `kind` is not one of the supported kinds,
+                or if `value` is not the type `kind` requires (`bool` is
+                explicitly rejected for every numeric kind, since it is a
+                subclass of `int`).
+            UnsupportedUnitError: If `unit` is given but does not match this
+                parameter's actual unit (dimensional kinds), or if `unit` is
+                given at all for a kind that has none.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         kind = self.kind
-        if kind != LENGTH_KIND:
-            raise ParameterTypeError(
-                f"Parameter kind {kind!r} is not supported for set(); "
-                f"only {LENGTH_KIND!r} parameters can be set."
-            )
-        validate_length_unit(unit)
-        coerced = validate_length_value(value)
+        if kind in DIMENSIONAL_KINDS:
+            coerced: Any = _coerce_numeric(value)
+            self._check_unit_matches(unit)
+        elif kind == REAL_KIND:
+            coerced = _coerce_numeric(value)
+            self._reject_unit(unit, kind)
+        elif kind == INTEGER_KIND:
+            coerced = _coerce_integer(value)
+            self._reject_unit(unit, kind)
+        elif kind == STRING_KIND:
+            coerced = _coerce_string(value)
+            self._reject_unit(unit, kind)
+        elif kind == BOOLEAN_KIND:
+            coerced = _coerce_boolean(value)
+            self._reject_unit(unit, kind)
+        else:
+            raise ParameterTypeError(f"Parameter kind {kind!r} is not supported for set().")
+
         try:
             self._com_object.Value = coerced
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    def _check_unit_matches(self, unit: str | None) -> None:
+        """Checks `unit` (if given) against this dimensional parameter's actual unit.
+
+        Args:
+            unit: The caller-supplied unit, or `None` to skip the check.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is given and does not equal
+                `self.unit`.
+        """
+        if unit is None:
+            return
+        actual = self.unit
+        if unit != actual:
+            raise UnsupportedUnitError(
+                f"Unit {unit!r} does not match this parameter's actual unit "
+                f"({actual!r}); auto_3dx does not convert between units."
+            )
+
+    def _reject_unit(self, unit: str | None, kind: str) -> None:
+        """Checks that no unit was supplied for a unitless parameter kind.
+
+        Args:
+            unit: The caller-supplied unit, or `None`.
+            kind: This parameter's kind, used only for the error message.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not `None`.
+        """
+        if unit is not None:
+            raise UnsupportedUnitError(f"Parameter kind {kind!r} has no unit; got unit={unit!r}.")
 
     def info(self) -> ParameterInfo:
         """Builds a structured snapshot of this parameter's current state.
@@ -241,6 +362,82 @@ class Parameter:
         return f"Parameter(name={name!r}, kind={self.kind!r}, value={value!r})"
 
 
+def _coerce_numeric(value: Any) -> float:
+    """Checks a numeric value and coerces it to `float`.
+
+    Shared by every dimensional kind and `REAL_KIND`.
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        `value` as a `float`.
+
+    Raises:
+        ParameterTypeError: If `value` is a `bool` or is not an `int`/`float`.
+    """
+    # bool is a subclass of int, so without this branch True would silently
+    # become 1.0.
+    if isinstance(value, bool):
+        raise ParameterTypeError(f"Value must be an int or float, not bool ({value!r}).")
+    if not isinstance(value, (int, float)):
+        raise ParameterTypeError(f"Value must be an int or float, got {type(value).__name__}.")
+    return float(value)
+
+
+def _coerce_integer(value: Any) -> int:
+    """Checks an `IntParam` value.
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        `value` unchanged.
+
+    Raises:
+        ParameterTypeError: If `value` is a `bool` or is not an `int`.
+    """
+    if isinstance(value, bool):
+        raise ParameterTypeError(f"Value must be an int, not bool ({value!r}).")
+    if not isinstance(value, int):
+        raise ParameterTypeError(f"Value must be an int, got {type(value).__name__}.")
+    return value
+
+
+def _coerce_string(value: Any) -> str:
+    """Checks a `StrParam` value.
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        `value` unchanged.
+
+    Raises:
+        ParameterTypeError: If `value` is not a `str`.
+    """
+    if not isinstance(value, str):
+        raise ParameterTypeError(f"Value must be a str, got {type(value).__name__}.")
+    return value
+
+
+def _coerce_boolean(value: Any) -> bool:
+    """Checks a `BoolParam` value.
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        `value` unchanged.
+
+    Raises:
+        ParameterTypeError: If `value` is not a `bool`.
+    """
+    if not isinstance(value, bool):
+        raise ParameterTypeError(f"Value must be a bool, got {type(value).__name__}.")
+    return value
+
+
 def validate_length_unit(unit: str) -> None:
     """Checks that a unit is one this library can write a Length in.
 
@@ -272,15 +469,7 @@ def validate_length_value(value: float) -> float:
     Raises:
         ParameterTypeError: If `value` is a `bool` or is not an `int`/`float`.
     """
-    # bool is a subclass of int, so without this branch True would silently
-    # become 1.0.
-    if isinstance(value, bool):
-        raise ParameterTypeError(f"Value must be an int or float, not bool ({value!r}).")
-    if not isinstance(value, (int, float)):
-        raise ParameterTypeError(
-            f"Value must be an int or float, got {type(value).__name__}."
-        )
-    return float(value)
+    return _coerce_numeric(value)
 
 
 def validate_angle_unit(unit: str) -> None:
@@ -320,13 +509,7 @@ def validate_angle_value(value: float) -> float:
     Raises:
         ParameterTypeError: If `value` is a `bool` or is not an `int`/`float`.
     """
-    if isinstance(value, bool):
-        raise ParameterTypeError(f"Value must be an int or float, not bool ({value!r}).")
-    if not isinstance(value, (int, float)):
-        raise ParameterTypeError(
-            f"Value must be an int or float, got {type(value).__name__}."
-        )
-    return float(value)
+    return _coerce_numeric(value)
 
 
 def validate_parameter_name(name: str) -> str:
@@ -348,9 +531,7 @@ def validate_parameter_name(name: str) -> str:
             surrounding whitespace and without `NAME_SEPARATOR`.
     """
     if not isinstance(name, str):
-        raise ParameterNameError(
-            f"Parameter name must be a str, got {type(name).__name__}."
-        )
+        raise ParameterNameError(f"Parameter name must be a str, got {type(name).__name__}.")
     if not name or name != name.strip():
         raise ParameterNameError(
             f"Parameter name must be non-empty and free of surrounding "

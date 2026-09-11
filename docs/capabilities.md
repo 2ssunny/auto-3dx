@@ -76,11 +76,14 @@ part.update()
 | 이름으로 조회 | 동작 | 짧은 이름·정규화 이름 둘 다 가능 |
 | 값 읽기 | 동작 | |
 | 값 수정 | 동작 | Length, mm |
-| 생성 | 동작 | Length, mm. 중복 이름·빈 이름·`\` 포함 이름은 거부 |
+| 생성 | 동작 | 중복 이름·빈 이름·`\` 포함 이름은 거부 |
 | ensure (없으면 생성, 있으면 수정) | 동작 | 다른 타입이면 거부 |
 | 삭제 | 동작 | `Parameters.Remove` |
-| **Length 외 타입** | **불가** | Real, Angle, String, Boolean, Integer 모두 미구현 |
-| **mm 외 단위** | **불가** | 이 설치본의 `Units` 컬렉션에 1887개가 있지만 mm만 검증했다 |
+| **Real / Integer / String / Boolean** | 동작 | `create_real` 등. 값 쓰기 가능 |
+| **임의 magnitude의 Dimension** | 동작 | `create_dimension(name, "Mass", 2)`. 잘못된 magnitude는 COM 호출 전 거부 |
+| **magnitude 조회** | 동작 | `parameter.magnitude` — Mass와 Volume 구분 |
+| **단위 카탈로그** | 동작 | `parameters.units` — 339 magnitude, 1887 unit |
+| **단위 변환** | **하지 않음** | `Value`는 항상 파라미터 자신의 단위. 단위 인자는 확인용 |
 
 ### 3.3 스케치
 
@@ -114,7 +117,8 @@ part.update()
 | **Groove(회전 컷) 생성 / ensure / 삭제** | 동작 | Shaft와 동일 |
 | 회전 각도 읽기/쓰기 | 동작 | `first_angle` / `second_angle`, 기본 360/0도 |
 | **Mirror 생성 / ensure / 삭제** | 동작 | 원점 평면을 받는다. BRep 참조 불필요 |
-| 목록 / 이름 조회 | 동작 | `pads`, `pockets`, `shafts`, `grooves`, `mirrors` 분리 |
+| **Rib / Slot 생성 / ensure / 삭제** | 동작 | 프로파일 + 경로 스케치 2개. Slot은 절삭 |
+| 목록 / 이름 조회 | 동작 | `pads`, `pockets`, `shafts`, `grooves`, `mirrors`, `ribs`, `slots` 분리 |
 | formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` / `first_angle_parameter()` |
 | **그 외 전부** | **불가** | 아래 참고 |
 
@@ -126,7 +130,8 @@ part.update()
 ```
 
 `ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`,
-`AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror` **5개**다.
+`AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror`, `AddNewRib`, `AddNewSlot`
+**7개**다.
 
 나머지가 막힌 이유는 두 가지다.
 
