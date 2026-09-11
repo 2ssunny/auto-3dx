@@ -325,6 +325,27 @@ class Sketch:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    def set_center_line(self, line: Any) -> None:
+        """Sets the sketch's revolve axis.
+
+        Verified writable (`docs/conventions.md` section 1.2.3): `create_shaft`
+        and `create_groove` both require a `CenterLine` on the sketch they
+        revolve, and the profile drawn in the sketch has to sit away from that
+        axis -- a profile straddling or touching the axis is not the verified
+        configuration.
+
+        Args:
+            line: The raw 2D line COM object (as returned by
+                `SketchEditor.line`) to use as the revolve axis.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            self._com_object.CenterLine = line
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
     def axis_data(self) -> "tuple[float, ...]":
         """Reads the sketch's absolute axis data.
 

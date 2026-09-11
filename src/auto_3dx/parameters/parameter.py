@@ -35,6 +35,12 @@ MILLIMETRE: str = "mm"
 SUPPORTED_LENGTH_UNITS: frozenset[str] = frozenset({MILLIMETRE})
 """Units accepted by :meth:`Parameter.set` for Length parameters."""
 
+DEGREE: str = "deg"
+"""The only supported unit string for Angle parameters (`FirstAngle`/`SecondAngle`)."""
+
+SUPPORTED_ANGLE_UNITS: frozenset[str] = frozenset({DEGREE})
+"""Units accepted for Angle values (verified for `Shaft`/`Groove` `FirstAngle`/`SecondAngle`)."""
+
 NAME_SEPARATOR: str = "\\"
 """Separator CATIA uses between a parameter's container path and its own name."""
 
@@ -268,6 +274,52 @@ def validate_length_value(value: float) -> float:
     """
     # bool is a subclass of int, so without this branch True would silently
     # become 1.0.
+    if isinstance(value, bool):
+        raise ParameterTypeError(f"Value must be an int or float, not bool ({value!r}).")
+    if not isinstance(value, (int, float)):
+        raise ParameterTypeError(
+            f"Value must be an int or float, got {type(value).__name__}."
+        )
+    return float(value)
+
+
+def validate_angle_unit(unit: str) -> None:
+    """Checks that a unit is one this library can write an Angle in.
+
+    Mirrors `validate_length_unit` exactly: the `isinstance` guard comes first
+    for the same reason (an unhashable `unit` must not reach the frozenset
+    membership test, which would raise `TypeError` instead of
+    `UnsupportedUnitError`).
+
+    Args:
+        unit: The unit string to check.
+
+    Raises:
+        UnsupportedUnitError: If `unit` is not a supported unit string.
+    """
+    if not isinstance(unit, str) or unit not in SUPPORTED_ANGLE_UNITS:
+        raise UnsupportedUnitError(
+            f"Unit {unit!r} is not supported; supported units are "
+            f"{sorted(SUPPORTED_ANGLE_UNITS)}."
+        )
+
+
+def validate_angle_value(value: float) -> float:
+    """Checks an Angle value and coerces it to `float`.
+
+    Mirrors `validate_length_value` exactly, including the explicit `bool`
+    rejection before the `int`/`float` check (`bool` is a subclass of `int`,
+    so without it `True` would silently become `1.0`).
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        `value` as a `float`.
+
+    Raises:
+        ParameterTypeError: If `value` is a `bool` or is not an `int`/`float`.
+    """
     if isinstance(value, bool):
         raise ParameterTypeError(f"Value must be an int or float, not bool ({value!r}).")
     if not isinstance(value, (int, float)):

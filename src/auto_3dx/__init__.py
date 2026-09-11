@@ -27,7 +27,16 @@ from auto_3dx.errors import (
 )
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.formulas.formula import Formula
-from auto_3dx.geometry.part_design import Pad, PartDesign, Pocket, SketchFeature
+from auto_3dx.geometry.part_design import (
+    Groove,
+    Mirror,
+    Pad,
+    PartDesign,
+    Pocket,
+    RevolvedFeature,
+    Shaft,
+    SketchFeature,
+)
 from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
 from auto_3dx.parameters.collection import ParameterCollection
 from auto_3dx.parameters.parameter import Parameter, ParameterInfo
@@ -41,9 +50,13 @@ __all__ = [
     "ParameterInfo",
     "Formula",
     "FormulaCollection",
+    "Groove",
+    "Mirror",
     "Pad",
     "PartDesign",
     "Pocket",
+    "RevolvedFeature",
+    "Shaft",
     "SketchFeature",
     "Sketch",
     "SketchCollection",

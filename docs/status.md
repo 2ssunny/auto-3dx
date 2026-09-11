@@ -13,8 +13,8 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **171 unit + 5 integration** (integration은 세션 상태에 따라 skip)
-- probe: `scripts/probes/` 16개
+- 테스트: **205 unit + 13 integration** (integration은 세션 상태에 따라 skip)
+- probe: `scripts/probes/` 19개
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -24,11 +24,11 @@
 ```text
 [사람]  3DEXPERIENCE UI에서 Part 생성        <- 막힘. 2.1
    |
-[auto-3dx]  attach
+[auto-3dx]  attach  (이름으로 Part 선택 가능)
             파라미터 생성 / 수정 / 삭제
-            스케치 생성 -> 점·선·원·사각형
-            패드 / 포켓 생성 · 수정 · 삭제
-            formula로 치수 연동
+            스케치 생성 -> 점·선·원·사각형 (+ 회전축)
+            패드 / 포켓 / Shaft / Groove / Mirror 생성 · 수정 · 삭제
+            formula로 치수·각도 연동
             update
    |
 [사람]  결과 확인 후 직접 저장                <- 의도적으로 자동화 안 함. 4.1
@@ -63,12 +63,32 @@ PLMNewService.getLastError()             ->  ('', 0)
 **풀려면:** 라이선스 재확보 후 `scripts/probes/15_plm_create.py` 재실행. 상세는
 `docs/plm_object_creation.md`.
 
-### 2.2 참조 레이어가 없어 Part Design 기능 대부분이 막혀 있다 (가장 큰 기능 공백)
+### 2.2 Part Design 기능 대부분이 여전히 막혀 있다 (가장 큰 기능 공백)
 
 ```text
 ShapeFactory.AddNew* : 90개
-구현됨               : AddNewPad, AddNewPocket — 2개
+구현됨               : Pad, Pocket, Shaft, Groove, Mirror — 5개
 ```
+
+**참조 레이어를 조사한 결과, 기대했던 "80개 일괄 해금"은 일어나지 않았다** (probe 17).
+
+되는 것:
+
+```text
+Part.CreateReferenceFromObject(pad)  -> Reference (DisplayName = feature 이름)
+Part.FindObjectByName(name)          -> Pad / Body / AnyObject(평면) 직접 획득
+AddNewMirror(OriginElements.PlaneYZ) -> 동작. 평면은 주소 지정이 되므로 BRep 불필요
+```
+
+안 되는 것:
+
+```text
+AddNewEdgeFilletWithConstantRadius(pad, propagMode, r)  -> propagation mode 3종 모두 실패
+AddNewChamfer(pad, ...)                                 -> 실패
+```
+
+즉 fillet/chamfer는 feature를 통째로 넘기는 것을 거부하고 **진짜 모서리 객체**를 요구한다.
+그건 유효한 BRep 이름이 있어야 하고, BRep 이름은 모델이 바뀌면 깨진다.
 
 막힌 이유는 API를 안 써서가 아니라 **인자로 넘길 면·모서리를 지목할 방법이 없어서**다.
 
@@ -79,15 +99,18 @@ AddNewShell(iFaceToRemove, ...)
 AddNewThickness(iFaceToThicken, ...)
 AddNewDraft(iFaceToDraft, ...)
 AddNewHole(iSupport, iDepth)
-AddNewMirror(iMirroringElement)
-AddNewRectPattern(인자 12개) / AddNewCircPattern(12개)
 ```
 
-`Part.CreateReferenceFromObject` / `CreateReferenceFromBRepName`이 그 역할인데,
-**BRep 이름은 모델이 바뀌면 깨진다.** 그냥 래핑하면 오늘 돌던 스크립트가 내일 다른 모서리를
-깎는다. 지금까지 지켜온 "검증된 것만 넣는다" 원칙에 어긋나므로 설계 없이 손대지 않았다.
+또 다른 부류는 **생성은 되는데 update가 실패**한다 (2.8 참조).
 
-**풀려면:** 참조 레이어를 별도 과제로 설계·검증. 이게 열리면 **약 80개가 한꺼번에** 풀린다.
+```text
+AddNewStiffener(iSketch)   -> Stiffener 반환. Part.Update() 실패
+AddNewRectPattern(...)     -> RectPattern 반환. Part.Update() 실패
+```
+
+**풀려면:** BRep 이름을 안정적으로 만들고 검증하는 설계가 필요하다. `Selection`으로 사용자가
+찍은 면을 받는 경로는 자동화와 맞지 않고, BRep 문자열을 직접 만드는 경로는 모델이 바뀌면
+깨진다. 이건 별도 과제다.
 
 ### 2.3 스케치 제약(Constraint)을 직접 걸 수 없다
 
@@ -97,15 +120,14 @@ AddNewRectPattern(인자 12개) / AddNewCircPattern(12개)
 **영향:** 완전 구속(fully constrained) 스케치를 코드로 만들 수 없다. 치수 제약을 formula로
 구동하는 전형적인 파라메트릭 패턴이 아직 반쪽이다.
 
-### 2.4 Part 여러 개를 동시에 다룰 수 없다
+### 2.4 Part 여러 개 동시 처리 — 해결됨
 
-`Application.ActiveEditor` 하나만 따른다. **UI 탭을 전환해도 `ActiveEditor`가 즉시
-따라오지 않는 경우를 실제로 관찰했다** (탭은 새 파트인데 COM은 이전 파트를 가리킴).
+`Application.ActiveEditor`가 UI 탭 전환을 즉시 따라오지 않는 것을 실측했다 (탭은 새 파트인데
+COM은 이전 파트를 가리킴). 엉뚱한 파트를 조용히 편집할 수 있는 문제였다.
 
-**영향:** 엉뚱한 파트를 건드릴 수 있다. 현재는 `part.name`으로 확인하는 수밖에 없다.
-
-**풀려면:** `Application.Editors`를 열거해 특정 editor를 지정하는 API 추가. 열거 자체는
-동작을 확인했다.
+`editors()` / `parts()` / `part_named(name)`으로 해결했다. 탭 상태와 무관하게 이름으로 고를
+수 있고, 각 `Part`에는 그 editor 자신의 `Selection`이 연결된다. `ActiveObject`를 읽을 수
+없는 editor가 섞여 있어도 열거가 죽지 않는다 (실측: 4개 중 1개가 그랬다).
 
 ### 2.5 지원 범위가 Length / mm로 제한돼 있다
 
@@ -120,6 +142,19 @@ AddNewRectPattern(인자 12개) / AddNewCircPattern(12개)
 
 `Part.Update()`가 예외 없이 끝난 것과 모델이 정상인 것은 별개다. `IsUpToDate`가 COM에
 노출돼 있지만 인자 형식을 확인하지 않아 쓰지 않는다.
+
+### 2.8 `AddNew*` 성공이 feature 유효를 뜻하지 않는다
+
+```text
+AddNewStiffener(sketch)  -> Stiffener 반환. 이후 Part.Update() 실패
+AddNewRectPattern(...)   -> RectPattern 반환. 이후 Part.Update() 실패
+```
+
+객체는 트리에 생겼는데 모델이 재계산에 실패한다. **생성 호출의 성공은 검증이 아니다.**
+
+- probe의 "검증됨" 기준을 **생성 성공 + `Part.Update()` 성공**으로 정했다.
+- 라이브러리의 `create_*`는 update를 호출하지 않으므로, 호출자가 update하고
+  `PartUpdateError`를 처리해야 한다. **실패해도 feature는 모델에 남으므로** 호출자가 지운다.
 
 ### 2.7 스레드 안전성 미검증
 
@@ -217,13 +252,15 @@ CATIA는 중복 이름을 허용하지만 라이브러리는 거부한다. 존�
 
 | 순서 | 항목 | 난이도 | 비고 |
 |---|---|---|---|
-| 1 | Shaft / Groove / Stiffener | 낮음 | 스케치만 받는다. Pocket과 같은 방식 |
-| 2 | Rib / Slot | 중간 | 스케치 2개 |
-| 3 | **참조 레이어** | **높음** | 열리면 약 80개가 한꺼번에 풀린다 (2.2) |
-| 4 | 스케치 제약 | 중간 | 완전 구속 스케치 (2.3) |
-| 5 | 여러 editor 지정 | 낮음 | 열거는 이미 동작 확인 (2.4) |
-| 6 | Length 외 타입 / 단위 시스템 | 중간 | signature 확인됨 (2.5) |
-| 7 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
+| 1 | 스케치 제약 | 중간 | 완전 구속 스케치 (2.3). 파라메트릭 워크플로의 핵심 |
+| 2 | Length 외 파라미터 타입 / 단위 시스템 | 중간 | signature 확인됨 (2.5) |
+| 3 | Rib / Slot | 중간 | 스케치 2개를 받는다 |
+| 4 | Stiffener / Pattern 재조사 | 중간 | 생성은 되나 update 실패 (2.8). 인자를 다시 찾아야 함 |
+| 5 | **BRep 참조 레이어** | **높음** | 열리면 fillet·chamfer·shell·hole 등이 풀린다 (2.2) |
+| 6 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
 
-3번이 기능 공백으로는 가장 크지만 설계 부담도 가장 크다. 1·2번은 기존 패턴을 그대로
-재사용할 수 있어 즉시 진행 가능하다.
+1번이 실질 가치가 가장 크다. 지금은 사각형을 그려도 CATIA가 자동 생성하는 구속에 의존하고
+있어서, 치수를 파라미터로 확실히 잡아두는 파라메트릭 모델을 코드로 만들 수 없다.
+
+5번은 기능 개수로는 가장 크지만(약 80개) 설계 부담도 가장 크고, probe 17에서 쉬운 우회로가
+없다는 것이 확인됐다.

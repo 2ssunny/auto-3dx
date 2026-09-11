@@ -577,6 +577,8 @@ class Sketch:
         self.close_edition_calls = 0
         self.factory2d = Factory2D()
         self.GeometricElements = GeometricElements()
+        # Writable, and how a revolve feature's axis is supplied.
+        self.CenterLine: Any = None
 
     @property
     def Name(self) -> str:
@@ -778,6 +780,85 @@ class Pocket:
         self._name = value
 
 
+class Angle:
+    """Fake CATIA `Angle`, as exposed by `Shaft.FirstAngle` / `SecondAngle`.
+
+    `Value` is readable and writable, in degrees. Verified defaults for a fresh
+    revolve feature: `FirstAngle` 360.0, `SecondAngle` 0.0.
+    """
+
+    def __init__(self, value: float = 0.0) -> None:
+        self.Name = "Angle"
+        self.Value = value
+
+
+class _RevolvedFake:
+    """Shared body for the `Shaft` / `Groove` fakes.
+
+    Subclasses exist only to carry the right class NAME, because the library
+    identifies a CATIA kind by `type(obj).__name__`.
+    """
+
+    def __init__(
+        self,
+        name: str = "Revolve.1",
+        sketch: Any = None,
+        first_angle: float = 360.0,
+        second_angle: float = 0.0,
+        name_write_exception: BaseException | None = None,
+    ) -> None:
+        self._name = name
+        self.name_write_exception = name_write_exception
+        self.Sketch = sketch
+        self.FirstAngle = Angle(first_angle)
+        self.SecondAngle = Angle(second_angle)
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
+
+
+class Shaft(_RevolvedFake):
+    """Fake CATIA `Shaft`, as returned by `ShapeFactory.AddNewShaft`."""
+
+
+class Groove(_RevolvedFake):
+    """Fake CATIA `Groove`, as returned by `ShapeFactory.AddNewGroove`."""
+
+
+class Mirror:
+    """Fake CATIA `Mirror`, as returned by `ShapeFactory.AddNewMirror`.
+
+    A mirror is built from a PLANE, not a sketch, so it carries no `Sketch`.
+    """
+
+    def __init__(
+        self,
+        name: str = "Mirror.1",
+        plane: Any = None,
+        name_write_exception: BaseException | None = None,
+    ) -> None:
+        self._name = name
+        self.name_write_exception = name_write_exception
+        self.plane = plane
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
+
+
 class Formula:
     """Fake CATIA `Formula`, as returned by `Relations.CreateFormula`.
 
@@ -913,12 +994,20 @@ class ShapeFactory:
         shapes: Any = None,
         pad_name_write_exception: BaseException | None = None,
         pocket_name_write_exception: BaseException | None = None,
+        revolve_name_write_exception: BaseException | None = None,
     ) -> None:
         self.add_new_pad_calls: list[tuple[Any, float]] = []
         self.add_new_pocket_calls: list[tuple[Any, float]] = []
+        self.add_new_shaft_calls: list[Any] = []
+        self.add_new_groove_calls: list[Any] = []
+        self.add_new_mirror_calls: list[Any] = []
         self._pad_count = 0
         self._pocket_count = 0
+        self._shaft_count = 0
+        self._groove_count = 0
+        self._mirror_count = 0
         self.pocket_name_write_exception = pocket_name_write_exception
+        self.revolve_name_write_exception = revolve_name_write_exception
         # The real AddNewPad registers the pad in the body's Shapes collection,
         # which is how `PartDesign.get_pad` finds it afterwards.
         self.shapes = shapes
@@ -936,6 +1025,38 @@ class ShapeFactory:
         if self.shapes is not None:
             self.shapes._append(pad)
         return pad
+
+    def AddNewShaft(self, iSketch: Any) -> Shaft:
+        self.add_new_shaft_calls.append(iSketch)
+        self._shaft_count += 1
+        shaft = Shaft(
+            name=f"Shaft.{self._shaft_count}",
+            sketch=iSketch,
+            name_write_exception=self.revolve_name_write_exception,
+        )
+        if self.shapes is not None:
+            self.shapes._append(shaft)
+        return shaft
+
+    def AddNewGroove(self, iSketch: Any) -> Groove:
+        self.add_new_groove_calls.append(iSketch)
+        self._groove_count += 1
+        groove = Groove(
+            name=f"Groove.{self._groove_count}",
+            sketch=iSketch,
+            name_write_exception=self.revolve_name_write_exception,
+        )
+        if self.shapes is not None:
+            self.shapes._append(groove)
+        return groove
+
+    def AddNewMirror(self, iMirroringElement: Any) -> Mirror:
+        self.add_new_mirror_calls.append(iMirroringElement)
+        self._mirror_count += 1
+        mirror = Mirror(name=f"Mirror.{self._mirror_count}", plane=iMirroringElement)
+        if self.shapes is not None:
+            self.shapes._append(mirror)
+        return mirror
 
     def AddNewPocket(self, iSketch: Any, iHeight: float) -> Pocket:
         self.add_new_pocket_calls.append((iSketch, iHeight))
@@ -1039,3 +1160,27 @@ def formula_factory() -> Callable[..., Formula]:
 def relations_factory() -> Callable[..., Relations]:
     """Returns a factory for fake `Relations` collections."""
     return Relations
+
+
+@pytest.fixture
+def angle_factory() -> Callable[..., Angle]:
+    """Returns a factory for fake `Angle` objects."""
+    return Angle
+
+
+@pytest.fixture
+def shaft_factory() -> Callable[..., Shaft]:
+    """Returns a factory for fake `Shaft` objects."""
+    return Shaft
+
+
+@pytest.fixture
+def groove_factory() -> Callable[..., Groove]:
+    """Returns a factory for fake `Groove` objects."""
+    return Groove
+
+
+@pytest.fixture
+def mirror_factory() -> Callable[..., Mirror]:
+    """Returns a factory for fake `Mirror` objects."""
+    return Mirror

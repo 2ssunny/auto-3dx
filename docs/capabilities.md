@@ -5,7 +5,7 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 마지막 검증: 171 unit + 4 live integration 통과
+- 마지막 검증: 205 unit + 12 live integration 통과
 
 ---
 
@@ -63,7 +63,9 @@ part.update()
 | Active Editor / Active Part 조회 | 동작 | |
 | Assembly context 거부 | 동작 | 실제 타입(`VPMRootOccurrence`)을 메시지에 포함 |
 | 새 세션 실행 | **불가** | attach 전용. 3DEXPERIENCE가 이미 떠 있어야 한다 |
-| 특정 editor 지정 | **불가** | `Application.ActiveEditor`만 따른다. 아래 5.3 참고 |
+| **editor 목록 조회** | 동작 | `editors()` — ActiveObject를 못 읽는 editor도 목록에 남는다 |
+| **열린 Part 전부 조회** | 동작 | `parts()` — 각자 자기 editor의 Selection이 연결됨 |
+| **이름으로 Part 선택** | 동작 | `part_named(name)` — 탭 상태와 무관. `ActiveEditor`가 UI를 안 따라오는 문제 해결 |
 
 ### 3.2 파라미터
 
@@ -105,8 +107,12 @@ part.update()
 | 패드 높이 읽기/쓰기 | 동작 | `FirstLimit.Dimension.Value` |
 | **포켓 생성 / ensure / 삭제** | 동작 | 스케치 + 깊이. 패드와 구조 동일 |
 | 포켓 깊이 읽기/쓰기 | 동작 | |
-| 목록 / 이름 조회 | 동작 | `pads`, `pockets` 분리 |
-| formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` |
+| **Shaft(회전) 생성 / ensure / 삭제** | 동작 | 스케치에 `set_center_line()` 축 지정 필요 |
+| **Groove(회전 컷) 생성 / ensure / 삭제** | 동작 | Shaft와 동일 |
+| 회전 각도 읽기/쓰기 | 동작 | `first_angle` / `second_angle`, 기본 360/0도 |
+| **Mirror 생성 / ensure / 삭제** | 동작 | 원점 평면을 받는다. BRep 참조 불필요 |
+| 목록 / 이름 조회 | 동작 | `pads`, `pockets`, `shafts`, `grooves`, `mirrors` 분리 |
+| formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` / `first_angle_parameter()` |
 | **그 외 전부** | **불가** | 아래 참고 |
 
 삭제 시 주의 (실측으로 확인된 비대칭):
@@ -116,8 +122,21 @@ part.update()
 포켓 삭제   -> 스케치는 남는다. 따로 지워야 한다
 ```
 
-`ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`와
-`AddNewPocket` **2개**다. 미구현 예:
+`ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`,
+`AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror` **5개**다.
+
+나머지가 막힌 이유는 두 가지다.
+
+```text
+면/모서리 참조가 필요       Chamfer, EdgeFillet, Shell, Thickness, Draft, Hole
+                            -> feature를 통째로 넘기는 것은 거부된다 (실측).
+                               유효한 BRep 이름이 있어야 하는데 모델이 바뀌면 깨진다.
+생성은 되는데 update 실패    Stiffener, RectPattern, CircPattern
+                            -> 객체는 트리에 생기지만 모델이 재계산에 실패한다.
+                               "생성 성공"을 검증으로 쳐주지 않는 이유다.
+```
+
+미구현 예:
 
 ```text
 AddNewHole        AddNewShaft       AddNewGroove      AddNewStiffener
@@ -193,7 +212,10 @@ from auto_3dx import Catia
 Catia.attach(com3dx_path=None) -> Catia
 .name                          # "3DEXPERIENCE"
 .active_editor()               # raw Editor COM 객체
-.active_part()   -> Part
+.active_part()   -> Part       # ActiveEditor를 따른다
+.editors()       -> list[EditorInfo]   # name, object_kind, object_name, is_part
+.parts()         -> list[Part]         # 열린 Part 전부
+.part_named(name) -> Part              # 탭 상태와 무관하게 선택
 ```
 
 ### Part
@@ -256,17 +278,37 @@ with sketch.edit() as editor:
 ### PartDesign / Pad / Pocket
 
 ```python
-part.part_design.pads     -> list[Pad]      .pockets -> list[Pocket]
-                .get_pad(name)              .get_pocket(name)
+part.part_design.pads / .pockets / .shafts / .grooves / .mirrors
+                .get_pad(name) / .get_pocket(name) / .get_shaft(name)
+                .get_groove(name) / .get_mirror(name)
                 .create_pad(name, sketch, height, unit="mm")
                 .create_pocket(name, sketch, depth, unit="mm")
-                .ensure_pad(...)            .ensure_pocket(...)
-                .remove_pad(name)           .remove_pocket(name)
+                .create_shaft(name, sketch)        # 스케치에 축 필요
+                .create_groove(name, sketch)
+                .create_mirror(name, support="YZ")
+                .ensure_*(...)   /  .remove_*(name)
 
 # Pad와 Pocket은 SketchFeature를 공유한다
 feature.name / .depth / .set_depth(depth, unit="mm") / .sketch()
         .depth_parameter()   -> Parameter   # formula가 구동할 대상
 pad.height / pad.set_height(height, unit="mm")   # depth의 별칭
+
+# Shaft와 Groove는 RevolvedFeature를 공유한다 (FirstLimit이 아니라 FirstAngle)
+revolve.first_angle / .second_angle                 # 도 단위, 기본 360 / 0
+        .set_first_angle(angle, unit="deg") / .set_second_angle(...)
+        .sketch() / .first_angle_parameter()
+
+# Mirror는 평면에서 만들어지므로 sketch()가 없다
+mirror.name
+```
+
+### Sketch 축 지정
+
+```python
+with sketch.edit() as editor:
+    editor.rectangle(10, 6, origin_x=20)   # 축에서 떨어진 프로파일
+    axis = editor.line(0, 0, 0, 20)
+sketch.set_center_line(axis)               # Shaft / Groove에 필요
 ```
 
 ### FormulaCollection / Formula
