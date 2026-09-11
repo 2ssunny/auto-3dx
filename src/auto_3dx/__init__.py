@@ -23,6 +23,7 @@ from auto_3dx.errors import (
     SketchAlreadyExistsError,
     SketchNotFoundError,
     SketchSupportMismatchError,
+    StaleSnapshotError,
     UnsupportedMagnitudeError,
     UnsupportedSupportError,
     UnsupportedUnitError,
@@ -30,8 +31,13 @@ from auto_3dx.errors import (
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.formulas.formula import Formula
 from auto_3dx.geometry.constraint import Constraint, ConstraintCollection
+from auto_3dx.geometry.edges import Edge, EdgeSnapshot
+from auto_3dx.geometry.faces import Face, FaceSnapshot
 from auto_3dx.geometry.part_design import (
+    Chamfer,
+    ConstRadEdgeFillet,
     Groove,
+    Hole,
     Mirror,
     Pad,
     PartDesign,
@@ -40,9 +46,12 @@ from auto_3dx.geometry.part_design import (
     RevolvedFeature,
     Rib,
     Shaft,
+    Shell,
     SketchFeature,
     Slot,
+    Thickness,
 )
+from auto_3dx.geometry.planes import AnglePlane, OffsetPlane, Plane, PlaneCollection
 from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
 from auto_3dx.measurement import (
     MassProperties,
@@ -71,6 +80,20 @@ __all__ = [
     "PartDesign",
     "Pocket",
     "RectangularPattern",
+    "Edge",
+    "EdgeSnapshot",
+    "Face",
+    "FaceSnapshot",
+    "Chamfer",
+    "ConstRadEdgeFillet",
+    "Hole",
+    "Shell",
+    "Thickness",
+    "Plane",
+    "OffsetPlane",
+    "AnglePlane",
+    "PlaneCollection",
+    "StaleSnapshotError",
     "RevolvedFeature",
     "Rib",
     "Shaft",
