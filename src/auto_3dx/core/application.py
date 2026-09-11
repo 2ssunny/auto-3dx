@@ -240,7 +240,7 @@ class Catia:
                 f"The active object is a {type_name}, not a Part. Switch to a "
                 "Part editor (not an Assembly) and try again."
             )
-        return Part(active_object, selection=_selection_of(editor))
+        return Part(active_object, selection=_selection_of(editor), editor=editor)
 
     def _raw_editors(self) -> Any:
         """Returns the raw ``Application.Editors`` collection.
@@ -347,7 +347,9 @@ class Catia:
                 continue
             if type(active_object).__name__ != _PART_TYPE_NAME:
                 continue
-            result.append(Part(active_object, selection=_selection_of(editor)))
+            result.append(
+                Part(active_object, selection=_selection_of(editor), editor=editor)
+            )
         return result
 
     def part_named(self, name: str) -> Part:
