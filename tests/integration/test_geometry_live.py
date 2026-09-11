@@ -78,9 +78,17 @@ def test_ensure_sketch_rectangle_pad_round_trip(part) -> None:
         assert pad.sketch().name == sketch.name
 
         pad = part.part_design.ensure_pad(PAD_NAME, sketch, UPDATED_HEIGHT)
+        assert part.is_up_to_date() is False
+        assert part.is_up_to_date(raw_body) is False
+        assert part.is_up_to_date(pad) is False
+        assert part.is_up_to_date(sketch) is True
         part.update()
 
         assert pad.height == pytest.approx(UPDATED_HEIGHT)
+        assert part.is_up_to_date() is True
+        assert part.is_up_to_date(raw_body) is True
+        assert part.is_up_to_date(pad) is True
+        assert part.is_up_to_date(sketch) is True
     finally:
         # Deleting a Pad cascade-deletes its Sketch (verified,
         # docs/conventions.md 1.2: Shapes 1->0, Sketches 1->0), so the sketch

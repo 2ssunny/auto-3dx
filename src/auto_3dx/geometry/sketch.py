@@ -22,6 +22,7 @@ import pywintypes
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
+    ParameterTypeError,
     PartialCreationError,
     SketchAlreadyExistsError,
     SketchNotFoundError,
@@ -30,6 +31,7 @@ from auto_3dx.errors import (
 )
 from auto_3dx.geometry.constraint import (
     CONSTRAINT_COINCIDENT,
+    CONSTRAINT_CONCENTRICITY,
     CONSTRAINT_DISTANCE,
     CONSTRAINT_HORIZONTAL,
     CONSTRAINT_LENGTH,
@@ -162,20 +164,24 @@ class SketchEditor:
     """Wraps a `Factory2D` obtained from `Sketch.OpenEdition()`.
 
     Only valid for the lifetime of the `Sketch.edit()` context manager that
-    created it. Geometry creation (`point`/`line`/`circle`/`rectangle`) is a
-    thin, validated pass-through to the verified `Factory2D` COM methods
-    (`CreatePoint`, `CreateLine`, `CreateClosedCircle`).
+    created it. Geometry creation (`point`/`line`/`circle`/`arc`/`spline`/
+    `rectangle`) is a thin, validated pass-through to the verified `Factory2D`
+    COM methods (`CreatePoint`, `CreateLine`, `CreateClosedCircle`,
+    `CreateCircle`, `CreateControlPoint`, `CreateSpline`; see
+    `scripts/probes/27_sketch_geometry.py` for the curved-geometry ones).
+    `set_construction()` marks any of the resulting elements as construction
+    geometry, which keeps them out of a padded/pocketed profile.
 
     Constraint creation (`horizontal`, `vertical`, `perpendicular`,
-    `parallel`, `coincident`, `tangent`, `length`, `radius`, `distance`) lives
-    here too, and only here: verified (`docs/conventions.md` 1.2.4/6.14),
-    `Constraints.AddMonoEltCst`/`AddBiEltCst` only succeed while the sketch is
-    open for editing, which is exactly the lifetime of this object. Their
-    arguments are the raw `Line2D`/`Circle2D` COM objects returned by
-    `line()`/`circle()` -- a `Reference` built with
-    `CreateReferenceFromObject` is verified to be rejected here, unlike Part
-    Design's face/edge references. None of these methods calls
-    `Part.Update()`.
+    `parallel`, `coincident`, `tangent`, `length`, `radius`, `distance`,
+    `concentric`) lives here too, and only here: verified
+    (`docs/conventions.md` 1.2.4/6.14), `Constraints.AddMonoEltCst`/
+    `AddBiEltCst` only succeed while the sketch is open for editing, which is
+    exactly the lifetime of this object. Their arguments are the raw
+    `Line2D`/`Circle2D` COM objects returned by `line()`/`circle()` -- a
+    `Reference` built with `CreateReferenceFromObject` is verified to be
+    rejected here, unlike Part Design's face/edge references. None of these
+    methods calls `Part.Update()`.
     """
 
     def __init__(self, com_object: Any, constraints: Any) -> None:
@@ -191,6 +197,19 @@ class SketchEditor:
         """
         self._com_object = com_object
         self._constraints = constraints
+        self._active = True
+
+    def _require_active(self) -> None:
+        """Rejects use after the owning ``Sketch.edit()`` block has exited."""
+        if not self._active:
+            raise Auto3dxError(
+                "This SketchEditor is no longer active; create geometry and "
+                "constraints only inside the Sketch.edit() block that returned it."
+            )
+
+    def _deactivate(self) -> None:
+        """Marks this short-lived editor unusable before closing the edition."""
+        self._active = False
 
     @property
     def com_object(self) -> Any:
@@ -212,12 +231,17 @@ class SketchEditor:
             y: The point's Y coordinate, in millimetres.
 
         Returns:
-            The raw `Point2D` COM object.
+            The raw `Point2D` COM object. It has no `X`/`Y` properties
+            (verified, `scripts/probes/27_sketch_geometry.py`): read its
+            coordinates back with ``point.GetCoordinates([0.0, 0.0])``, which
+            returns an `(x, y)` tuple -- the same seed-array-as-output
+            convention already used by `Sketch.GetAbsoluteAxisData` above.
 
         Raises:
             ParameterTypeError: If `x` or `y` is not an `int`/`float` (or is a `bool`).
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
+        self._require_active()
         x_value = validate_length_value(x)
         y_value = validate_length_value(y)
         try:
@@ -241,6 +265,7 @@ class SketchEditor:
             ParameterTypeError: If any coordinate is not an `int`/`float` (or is a `bool`).
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
+        self._require_active()
         x1_value = validate_length_value(x1)
         y1_value = validate_length_value(y1)
         x2_value = validate_length_value(x2)
@@ -253,19 +278,30 @@ class SketchEditor:
     def circle(self, center_x: float, center_y: float, radius: float) -> Any:
         """Creates a closed 2D circle in the sketch.
 
+        A closed, unconstrained circle like this one is verified to pad
+        successfully (`scripts/probes/27_sketch_geometry.py`), so curved
+        profiles are padable, not just polygonal ones.
+
         Args:
             center_x: The circle centre's X coordinate, in millimetres.
             center_y: The circle centre's Y coordinate, in millimetres.
             radius: The circle radius, in millimetres.
 
         Returns:
-            The raw `Circle2D` COM object.
+            The raw `Circle2D` COM object. `.Radius`, `.GeometricType`,
+            `.StartPoint`, and `.EndPoint` all read back fine; `.CenterPoint`
+            is listed as readable in the type library but FAILS with a COM
+            error when actually accessed (verified live), so this library
+            offers no helper for it -- do not add one without re-verifying
+            first. `.Construction` is a writable bool on the returned object
+            (see `set_construction()`).
 
         Raises:
             ParameterTypeError: If `center_x`, `center_y`, or `radius` is not an
                 `int`/`float` (or is a `bool`).
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
+        self._require_active()
         center_x_value = validate_length_value(center_x)
         center_y_value = validate_length_value(center_y)
         radius_value = validate_length_value(radius)
@@ -273,6 +309,161 @@ class SketchEditor:
             return self._com_object.CreateClosedCircle(
                 center_x_value, center_y_value, radius_value
             )
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def arc(
+        self,
+        center_x: float,
+        center_y: float,
+        radius: float,
+        start_param: float,
+        end_param: float,
+    ) -> Any:
+        """Creates an open 2D arc (circle segment) in the sketch.
+
+        Verified (`scripts/probes/27_sketch_geometry.py`): `Factory2D.
+        CreateCircle`, given explicit start/end parameters, creates an OPEN
+        arc rather than the closed circle `circle()` produces, and the
+        result survives `Part.Update()`.
+
+        `start_param`/`end_param` are passed to CATIA exactly as given. The
+        probe that verified this call used 0.0 and `math.pi` and treated them
+        as radians for that one experiment, but nothing in the type library
+        or the observed behaviour actually proves the unit -- do NOT assume
+        radians. Treat these two arguments as opaque CATIA parameter values
+        until a future probe pins the unit down (e.g. by comparing the arc's
+        `StartPoint`/`EndPoint` coordinates against a known angle).
+
+        Args:
+            center_x: The arc's centre X coordinate, in millimetres.
+            center_y: The arc's centre Y coordinate, in millimetres.
+            radius: The arc's radius, in millimetres.
+            start_param: The arc's start parameter, in CATIA's own
+                (unverified) parameter unit.
+            end_param: The arc's end parameter, same caveat as `start_param`.
+
+        Returns:
+            The raw `Circle2D` COM object (open, not closed -- unlike
+            `circle()`'s result). `.StartPoint`/`.EndPoint` read back as
+            `Point2D` objects; see `point()` for how to read their
+            coordinates.
+
+        Raises:
+            ParameterTypeError: If any argument is not an `int`/`float` (or
+                is a `bool`).
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        self._require_active()
+        center_x_value = validate_length_value(center_x)
+        center_y_value = validate_length_value(center_y)
+        radius_value = validate_length_value(radius)
+        # validate_length_value is reused here purely as a generic "reject
+        # bool/non-numeric, coerce to float" check -- start_param/end_param
+        # are not lengths, but no dedicated validator exists for an opaque,
+        # unit-unverified CATIA parameter value.
+        start_param_value = validate_length_value(start_param)
+        end_param_value = validate_length_value(end_param)
+        try:
+            return self._com_object.CreateCircle(
+                center_x_value,
+                center_y_value,
+                radius_value,
+                start_param_value,
+                end_param_value,
+            )
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def spline(self, points: "list[tuple[float, float]]") -> Any:
+        """Creates a 2D spline through a sequence of control points.
+
+        Verified (`scripts/probes/27_sketch_geometry.py`): `Factory2D.
+        CreateSpline` accepts a plain array of `ControlPoint2D` objects (this
+        method builds them internally, via `CreateControlPoint`, from the
+        given coordinates); the probe fed it three such control points and
+        the resulting spline survived `Part.Update()`. Whether `CreateSpline`
+        would also accept raw `Point2D` objects was NOT tested, so this
+        method never tries that path.
+
+        Every coordinate is validated before any COM call is made, so a bad
+        point later in the list cannot leave a partial set of control points
+        behind in the sketch.
+
+        Args:
+            points: The spline's control points, as `(x, y)` millimetre
+                pairs, in order. The probe used three; the minimum accepted
+                by CATIA itself is not established here.
+
+        Returns:
+            The raw `Spline2D` COM object. `.GetNumberOfControlPoints()`
+            returns a `float`, not an `int` (verified live); `.StartPoint`
+            and `.EndPoint` return `ControlPoint2D` objects.
+
+        Raises:
+            ParameterTypeError: If `points` is not a list of two-item tuples,
+                or any coordinate is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        self._require_active()
+        if not isinstance(points, list):
+            raise ParameterTypeError(
+                f"points must be a list, got {type(points).__name__}."
+            )
+        coerced_points: list[tuple[float, float]] = []
+        for index, point in enumerate(points):
+            if not isinstance(point, tuple) or len(point) != 2:
+                raise ParameterTypeError(
+                    "Each spline point must be a two-item tuple; "
+                    f"points[{index}] is {type(point).__name__}."
+                )
+            x, y = point
+            coerced_points.append(
+                (validate_length_value(x), validate_length_value(y))
+            )
+        poles: list[Any] = []
+        for x_value, y_value in coerced_points:
+            try:
+                poles.append(self._com_object.CreateControlPoint(x_value, y_value))
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        try:
+            return self._com_object.CreateSpline(poles)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def set_construction(self, element: Any, construction: bool = True) -> None:
+        """Marks (or unmarks) a 2D geometry element as construction geometry.
+
+        Verified (`scripts/probes/27_sketch_geometry.py`): `Construction` is
+        a writable bool property shared by every 2D geometry type tried
+        (`Line2D`, `Circle2D`, `Point2D`, `Spline2D`) -- not something
+        specific to curves. Construction geometry is excluded from a padded
+        profile: the probe marked every element except one closed circle as
+        construction right before padding, isolating a single real closed
+        profile in a sketch that also held an open arc, a point, and a
+        spline, and the pad succeeded.
+
+        Args:
+            element: The raw 2D geometry COM object, as returned by
+                `line()`, `circle()`, `arc()`, `point()`, or `spline()`.
+            construction: `True` to mark `element` as construction geometry,
+                `False` to mark it as real geometry. Defaults to `True`.
+
+        Raises:
+            ParameterTypeError: If `construction` is not a `bool`.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        self._require_active()
+        # bool is checked explicitly (not just "truthy"), matching the
+        # bool-is-an-int-subclass discipline used throughout this library --
+        # a stray 1/0 should not silently pass as True/False here either.
+        if not isinstance(construction, bool):
+            raise ParameterTypeError(
+                f"construction must be a bool, got {type(construction).__name__}."
+            )
+        try:
+            element.Construction = construction
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -335,6 +526,7 @@ class SketchEditor:
             Auto3dxError: If the underlying COM call fails -- most likely
                 because this sketch's `edit()` block has already exited.
         """
+        self._require_active()
         try:
             raw = self._constraints.AddMonoEltCst(constraint_type, element)
         except pywintypes.com_error as error:
@@ -356,6 +548,7 @@ class SketchEditor:
             Auto3dxError: If the underlying COM call fails -- most likely
                 because this sketch's `edit()` block has already exited.
         """
+        self._require_active()
         try:
             raw = self._constraints.AddBiEltCst(constraint_type, first, second)
         except pywintypes.com_error as error:
@@ -463,6 +656,40 @@ class SketchEditor:
                 because this sketch's `edit()` block has already exited.
         """
         return self._bi(CONSTRAINT_TANGENT, first, second)
+
+    def concentric(self, first: Any, second: Any) -> Constraint:
+        """Constrains two circles to share the same centre.
+
+        Verified (`scripts/probes/27_sketch_geometry.py`) with two DISTINCT
+        `Circle2D` objects; created AND `Part.Update()` succeeded. An earlier
+        probe (20/22, `docs/conventions.md` 1.2.4) passed the SAME circle to
+        both argument slots -- a probe input bug, not a COM limitation -- so
+        that earlier attempt never actually proved or disproved anything
+        about this constraint. Passing the same circle object as both `first`
+        and `second` here is therefore unverified; always pass two distinct
+        circles.
+
+        Args:
+            first: The raw first `Circle2D` COM object.
+            second: The raw second `Circle2D` COM object, distinct from
+                `first`.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint (type
+            `CONSTRAINT_CONCENTRICITY`, not dimensional -- it has no
+            `Dimension`).
+
+        Raises:
+            ParameterTypeError: If `first` and `second` refer to the same
+                circle.
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        if first is second or first == second:
+            raise ParameterTypeError(
+                "Concentricity requires two distinct circle objects."
+            )
+        return self._bi(CONSTRAINT_CONCENTRICITY, first, second)
 
     def length(
         self, line: Any, value: float | None = None, unit: str = MILLIMETRE
@@ -791,9 +1018,11 @@ class Sketch:
         except pywintypes.com_error as error:
             self._editing = False
             raise _wrap_com_error(error) from error
+        editor = SketchEditor(factory, constraints)
         try:
-            yield SketchEditor(factory, constraints)
+            yield editor
         finally:
+            editor._deactivate()
             try:
                 self._com_object.CloseEdition()
             except pywintypes.com_error as error:

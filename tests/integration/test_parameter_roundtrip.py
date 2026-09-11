@@ -19,7 +19,11 @@ if sys.platform != "win32":
 pytest.importorskip("pywintypes", reason="pywin32 is not available.")
 
 from auto_3dx.core.application import Catia  # noqa: E402
-from auto_3dx.errors import CatiaConnectionError, NoActivePartError, ParameterNotFoundError  # noqa: E402
+from auto_3dx.errors import (  # noqa: E402
+    CatiaConnectionError,
+    NoActivePartError,
+    ParameterNotFoundError,
+)
 
 TEST_PARAMETER_NAME = "AUTO3DX_TEST_LENGTH"
 TEST_VALUE = 150.0

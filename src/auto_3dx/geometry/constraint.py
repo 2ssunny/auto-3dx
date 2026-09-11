@@ -14,9 +14,20 @@ differ: `CONSTRAINT_HORIZONTAL`/`CONSTRAINT_VERTICAL` both normalise to a
 Parallelism constraint (`CONSTRAINT_PARALLEL`). A created constraint must
 never be looked back up by the code it was requested with.
 
-`Constraints.Remove(i)` is unverified and deliberately not exposed here, and
-constraint type `Concentricity` (3) is unverified and not defined as a
-`CONSTRAINT_*` constant.
+`Constraints.Remove(i)` is unverified and deliberately not exposed here.
+
+Concentricity (3) IS verified (`scripts/probes/27_sketch_geometry.py`,
+created AND `Part.Update()` succeeded), using two DISTINCT circles as
+`AddBiEltCst`'s two arguments -- an earlier probe (20/22) had passed the SAME
+circle to both argument slots, which `docs/conventions.md` 1.2.4 records as a
+probe input bug, not a COM limitation, so that earlier result never proved
+anything about concentricity either way.
+
+`CatConstraintType` has no `Diameter` member at all (the full 32-entry enum
+was grepped, not sampled, by probe 27) -- only `Radius` (14) exists for
+circle sizing. This module deliberately does not offer any diameter-flavoured
+convenience; inventing one would mean guessing an undocumented code, which is
+forbidden by this project's own rules.
 """
 
 from collections.abc import Iterator
@@ -80,6 +91,13 @@ CONSTRAINT_COINCIDENT: int = 2
 
 CONSTRAINT_TANGENT: int = 4
 """Type code for a tangency constraint between two elements."""
+
+CONSTRAINT_CONCENTRICITY: int = 3
+"""Type code for a concentricity constraint between two DISTINCT circles.
+
+Verified (`scripts/probes/27_sketch_geometry.py`) with two distinct closed
+`Circle2D` objects as `AddBiEltCst`'s two arguments; created AND
+`Part.Update()` succeeded. Not dimensional (no `Dimension`)."""
 
 
 def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:

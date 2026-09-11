@@ -757,6 +757,8 @@ class Circle2D:
 
     def __init__(self, center_x: float, center_y: float, radius: float) -> None:
         self.CenterX, self.CenterY, self.Radius = center_x, center_y, radius
+        # Probe 27 verified this writable flag on every 2D geometry object.
+        self.Construction = False
 
 
 class Point2D:
@@ -818,6 +820,7 @@ _CONSTRAINT_RESULT_BY_REQUESTED_CODE: "dict[int, tuple[int, str, bool]]" = {
     14: (14, "Radius", True),
     1: (1, "Offset", True),
     2: (2, "Coincidence", False),
+    3: (3, "Concentricity", False),
 }
 """Maps a requested `AddMonoEltCst`/`AddBiEltCst` type code to the (resulting
 `Constraint.Type`, name family, has-Dimension) CATIA actually reports (verified,
