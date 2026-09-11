@@ -13,8 +13,8 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **237 unit + 16 integration** (integration은 세션 상태에 따라 skip)
-- probe: `scripts/probes/` 26개
+- 테스트: **318 unit + 24 integration** (integration은 세션 상태에 따라 skip)
+- probe: `scripts/probes/` 31개
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -25,10 +25,12 @@
 [사람]  3DEXPERIENCE UI에서 Part 생성        <- 막힘. 2.1
    |
 [auto-3dx]  attach  (이름으로 Part 선택 가능)
-            파라미터 생성 / 수정 / 삭제
-            스케치 생성 -> 점·선·원·사각형 (+ 회전축)
-            패드 / 포켓 / Shaft / Groove / Mirror 생성 · 수정 · 삭제
+            파라미터 생성 / 수정 / 삭제 (Length·Angle·Dimension·Real·Integer·String·Boolean)
+            스케치 생성 -> 점·선·원·호·사각형·스플라인 (+ 회전축)
+            스케치 제약 9종 + 반지름·동심
+            패드 / 포켓 / Shaft / Groove / Mirror / Rib / Slot / 사각 패턴
             formula로 치수·각도 연동
+            부피·면적·질량·무게중심 측정
             update
    |
 [사람]  결과 확인 후 직접 저장                <- 의도적으로 자동화 안 함. 4.1
@@ -108,17 +110,35 @@ AddNewStiffener(iSketch)   -> Stiffener 반환. Part.Update() 실패
 AddNewRectPattern(...)     -> RectPattern 반환. Part.Update() 실패
 ```
 
-**풀려면:** BRep 이름을 안정적으로 만들고 검증하는 설계가 필요하다. `Selection`으로 사용자가
-찍은 면을 받는 경로는 자동화와 맞지 않고, BRep 문자열을 직접 만드는 경로는 모델이 바뀌면
-깨진다. 이건 별도 과제다.
+**2026-09-11 갱신 — 경로가 뚫렸다 (probe 28).** 위 문단은 `Selection`을 "사용자가 찍는 것"으로
+전제했는데 그게 틀렸다. `Selection.Search`는 코드로 topology를 열거한다.
 
-### 2.3 스케치 제약(Constraint)을 직접 걸 수 없다
+```text
+Search('Topology.Edge,all')  -> 29개 (RectilinearTriDimFeatEdge)
+Search('Topology.Face,all')  ->  9개 (PlanarFace)
+Search('Edge,all') / ('Face,all')  -> COM 오류. 쿼리 문자열이 정확해야 한다
+SelectedElement.Reference    -> Reference (CreateReferenceFromObject는 검색 결과에 실패)
 
-사각형을 그리면 CATIA가 `Coincidence.1~4`를 자동 생성하지만, 라이브러리에서 제약을
-지정하는 API는 없다. `Part.Constraints` / `Sketch.Constraints` 미조사.
+AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
+  -> 생성 + Part.Update() 성공. 면·모서리 feature 중 최초로 검증됨
+```
 
-**영향:** 완전 구속(fully constrained) 스케치를 코드로 만들 수 없다. 치수 제약을 formula로
-구동하는 전형적인 파라메트릭 패턴이 아직 반쪽이다.
+남은 문제는 두 가지다. 첫 fillet 이후의 모든 시도가 update에서 실패했는데, 모든 Reference를
+수정 전에 미리 잡아둔 탓으로 보인다(수정마다 재열거가 필요하다는 가설). 그리고 "어느
+모서리인가"를 재빌드 후에도 같은 것으로 지목할 방법이 필요하다. index는 보존 근거가 없고
+BRep 문자열은 구조적으로 깨진다. 측정으로 기하학적으로 고르는 방향을 probe 31에서 조사 중이다.
+
+`AddNewChamfer`는 여전히 update 실패다. propagation/mode/orientation 정수의 의미가 type
+library에 없다.
+
+### 2.3 스케치 제약 — 해결됨
+
+`Sketch.Constraints`로 제약을 직접 걸 수 있다. **편집 세션 안에서만** 동작하고 인자는 raw
+2D 객체여야 한다(`Reference`는 거부). 그래서 제약 API는 `SketchEditor`에 있다. 치수 제약의
+`Dimension`은 읽기·쓰기가 되므로 formula로 구동할 수 있다. 상세는 conventions 1.2.4.
+
+남은 제약: `Constraints.Remove(i)`는 호출해 본 적이 없어 제약 삭제는 구현하지 않았다.
+`CatConstraintType`에 `Diameter`가 없어 지름 구속은 존재하지 않는다(반지름의 절반으로 쓴다).
 
 ### 2.4 Part 여러 개 동시 처리 — 해결됨
 
@@ -141,22 +161,33 @@ COM은 이전 파트를 가리킴). 엉뚱한 파트를 조용히 편집할 수 
 
 남은 제약:
 
-- 스케치 평면: 원점 3개(XY/YZ/ZX)만. 사용자 정의 평면 불가.
-- 프로파일: 점·선·원·사각형만. 호·스플라인 불가.
+- 스케치 평면: 원점 3개(XY/YZ/ZX)만. offset 평면은 스케치까지 되고 pad가 실패한다
+  (probe 29, conventions 1.2.7). 각도 평면은 update 실패.
+- 프로파일: 호·스플라인·점까지 probe 27에서 검증됐다. 곡선 프로파일도 pad 된다.
 
-### 2.6 update 성공 여부를 검증할 수 없다
+### 2.6 update 성공 여부를 검증할 수 없다 — 측정으로 상당 부분 해결
 
-`Part.Update()`가 예외 없이 끝난 것과 모델이 정상인 것은 별개다. `IsUpToDate`가 COM에
-노출돼 있지만 인자 형식을 확인하지 않아 쓰지 않는다.
+`Part.Update()`가 예외 없이 끝난 것과 모델이 정상인 것은 별개다. `IsUpToDate`는 여전히 인자
+형식을 확인하지 않아 쓰지 않는다.
+
+그런데 **결과를 직접 재는 쪽이 더 강한 검증**이고, 그게 probe 30에서 열렸다.
+`Editor.GetService('InertiaService')`로 부피·면적·질량·무게중심을 읽을 수 있다. 깎이지 않은
+pocket은 부피가 그대로라는 것으로 잡힌다. 값은 전부 SI(m, m3)이므로 mm 환산이 필수다.
+자세한 내용과 함정은 conventions 1.4에 있다.
 
 ### 2.8 `AddNew*` 성공이 feature 유효를 뜻하지 않는다
 
 ```text
 AddNewStiffener(sketch)  -> Stiffener 반환. 이후 Part.Update() 실패
-AddNewRectPattern(...)   -> RectPattern 반환. 이후 Part.Update() 실패
+AddNewRectPattern(...)   -> 방향 인자가 틀리면 Part.Update() 실패
+AddNewChamfer(edge)      -> Chamfer 반환. 이후 Part.Update() 실패
 ```
 
 객체는 트리에 생겼는데 모델이 재계산에 실패한다. **생성 호출의 성공은 검증이 아니다.**
+
+패턴은 해결됐다. 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을
+만드는지도 probe 30에서 측정으로 확정했다(conventions 1.2.5). dir1과 dir2가 같은 축이 되면
+update가 실패하므로 라이브러리가 호출 전에 거부한다.
 
 - probe의 "검증됨" 기준을 **생성 성공 + `Part.Update()` 성공**으로 정했다.
 - 라이브러리의 `create_*`는 update를 호출하지 않으므로, 호출자가 update하고
@@ -185,6 +216,9 @@ CATIA가 **조용히 넘어가는데 모델을 망가뜨리는** 동작들이다
 | 6 | Pad 삭제 | 스케치까지 연쇄 삭제 | 문서화 |
 | 7 | **Pocket 삭제** | **스케치가 남는다** (Pad와 비대칭) | 문서화. 따로 지워야 함 |
 | 8 | formula 제거 | **마지막 계산값이 그대로 남음** (되돌아가지 않음) | 문서화. 직접 복원해야 함 |
+| 9 | `GetInertiaBoxElement` | 축 정렬이 아니라 **주관성축 정렬** bounding box. 단순 블록에서는 전역 축과 일치해서 맞아 보인다 | 판정에 쓰지 않는다. 부피·무게중심으로 판단 |
+| 10 | `Selection.Search('Face,all')` | COM 오류. 올바른 쿼리는 `'Topology.Face,all'` | 검증된 쿼리 문자열만 쓴다 |
+| 11 | 측정값 단위 | 전부 **SI(m, m3)**. 나머지 API는 mm | 경계에서 환산. 이름에 단위를 박아 혼동을 막는다 |
 
 추가로, 코드 쪽에서 잡힌 것들:
 
@@ -257,17 +291,19 @@ CATIA는 중복 이름을 허용하지만 라이브러리는 거부한다. 존�
 
 ## 6. 다음 단계
 
+1~4번은 끝났다. 스케치 제약, 파라미터 타입과 단위, Rib/Slot, 그리고 Pattern까지 구현됐다.
+Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 남긴다.
+
 | 순서 | 항목 | 난이도 | 비고 |
 |---|---|---|---|
-| 1 | 스케치 제약 | 중간 | 완전 구속 스케치 (2.3). 파라메트릭 워크플로의 핵심 |
-| 2 | Length 외 파라미터 타입 / 단위 시스템 | 중간 | signature 확인됨 (2.5) |
-| 3 | Rib / Slot | 중간 | 스케치 2개를 받는다 |
-| 4 | Stiffener / Pattern 재조사 | 중간 | 생성은 되나 update 실패 (2.8). 인자를 다시 찾아야 함 |
-| 5 | **BRep 참조 레이어** | **높음** | 열리면 fillet·chamfer·shell·hole 등이 풀린다 (2.2) |
+| 1 | **모서리 선택 레이어** | **높음** | fillet이 처음 검증됐다 (2.2). 재빌드를 넘어 같은 모서리를 지목하는 방법이 핵심. probe 31 |
+| 2 | chamfer 인자 확정 | 중간 | 모서리 Reference는 통하는데 정수 3개의 의미를 모른다 |
+| 3 | 사용자 정의 평면 | 중간 | offset 평면은 스케치까지 됐고 pad가 실패한다 (2.5, conventions 1.2.7) |
+| 4 | 측정 기반 검증 | 낮음 | 측정이 열렸으니 "의도한 형상이 나왔는가"를 테스트로 고정할 수 있다 (2.6) |
+| 5 | 스레드 안전성 | 중간 | 미검증 (2.7) |
 | 6 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
 
-1번이 실질 가치가 가장 크다. 지금은 사각형을 그려도 CATIA가 자동 생성하는 구속에 의존하고
-있어서, 치수를 파라미터로 확실히 잡아두는 파라메트릭 모델을 코드로 만들 수 없다.
-
-5번은 기능 개수로는 가장 크지만(약 80개) 설계 부담도 가장 크고, probe 17에서 쉬운 우회로가
-없다는 것이 확인됐다.
+1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸으므로,
+남은 것은 "어느 모서리인가"를 안정적으로 표현하는 설계다. index는 재빌드를 넘어 보존된다는
+근거가 없고 BRep 문자열은 구조적으로 깨지므로, 측정으로 기하학적 조건을 걸어 매번 다시
+찾아내는 방향이 가장 유력하다.

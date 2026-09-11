@@ -443,7 +443,7 @@ OpenEdition()~CloseEdition() 사이        -> 동작
  1 Distance         -> 'Offset.7'           Type=1    <- Dimension 있음
  2 On               -> 'Coincidence.8'      Type=2
  4 Tangency         -> 'Tangency.9'         Type=4
- 3 Concentricity    -> 미검증 (같은 원을 두 번 넘긴 probe 입력 오류)
+ 3 Concentricity    -> 'Concentricity' (probe 27에서 서로 다른 원 2개로 검증)
 ```
 
 **요청한 타입과 결과 타입이 다를 수 있다.** Horizontality/Verticality는 둘 다 Parallelism
@@ -462,6 +462,70 @@ OpenEdition()~CloseEdition() 사이        -> 동작
 스케치 상태를 확인할 수 있다.
 
 **미검증:** `Constraints.Remove(i)`는 호출해 보지 않았다. 제약 삭제는 구현하지 않는다.
+
+### 1.2.7 사용자 정의 평면 (부분 검증, probe 29)
+
+지금은 원점 평면 3개(XY/YZ/ZX)에만 스케치를 만들 수 있다. offset 평면까지는 길이 났다.
+
+```text
+Part.HybridShapeFactory -> HybridShapeFactory   (선언 타입은 generic Factory, 런타임 캐스팅)
+HybridBodies.Add() -> HybridBody                (기하 세트. 평면을 넣을 곳)
+HybridShapeFactory.AddNewPlaneOffset(iPlane, iOffset, iOrientation) -> HybridShapePlaneOffset
+HybridBody.AppendHybridShape(iHybridShape)      (이걸 거치지 않으면 평면이 쓸 수 없다)
+```
+
+검증된 것:
+
+```text
+AddNewPlaneOffset(raw PlaneXY, 30.0, False) + AppendHybridShape + Part.Update() -> 성공
+되읽기: Offset.Value = 30.0, Plane.DisplayName = 'xy plane', Orientation = 1 (int)
+Sketches.Add(raw hybrid shape) -> Sketch        (Reference로 감쌀 필요 없음)
+그 스케치에 사각형 + Part.Update()              -> 성공
+```
+
+**미검증(구현하지 않는다):**
+
+```text
+그 스케치에 pad          -> AddNewPad 실패 (0x80020009). 원인 미파악
+AddNewPlaneAngle(...)    -> 생성은 되지만 Part.Update() 실패
+```
+
+`iOrientation`은 `VT_BOOL`로 넘기는데 되읽기는 `VT_I4` 정수다. 대응 관계가 문서에 없으므로
+`False == 0`이라고 가정하면 안 된다.
+
+### 1.2.6 곡선 스케치 요소 (실측, probe 27)
+
+`Factory2D`에서 직선·사각형 외의 요소가 전부 검증됐다. 생성 + `Part.Update()` 모두 성공했고,
+닫힌 원을 프로파일로 쓴 pad도 성공했다. **곡선 프로파일은 pad 된다.**
+
+```text
+CreateCircle(iCenterX, iCenterY, iRadius, iStartParam, iEndParam) -> Circle2D
+CreateClosedCircle(iCenterX, iCenterY, iRadius)                   -> Circle2D
+CreatePoint(iX, iY)                                               -> Point2D
+CreateControlPoint(iX, iY)                                        -> ControlPoint2D
+CreateSpline(iPoles)                                              -> Spline2D
+```
+
+`CreateSpline`은 입력 배열을 받는다. `ControlPoint2D` 3개로 검증했다. `Point2D`도 되는지는
+시험하지 않았다.
+
+되읽기에 함정이 있다.
+
+```text
+Circle2D.Radius / GeometricType / StartPoint / EndPoint  -> 동작
+Circle2D.CenterPoint  -> type library에 있는데 COM 오류. 제공하지 않는다.
+Point2D               -> X/Y 속성이 아예 없다. GetCoordinates([0.0, 0.0]) -> (0.0, 30.0)
+Spline2D.GetNumberOfControlPoints() -> int가 아니라 float
+```
+
+`Construction`은 `Circle2D` / `Point2D` / `Spline2D` 모두 쓰기 가능하고, `True`로 두면 그
+요소가 pad 프로파일에서 빠진다.
+
+**`CatConstraintType`에 `Diameter` 멤버가 아예 없다.** 원 크기는 `Radius`(14)뿐이다. 지름
+구속을 만들어 내면 안 된다.
+
+`CreateCircle`의 `iStartParam` / `iEndParam` 단위는 확인하지 않았다. 라디안으로 넘겨서
+동작했지만 그것이 라디안임을 증명한 것은 아니다.
 
 ### 1.2.3 Shaft / Groove / Mirror (실측, probes 17·18·19)
 
@@ -539,7 +603,55 @@ feature + 방향 참조 필요   AddNewMirror(iMirroringElement)
 
 면·모서리 참조는 `Part.CreateReferenceFromObject` / BRep 이름이 필요한데, BRep 이름은
 모델이 바뀌면 깨지므로 별도 설계가 필요하다. **참조 레이어가 생기기 전까지 이 기능들은
-구현하지 않는다.**
+구현하지 않는다.** 단 아래 1.2.2.2에서 모서리 참조를 얻는 경로 하나가 뚫렸다.
+
+### 1.2.2.2 모서리 참조를 얻는 경로 (실측, probe 28)
+
+`Selection.Search`로 솔리드의 topology를 열거할 수 있다. **쿼리 문자열이 정확해야 한다.**
+
+```text
+Search('Face,all')           -> COM 오류
+Search('Edge,all')           -> COM 오류
+Search('Topology.Face,all')  -> 9개, wrapper 타입 PlanarFace
+Search('Topology.Edge,all')  -> 29개, wrapper 타입 RectilinearTriDimFeatEdge
+```
+
+`Search` 자체는 void를 반환하고 `Selection`을 변경한다. 따라서 `Clear()` → `Search(query)`
+→ `Count` / `Item(i)` 순서로 읽는다.
+
+검색 결과를 `Reference`로 바꾸는 방법은 **하나뿐이다.**
+
+```text
+Part.CreateReferenceFromObject(검색 결과)  -> 실패 (면·모서리 모두)
+SelectedElement.Reference                  -> Reference (성공)
+```
+
+그 `Reference`의 `Name`과 `DisplayName`은 동일한 BRep 문자열이다.
+
+```text
+Selection_REdge:(Edge:(Face:(Brp:((Brp:(Pad.21;1);Brp:(Pad.1;1)));None:();Cf16:());...)
+```
+
+**그리고 fillet이 처음으로 검증됐다.**
+
+```text
+AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
+  -> 생성 + Part.Update() 성공 -> 검증됨
+```
+
+면 Reference를 fillet이나 chamfer에 넣으면 propagation 0·1·2 전부 실패한다. fillet은
+모서리를 요구한다. `AddNewChamfer`는 생성은 되지만 update가 실패했다. propagation/mode/
+orientation 정수의 의미가 type library에 없어서(enum 메타데이터 없는 순수 `VT_I4`) 어떤
+값이 맞는지 아직 모른다.
+
+**첫 fillet 이후의 모든 시도는 update가 실패했다.** 그 실행에서 모든 Reference를 수정 전에
+미리 잡아뒀으므로, fillet이 topology를 바꿔 기존 Reference가 무효가 된 것으로 보인다.
+아직 가설이며 probe 31에서 확인한다. 확인되면 **수정마다 재열거**가 규칙이 되고 라이브러리가
+그것을 강제해야 한다.
+
+남은 설계 문제는 "어느 모서리인가"를 지목하는 방법이다. 검색 순서(index)는 재빌드를 넘어
+보존된다는 근거가 없고 BRep 문자열은 구조적으로 깨진다. 측정(1.4)으로 모서리를 기하학적으로
+골라내는 방향을 probe 31에서 조사한다.
 
 ### 1.2.5 Rib / Stiffener / Pattern (실측, probe 24)
 
@@ -587,10 +699,71 @@ RectPattern 읽기 가능: FirstDirectionRepartition (LinearRepartition),
 
 따라서 개수와 간격은 formula로 구동할 수 있다.
 
-**그런데 어느 평면이 어느 축 방향을 만드는지는 확인하지 않았다.** `FirstDirectionReference`
-같은 되읽기 속성이 없어서 COM만으로는 알 수 없고, 화면을 눈으로 확인해야 한다. 사용자가
-"X 방향으로 60mm 간격 2개"를 요청했을 때 무엇이 나오는지 모르는 상태이므로 **구현하지
-않는다.** 평면-축 대응만 한 번 눈으로 확인하면 바로 구현 가능하다.
+**어느 평면이 어느 축을 만드는지는 probe 30에서 측정으로 확정했다.** 되읽기 속성이 없어
+눈으로 봐야 하는 문제로 보였지만, 측정(1.4)이 열리면서 숫자로 풀렸다. 패턴이 **추가한
+재료의 무게중심**을 질량 균형으로 계산해 원본 pad 무게중심과 비교했다.
+
+```text
+C_added = (V_after * C_after - V_before * C_before) / (V_after - V_before)
+```
+
+평면 3개 x 배치 2종(2개/60mm, 3개/100mm)에서 예측과 소수점 셋째 자리까지 일치했다.
+
+```text
+dir1 = Reference(PlaneXY) -> -X      dir2 = Reference(PlaneXY) -> -Y
+dir1 = Reference(PlaneYZ) -> -Y      dir2 = Reference(PlaneYZ) -> -Z
+dir1 = Reference(PlaneZX) -> -Z      dir2 = Reference(PlaneZX) -> -X
+```
+
+즉 **dir1은 평면의 첫 축, dir2는 둘째 축이고 둘 다 음방향이다.** `iIsReversedDir1=True`로
+부호가 뒤집힌다(정확히 +60mm 측정). 전체 인자 이름은 type library 기준으로 이렇다.
+
+```text
+AddNewRectPattern(iShapeToCopy, iNbOfCopiesInDir1, iNbOfCopiesInDir2,
+    iStepInDir1, iStepInDir2, iShapeToCopyPositionAlongDir1,
+    iShapeToCopyPositionAlongDir2, iDir1, iDir2, iIsReversedDir1,
+    iIsReversedDir2, iRotationAngle) -> RectPattern
+```
+
+**dir1과 dir2가 같은 축이 되면 `Part.Update()`가 실패하고 깨진 feature가 트리에 남는다.**
+(dir1=PlaneXY, dir2=PlaneZX 둘 다 X축 -> 실패. dir1을 PlaneYZ로 바꾸자 같은 dir2가 성공.)
+라이브러리가 COM 호출 전에 직접 거부해야 한다.
+
+공개 API는 평면이 아니라 **축**으로 말한다(`"X"`, `"-X"`, ...). 평면을 인자로 받으면 검증할
+수 없는 대응 관계의 책임을 호출자에게 떠넘기게 된다.
+
+### 1.4 모델 측정 (실측, probe 30)
+
+`Part.Update()` 성공은 feature가 재빌드됐다는 뜻일 뿐, 의도한 결과가 나왔다는 뜻이 아니다.
+아무것도 깎지 않는 pocket도 update는 잘 통과한다(2.6). 측정으로 그 공백을 메운다.
+
+```text
+Editor.GetService(iService) -> Service
+
+받아들이는 이름 : 'InertiaService', 'InertiaBoxService', 'MeasurableService'
+거부하는 이름   : 'CATIAInertiaService', 'SPAWorkbench'   (COM 오류)
+
+InertiaService.GetInertiaElement(item) -> Inertia
+  Inertia.GetVolume() / GetArea() / GetMass() -> double
+  Inertia.GetCOGPosition(oX, oY, oZ)   # 참조 out 3개, pywin32가 tuple로 반환
+InertiaBoxService.GetInertiaBoxElement(item) -> InertiaBox
+  InertiaBox.GetBoundingBox(oOrigin, oLengths)
+```
+
+**모든 값이 SI(m, m3)로 온다.** 나머지 API는 mm를 쓰므로 반드시 환산해야 한다. 20x20x10 mm
+pad는 2e-06 m3다. 환산을 놓치면 1000배 또는 10억배 틀린 값이 조용히 나온다.
+
+`GetBoundingBox`는 인자 없이 호출하면 type mismatch다. **3개짜리 시퀀스 2개를 넘겨야 하고,
+반환값으로 `(origin, lengths)`를 돌려준다** (인자를 바꾸는 방식이 아니다).
+
+```text
+box.GetBoundingBox((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+```
+
+**함정: `GetInertiaBoxElement`는 축 정렬 bounding box가 아니다.** 솔리드의 **주관성축**에
+정렬된다. 단순한 블록에서는 전역 축과 일치해서 쓸 만해 보이는데 그게 바로 함정이고, 형상이
+비대칭이 되면 상자가 회전한다. 패턴 하나를 걸었더니 세 축이 동시에 늘어난 것으로 나왔다.
+판정에 쓰면 안 된다.
 
 ### 1.3 `ensure_*` 정책 (형상)
 
