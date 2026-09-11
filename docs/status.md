@@ -67,11 +67,13 @@ PLMNewService.getLastError()             ->  ('', 0)
 **풀려면:** 라이선스 재확보 후 `scripts/probes/15_plm_create.py` 재실행. 상세는
 `docs/plm_object_creation.md`.
 
-### 2.2 Part Design 기능 대부분이 여전히 막혀 있다 (가장 큰 기능 공백)
+### 2.2 Part Design 기능 — 참조 레이어가 뚫렸다
 
 ```text
 ShapeFactory.AddNew* : 90개
-구현됨               : Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot, RectPattern — 8개
+구현됨               : Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot, RectPattern,
+                       모서리 fillet, chamfer — 10개
+검증 완료, 구현 대기  : Shell, Thickness, Hole (probe 37)
 ```
 
 **참조 레이어를 조사한 결과, 기대했던 "80개 일괄 해금"은 일어나지 않았다** (probe 17).
@@ -139,7 +141,11 @@ probe 34·35에서 나머지가 풀렸다.
 chamfer 인자도 확정했다. `iMode=1`만 동작한다(0은 update 실패, 2는 생성 실패). propagation과
 orientation은 0·1 모두 통과한다.
 
-**남은 한계는 "어느 모서리인가"다.** 네 경로가 모두 막혔다.
+**면도 같은 경로로 풀렸다 (probe 37).** fillet과 chamfer가 면을 거부한 건 그 둘이 모서리를
+원해서지 면 참조가 안 돼서가 아니었다. `Search('Topology.Face,all')`로 얻은 면 Reference로
+Shell·Thickness·Hole 세 개가 전부 첫 면에서 생성 + update를 통과했다.
+
+**남은 한계는 "어느 모서리·어느 면인가"다.** 네 경로가 모두 막혔다.
 
 ```text
 BRep 이름 저장 후 재해석   : CreateReferenceFromBRepName -> Part·Pad context 모두 실패

@@ -729,6 +729,27 @@ mode=2  -> 생성 자체가 실패
 
 **mode는 1이어야 한다.** 다른 값은 제공하지 않는다.
 
+#### 면을 받는 feature (실측, probe 37)
+
+fillet과 chamfer가 면 Reference를 거부한 것은 **그 둘이 모서리를 원하기 때문**이지 면 참조가
+안 되기 때문이 아니었다. 진짜 면을 받는 feature 세 개를 처음 시험했고 **전부 첫 면에서**
+생성과 `Part.Update()`가 통과했다.
+
+```text
+AddNewShell(iFaceToRemove, iInternalThickness, iExternalThickness) -> Shell
+  실측 (면, 2.0, 0.0)
+AddNewThickness(iFaceToThicken, iOffset)                           -> Thickness
+  실측 (면, 3.0)
+AddNewHole(iSupport, iDepth)                                       -> Hole
+  실측 (면, 5.0)
+```
+
+면 참조를 얻는 경로는 모서리와 같다. `Search('Topology.Face,all')` 후
+`SelectedElement.Reference`다. 40x40x20 pad에서 면 8개가 나왔다.
+
+따라서 1.2.2의 "참조 레이어가 없어 막힌" 목록 중 shell·thickness·hole이 풀렸다. 남은 것은
+draft 계열처럼 인자가 더 많은 feature들이다.
+
 ### 1.2.5 Rib / Stiffener / Pattern (실측, probes 24·26·30)
 
 ```text
