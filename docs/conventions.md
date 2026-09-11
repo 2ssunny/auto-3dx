@@ -521,6 +521,22 @@ Spline2D.GetNumberOfControlPoints() -> int가 아니라 float
 `Construction`은 `Circle2D` / `Point2D` / `Spline2D` 모두 쓰기 가능하고, `True`로 두면 그
 요소가 pad 프로파일에서 빠진다.
 
+현재 wrapper 계약은 다음과 같다.
+
+```python
+with sketch.edit() as editor:
+    arc = editor.arc(cx, cy, radius, start_param, end_param)  # 열린 Circle2D
+    spline = editor.spline([(x1, y1), (x2, y2), (x3, y3)])    # Spline2D
+    editor.set_construction(arc, True)
+```
+
+`arc()`의 start/end parameter 단위는 아직 확정하지 않았으므로 opaque 값으로 취급한다.
+`spline()`은 좌표 목록을 받아 내부에서 `ControlPoint2D`를 만들며, 최소 점 개수는 미확정이다.
+세 메서드는 `Sketch.edit()` 안에서만 사용하고 `Part.Update()`는 호출하지 않는다.
+
+서로 다른 두 `Circle2D`에는 `editor.concentric(first, second)`로 동심 제약을 걸 수 있다.
+이 경로도 편집 세션 안에서만 유효하며, 생성 시 `CONSTRAINT_CONCENTRICITY == 3`을 사용한다.
+
 **`CatConstraintType`에 `Diameter` 멤버가 아예 없다.** 원 크기는 `Radius`(14)뿐이다. 지름
 구속을 만들어 내면 안 된다.
 
@@ -580,7 +596,9 @@ AddNewRectPattern(...)    -> RectPattern 객체 반환. 이후 Part.Update() 실
   `PartUpdateError`를 처리해야 한다. **실패해도 feature는 모델에 남으므로** 호출자가 지워야
   한다. 이 점을 docstring에 명시한다.
 
-이 기준으로 Stiffener와 Pattern은 **미검증**이며 구현하지 않는다.
+이 기준으로 Stiffener는 **미검증**이며 구현하지 않는다. Rectangular Pattern은 이후
+probe 26·30에서 올바른 방향 Reference 조합으로 생성과 `Part.Update()`까지 검증됐고,
+계약은 1.2.5와 6.17에 기록한다.
 
 ### 1.2.2 아직 참조 레이어가 없어 막힌 Part Design 기능
 
@@ -646,20 +664,25 @@ orientation 정수의 의미가 type library에 없어서(enum 메타데이터 �
 
 **첫 fillet 이후의 모든 시도는 update가 실패했다.** 그 실행에서 모든 Reference를 수정 전에
 미리 잡아뒀으므로, fillet이 topology를 바꿔 기존 Reference가 무효가 된 것으로 보인다.
-아직 가설이며 probe 31에서 확인한다. 확인되면 **수정마다 재열거**가 규칙이 되고 라이브러리가
-그것을 강제해야 한다.
+probe 31로 실제 재열거·재생성 실험을 했다. 변경 없는 반복 검색은 16개 edge의 이름과
+순서가 같았지만, 임시 Pad의 높이를 바꾸고 update하자 edge 수가 20→29로 변했고 BRep name
+multiset과 검색 순서가 모두 달라졌다. **수정마다 재열거해야 하며**, 이전 raw 이름이나
+index를 durable selector로 저장하면 안 된다.
 
-남은 설계 문제는 "어느 모서리인가"를 지목하는 방법이다. 검색 순서(index)는 재빌드를 넘어
-보존된다는 근거가 없고 BRep 문자열은 구조적으로 깨진다. 측정(1.4)으로 모서리를 기하학적으로
-골라내는 방향을 probe 31에서 조사한다.
+이 Selection BRep name을 `CreateReferenceFromBRepName`에 다시 넣는 경로는 Part context와
+Pad context 모두 실패했다. `MeasurableService`도 현재 wrapper에서 edge `GetLength`를
+노출하지 않았다. cleanup 뒤 검색 edge 수는 원래 16개로 복원됐다.
 
-### 1.2.5 Rib / Stiffener / Pattern (실측, probe 24)
+남은 설계 문제는 재열거한 후보 중 "어느 모서리인가"를 다시 고르는 방법이다. 다음 후보는
+검색 결과의 구체 wrapper가 노출하는 기하 속성 또는 다른 공식 측정 service다.
+
+### 1.2.5 Rib / Stiffener / Pattern (실측, probes 24·26·30)
 
 ```text
 AddNewRib(iSketch, iCenterCurve)  -> Rib       생성 + Update 성공 -> 검증됨
 AddNewSlot(iSketch, iCenterCurve) -> Slot      생성 + Update 성공 -> 검증됨
 AddNewStiffener(iSketch)          -> Stiffener 생성은 되나 Update 실패 (2회) -> 미검증
-AddNewRectPattern(...)                         부분 검증 (아래)
+AddNewRectPattern(...)                         생성 + Update 성공 조합 검증 (아래)
 ```
 
 Rib과 Slot은 프로파일 스케치와 경로(center curve) 스케치 **두 개**를 받는다. Slot은 Rib의
@@ -729,8 +752,13 @@ AddNewRectPattern(iShapeToCopy, iNbOfCopiesInDir1, iNbOfCopiesInDir2,
 (dir1=PlaneXY, dir2=PlaneZX 둘 다 X축 -> 실패. dir1을 PlaneYZ로 바꾸자 같은 dir2가 성공.)
 라이브러리가 COM 호출 전에 직접 거부해야 한다.
 
-공개 API는 평면이 아니라 **축**으로 말한다(`"X"`, `"-X"`, ...). 평면을 인자로 받으면 검증할
-수 없는 대응 관계의 책임을 호출자에게 떠넘기게 된다.
+공개 API는 평면이 아니라 **축**으로 말한다(`"X"`, `"-X"`, ...). 평면을 인자로 받으면
+검증할 수 없는 대응 관계의 책임을 호출자에게 떠넘기게 된다. 현재 wrapper는 이 축을
+검증된 원점 평면 Reference와 reverse flag 조합으로 변환한다.
+
+`PartDesign`에는 `create_rectangular_pattern()` public API가 구현되어 있고 방향·개수·간격
+검사를 unit 테스트로 고정했다. 공개 adapter의 생성 → `Part.Update()` → Selection cleanup
+live integration도 통과했으며, 방향 매핑의 최초 live 근거는 probe 26·30이다.
 
 ### 1.4 모델 측정 (실측, probe 30)
 
@@ -753,17 +781,25 @@ InertiaBoxService.GetInertiaBoxElement(item) -> InertiaBox
 **모든 값이 SI(m, m3)로 온다.** 나머지 API는 mm를 쓰므로 반드시 환산해야 한다. 20x20x10 mm
 pad는 2e-06 m3다. 환산을 놓치면 1000배 또는 10억배 틀린 값이 조용히 나온다.
 
-`GetBoundingBox`는 인자 없이 호출하면 type mismatch다. **3개짜리 시퀀스 2개를 넘겨야 하고,
-반환값으로 `(origin, lengths)`를 돌려준다** (인자를 바꾸는 방식이 아니다).
+**`InertiaBoxService`는 구현하지 않는다. 세션에 따라 조용히 0을 돌려준다.**
+
+`GetBoundingBox`는 인자 없이 호출하면 type mismatch고, 3개짜리 시퀀스 2개를 넘기면
+반환값으로 `(origin, lengths)`를 돌려준다(인자를 바꾸는 방식이 아니다). 한 세션에서는 이렇게
+호출해 블록의 실제 값 `(60, 40, 12) mm`를 얻었다. **그런데 바뀌지 않은 같은 모델에서 다른
+세션에서는 전부 0이 나왔다.** 같은 호출에서 부피와 무게중심은 그대로 정확했다.
+
+가능한 호출 형태를 전부 시도했고 모두 0이었다.
 
 ```text
-box.GetBoundingBox((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+tuple seed / list seed / 9개 seed / raw MainBody / Reference / Pad / Part 자체
+GetInertiaElement로 먼저 priming / OnlyMainBody() 호출 후
 ```
 
-**함정: `GetInertiaBoxElement`는 축 정렬 bounding box가 아니다.** 솔리드의 **주관성축**에
-정렬된다. 단순한 블록에서는 전역 축과 일치해서 쓸 만해 보이는데 그게 바로 함정이고, 형상이
-비대칭이 되면 상자가 회전한다. 패턴 하나를 걸었더니 세 축이 동시에 늘어난 것으로 나왔다.
-판정에 쓰면 안 된다.
+**예외도 아니고 0을 돌려주는 측정은 없는 것보다 위험하다.** 호출자가 0을 정상값으로 읽는다.
+게다가 이 상자는 축 정렬이 아니라 솔리드의 **주관성축** 정렬이다. 단순한 블록에서는 전역 축과
+일치해서 쓸 만해 보이는데 그게 바로 함정이고, 형상이 비대칭이 되면 상자가 회전한다. 패턴
+하나를 걸었더니 세 축이 동시에 늘어난 것으로 나왔다. 동작할 때조차 "X 방향으로 얼마나 큰가"에
+답할 수 없으므로, 공개 API에서 제외했다.
 
 ### 1.3 `ensure_*` 정책 (형상)
 
@@ -968,7 +1004,7 @@ class Catia:
 ```python
 class Part:
     # selection은 형상 삭제에만 필요하다. Catia.active_part()가 넣어 준다.
-    def __init__(self, com_object: Any, selection: Any = None) -> None: ...
+    def __init__(self, com_object: Any, selection: Any = None, editor: Any = None) -> None: ...
 
     @property
     def com_object(self) -> Any: ...
@@ -985,6 +1021,11 @@ class Part:
 
     @property
     def part_design(self) -> "PartDesign": ...
+
+    @property
+    def measurement(self) -> "SolidMeasurement": ...  # Editor 없으면 NoActiveEditorError
+
+    def is_up_to_date(self, target: Any = None) -> bool: ...
 
     def update(self) -> None: ...            # 실패 시 PartUpdateError. save 호출 금지.
 ```
@@ -1153,6 +1194,10 @@ class SketchEditor:
     def point(self, x: float, y: float) -> Any: ...
     def line(self, x1: float, y1: float, x2: float, y2: float) -> Any: ...
     def circle(self, center_x: float, center_y: float, radius: float) -> Any: ...
+    def arc(self, center_x: float, center_y: float, radius: float,
+            start_param: float, end_param: float) -> Any: ...
+    def spline(self, points: "list[tuple[float, float]]") -> Any: ...
+    def set_construction(self, element: Any, construction: bool = True) -> None: ...
     def rectangle(
         self,
         width: float,
@@ -1363,6 +1408,7 @@ CONSTRAINT_PERPENDICULAR: int = 11
 CONSTRAINT_PARALLEL: int = 8
 CONSTRAINT_DISTANCE: int = 1
 CONSTRAINT_COINCIDENT: int = 2
+CONSTRAINT_CONCENTRICITY: int = 3
 CONSTRAINT_TANGENT: int = 4
 
 class Constraint:
@@ -1398,6 +1444,7 @@ def vertical(self, line: Any) -> Constraint: ...
 def perpendicular(self, first: Any, second: Any) -> Constraint: ...
 def parallel(self, first: Any, second: Any) -> Constraint: ...
 def coincident(self, first: Any, second: Any) -> Constraint: ...
+def concentric(self, first: Any, second: Any) -> Constraint: ...
 def tangent(self, first: Any, second: Any) -> Constraint: ...
 def length(self, line: Any, value: float | None = None,
            unit: str = MILLIMETRE) -> Constraint: ...
@@ -1413,6 +1460,95 @@ def distance(self, first: Any, second: Any, value: float | None = None,
 `SketchEditor`는 제약을 만들 때 `Part.Update()`를 호출하지 않는다.
 
 추가 예외: `ConstraintNotFoundError(Auto3dxError)`.
+
+### 6.17 Rectangular Pattern
+
+probe 30에서 방향 평면과 부호의 대응을 확인했고, public implementation과 unit 테스트를
+추가했다. 공개 adapter의 생성 + `Part.Update()` + 반환 객체 기반 cleanup live integration도
+통과했다.
+
+```python
+RECTANGULAR_PATTERN_KIND: str = "RectPattern"
+PATTERN_DIRECTION_X: str = "X"
+PATTERN_DIRECTION_Y: str = "Y"
+PATTERN_DIRECTION_Z: str = "Z"
+PATTERN_DIRECTION_NEGATIVE_X: str = "-X"
+PATTERN_DIRECTION_NEGATIVE_Y: str = "-Y"
+PATTERN_DIRECTION_NEGATIVE_Z: str = "-Z"
+
+class RectangularPattern:
+    @property
+    def com_object(self) -> Any: ...
+
+class PartDesign:
+    def create_rectangular_pattern(
+        self,
+        pad: Pad,
+        number_in_direction_1: int,
+        number_in_direction_2: int,
+        spacing_in_direction_1: float,
+        spacing_in_direction_2: float,
+        direction_1: str,
+        direction_2: str,
+    ) -> RectangularPattern: ...
+
+    def remove_rectangular_pattern(
+        self,
+        pattern: RectangularPattern,
+    ) -> None: ...
+```
+
+Direction strings are signed global axes, not raw planes. Their signs are the complete public
+direction choice: callers never manage CATIA reverse flags. The implementation translates each
+signed axis to the verified per-slot origin-plane Reference and CATIA reverse-flag mapping from
+1.2.5. The two directions must name different unsigned axes, and each spacing must be strictly
+positive and finite; invalid inputs are refused before any reference or COM call. The source must
+be an auto_3dx `Pad`, because no other source family has been verified. These methods never update
+or save the Part. Name-based lookup and ensure remain unverified, but the exact wrapper returned by
+creation can be removed through the owning editor's Selection so an update failure is recoverable.
+
+### 6.18 Measurement
+
+```python
+@dataclasses.dataclass(frozen=True)
+class MassProperties:
+    volume_mm3: float
+    area_mm2: float
+    mass_kg: float
+    cog_mm: tuple[float, float, float]
+
+class SolidMeasurement:
+    def __init__(self, editor_com_object: Any) -> None: ...
+    def measure(self, item: Any) -> MassProperties: ...
+```
+
+`Part.measurement` obtains this reader from the Part's own `Editor`, not from `Part`, and caches it
+on first access. A `Part` constructed without an editor raises `NoActiveEditorError` rather than
+guessing. Measurements never update, save, or propagate. Values returned by Inertia services are
+SI and are converted at the boundary: lengths to mm, area to mm2, volume to mm3, and mass remains
+kg. There is deliberately no bounding box: `InertiaBoxService` returned a real box in one session
+and all zeros in another on the same unchanged model, so it is not shipped (1.4). Probe 30 is the
+original live verification; the measurement integration test now passes against a live session.
+
+### 6.19 Part rebuild status
+
+`Part.IsUpToDate(iObject)`는 B428_Cloud에서 `VT_BOOL`을 반환한다. public API는
+다음과 같다.
+
+```python
+class Part:
+    def is_up_to_date(self, target: Any = None) -> bool: ...
+```
+
+`target=None`이면 raw Part 자신을 넘긴다. auto_3dx wrapper는 `com_object`를
+풀어서 넘기고 raw CATIA dispatch도 허용한다. 반환값이 bool이 아니거나 COM 호출이
+실패하면 `Auto3dxError`다. 이 메서드는 update/save/propagate를 호출하지 않는다.
+
+probe 32와 live integration에서 Pad 높이를 변경한 직후 Part/MainBody/Pad는
+`False`, 영향받지 않은 Sketch는 `True`였고, `Part.Update()` 뒤 모두 `True`가
+됐다. 반면 독립 사용자 Parameter의 생성·값 변경만으로는 Part/MainBody가 계속
+`True`였다. 따라서 이 값은 **feature rebuild 상태**이며, 일반적인 dirty flag나
+unsaved-change 감지로 해석하면 안 된다.
 
 ### 6.15 단위 카탈로그와 Length 외 파라미터 타입
 
@@ -1509,7 +1645,9 @@ class Rib:
 한다. 경로 스케치를 되읽는 방법은 검증되지 않았으므로 비교하지 않으며, 그 한계를 docstring에
 적는다.
 
-Stiffener, Slot, Pattern은 미검증이므로 구현하지 않는다.
+Stiffener는 미검증이므로 구현하지 않는다. Slot과 Rectangular Pattern은 각각 6.16과 6.17의
+계약으로 구현돼 있다. Pattern은 생성과 반환 객체 기반 삭제만 노출하고 named lookup,
+ensure, mutation은 미검증으로 남긴다.
 
 ### 6.12 `auto_3dx/formulas/`
 

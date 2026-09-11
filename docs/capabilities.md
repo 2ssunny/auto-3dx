@@ -1,11 +1,14 @@
 # auto-3dx 기능 현황
 
 이 문서는 **실제로 동작이 확인된 것만** 적는다. 검증 근거는 `scripts/probes/`의 probe와
-`tests/integration/`의 통합 테스트이며, 둘 다 실행 중인 3DEXPERIENCE 세션에서 돌린 결과다.
+`tests/integration/`의 통합 테스트다. 라이브 통합 테스트는 실행 중인 3DEXPERIENCE 세션이
+없으면 skip되므로, 과거 probe의 성공과 현재 테스트 실행 결과를 구분해서 기록한다.
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 마지막 검증: 237 unit + 15 live integration 통과
+- 현재 정적 검증: **414 unit 통과**
+- 현재 라이브 검증: 측정·곡선 스케치·직사각 패턴을 포함한
+  **27 integration 통과**
 
 ---
 
@@ -22,9 +25,10 @@
 [사람]  3DEXPERIENCE UI에서 Part 생성          <- 자동화 불가 (아래 5.1)
    |
 [auto-3dx]  attach -> 파라미터 생성/수정
-                   -> 스케치 생성 -> 프로파일 그리기
-                   -> 패드 / 포켓 생성
+                   -> 스케치 생성 -> 직선·곡선 프로파일 그리기
+                   -> 패드 / 포켓 / 회전 / Rib·Slot / 사각 패턴 생성
                    -> formula로 치수 연동
+                   -> 결과 측정
                    -> update
    |
 [사람]  결과 확인 후 직접 저장                 <- 자동화 안 함 (아래 6)
@@ -97,13 +101,16 @@ part.update()
 | 편집 세션 | 동작 | `with sketch.edit()` — 예외가 나도 반드시 닫힌다 |
 | 점 / 선 / 원 | 동작 | |
 | 사각형 | 동작 | 닫힌 프로파일 4선분 |
+| 호(arc) | 동작 | 열린 `Circle2D` 세그먼트. 시작/끝 parameter의 단위는 미확정 |
+| 스플라인(spline) | 동작 | `ControlPoint2D` 배열로 생성. 최소 점 개수는 미확정 |
+| Construction 지정 | 동작 | `set_construction()`으로 2D 요소의 `Construction` 설정 |
 | 삭제 | 동작 | `Editor.Selection` 경유 |
-| **제약(Constraint) 지정** | 동작 | `edit()` 안에서만. 9종 검증 (아래) |
+| **제약(Constraint) 지정** | 동작 | `edit()` 안에서만. 10종 검증 (아래) |
 | **치수 제약 값 읽기/쓰기** | 동작 | Length / Radius / Distance. formula로 구동 가능 |
 | **제약 상태 조회** | 동작 | `constraints.broken_count` / `unupdated_count` |
+| **동심 제약** | 동작 | `edit()` 안에서 서로 다른 두 `Circle2D`에 지정 |
 | **제약 삭제** | **불가** | `Constraints.Remove` 미검증 |
-| **사용자 정의 평면 위 스케치** | **불가** | 원점 평면 3개만 |
-| **호·스플라인·기타 프로파일** | **불가** | |
+| **사용자 정의 평면 위 스케치** | **부분 동작** | offset plane에 스케치는 가능하지만 그 스케치로 Pad 생성은 미검증/실패 |
 
 ### 3.4 Part Design
 
@@ -118,6 +125,7 @@ part.update()
 | 회전 각도 읽기/쓰기 | 동작 | `first_angle` / `second_angle`, 기본 360/0도 |
 | **Mirror 생성 / ensure / 삭제** | 동작 | 원점 평면을 받는다. BRep 참조 불필요 |
 | **Rib / Slot 생성 / ensure / 삭제** | 동작 | 프로파일 + 경로 스케치 2개. Slot은 절삭 |
+| **사각 패턴 생성 / 실패 후 삭제** | 동작 | `create_rectangular_pattern()` / `remove_rectangular_pattern(pattern)`. signed axis만 받고 같은 축 조합은 COM 호출 전 거부. 방향 매핑은 probe 26·30, 공개 adapter는 live integration으로 검증 |
 | 목록 / 이름 조회 | 동작 | `pads`, `pockets`, `shafts`, `grooves`, `mirrors`, `ribs`, `slots` 분리 |
 | formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` / `first_angle_parameter()` |
 | **그 외 전부** | **불가** | 아래 참고 |
@@ -130,8 +138,8 @@ part.update()
 ```
 
 `ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`,
-`AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror`, `AddNewRib`, `AddNewSlot`
-**7개**다.
+`AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror`, `AddNewRib`, `AddNewSlot`,
+`AddNewRectPattern` **8개**다.
 
 나머지가 막힌 이유는 두 가지다.
 
@@ -139,7 +147,7 @@ part.update()
 면/모서리 참조가 필요       Chamfer, EdgeFillet, Shell, Thickness, Draft, Hole
                             -> feature를 통째로 넘기는 것은 거부된다 (실측).
                                유효한 BRep 이름이 있어야 하는데 모델이 바뀌면 깨진다.
-생성은 되는데 update 실패    Stiffener, RectPattern, CircPattern
+생성은 되는데 update 실패    Stiffener, CircPattern
                             -> 객체는 트리에 생기지만 모델이 재계산에 실패한다.
                                "생성 성공"을 검증으로 쳐주지 않는 이유다.
 ```
@@ -148,10 +156,9 @@ part.update()
 
 ```text
 AddNewHole        AddNewChamfer     AddNewEdgeFillet* AddNewDraft
-AddNewShell       AddNewThickness   AddNewStiffener   AddNewRectPattern
-AddNewCircPattern AddNewUserPattern AddNewRib         AddNewSlot
-AddNewLoft        AddNewSplit       AddNewTrim        AddNewSolidCombine
-... 외 70여 개
+AddNewShell       AddNewThickness   AddNewStiffener
+AddNewCircPattern AddNewUserPattern AddNewLoft        AddNewSplit
+AddNewTrim        AddNewSolidCombine ... 외 70여 개
 ```
 
 ### 3.4.1 스케치 제약
@@ -172,13 +179,14 @@ with sketch.edit() as editor:
 part.update()
 ```
 
-검증된 9종: `horizontal`, `vertical`, `perpendicular`, `parallel`, `coincident`,
-`tangent`, `length`, `radius`, `distance`. 뒤의 셋이 치수 제약이다.
+검증된 10종: `horizontal`, `vertical`, `perpendicular`, `parallel`, `coincident`,
+`concentric`, `tangent`, `length`, `radius`, `distance`. 뒤의 셋이 치수 제약이다.
 
 **요청한 타입과 결과 타입이 다를 수 있다.** `horizontal`은 `Parallelism`(Type 8)이 된다.
 따라서 요청 코드로 제약을 되찾으면 안 된다.
 
-미구현: 제약 삭제(`Constraints.Remove` 미검증), `concentric`(probe 입력 오류로 미검증).
+미구현: 제약 삭제(`Constraints.Remove` 미검증). `concentric`은 서로 다른 원 두 개로 생성과
+`Part.Update()`까지 확인했다.
 
 ### 3.5 Formula
 
@@ -217,7 +225,8 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 이름 조회 | 동작 |
 | `Update()` | 동작 |
 | **`Save()`** | **하지 않음** (아래 6) |
-| **update 성공 여부 검증** | **불가** | `IsUpToDate` 미검증 |
+| **feature rebuild 상태** | 동작 | `part.is_up_to_date(target=None)`. feature 변경 전후 false→true 검증. unsaved-change 감지는 아님 |
+| **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심·관성 상자 조회 |
 
 ### 3.7 손대지 않은 영역
 
@@ -260,7 +269,32 @@ Catia.attach(com3dx_path=None) -> Catia
 .part_design     -> PartDesign
 .formulas        -> FormulaCollection
 .update()        # 실패 시 PartUpdateError
+.measurement     -> SolidMeasurement  # editor 기반 read-only 측정
 ```
+
+### SolidMeasurement / 측정 결과
+
+```python
+part.measurement.measure(part.com_object.MainBody) -> MassProperties
+
+MassProperties(
+    volume_mm3, area_mm2, mass_kg, cog_mm=(x, y, z)
+)
+```
+
+측정 서비스는 `Part`가 아니라 해당 `Editor.GetService()`에서 얻는다. 따라서 raw `Part`를
+직접 감싼 경우에는 editor를 추측하지 않고 `NoActiveEditorError`를 낸다. CATIA 서비스가
+반환하는 길이·면적·부피는 SI 단위(m, m², m³)이므로 public 결과에서 각각 mm, mm², mm³로
+변환하고 질량은 kg로 유지한다.
+
+**bounding box는 제공하지 않는다.** `InertiaBoxService`는 존재하고 한 세션에서는 실제
+60x40x12 mm 상자를 돌려줬지만, 바뀌지 않은 같은 모델에서 다른 세션에서는 전부 0을
+반환했다(부피·무게중심은 그대로 정확했다). 호출 형태를 전부 바꿔봐도 0이었다. 실패하지
+않고 0을 돌려주는 측정은 없는 것보다 위험하므로 공개 API에서 뺐다. 애초에 축 정렬이 아닌
+주관성축 정렬 상자여서 "X 방향으로 얼마나 큰가"에 답할 수 없었다.
+
+측정은 read-only다. `measure()`는 `Part.Update()`, `Save()`, `PLMPropagate()`를
+호출하지 않는다.
 
 ### ParameterCollection
 
@@ -306,11 +340,15 @@ with sketch.edit() as editor:
     editor.point(x, y)
     editor.line(x1, y1, x2, y2)
     editor.circle(cx, cy, radius)
+    editor.arc(cx, cy, radius, start_param, end_param)
+    editor.spline([(x1, y1), (x2, y2), (x3, y3)])
+    editor.set_construction(element, True)
     editor.rectangle(width, height, origin_x=0.0, origin_y=0.0)
     # 제약 — edit() 안에서만 유효하다
     editor.horizontal(line) / .vertical(line)
     editor.perpendicular(a, b) / .parallel(a, b)
     editor.coincident(a, b) / .tangent(a, b)
+    editor.concentric(circle_a, circle_b)
     editor.length(line, value=None, unit="mm")     -> Constraint
     editor.radius(circle, value=None, unit="mm")   -> Constraint
     editor.distance(a, b, value=None, unit="mm")   -> Constraint
@@ -339,10 +377,13 @@ part.part_design.pads / .pockets / .shafts / .grooves / .mirrors
                 .get_groove(name) / .get_mirror(name)
                 .create_pad(name, sketch, height, unit="mm")
                 .create_pocket(name, sketch, depth, unit="mm")
-                .create_shaft(name, sketch)        # 스케치에 축 필요
-                .create_groove(name, sketch)
-                .create_mirror(name, support="YZ")
-                .ensure_*(...)   /  .remove_*(name)
+                 .create_shaft(name, sketch)        # 스케치에 축 필요
+                 .create_groove(name, sketch)
+                 .create_mirror(name, support="YZ")
+                 .create_rectangular_pattern(
+                     pad, 2, 1, 60, 60, direction_1="X", direction_2="Y"
+                 )
+                 .ensure_*(...)   /  .remove_*(name)
 
 # Pad와 Pocket은 SketchFeature를 공유한다
 feature.name / .depth / .set_depth(depth, unit="mm") / .sketch()
@@ -356,6 +397,11 @@ revolve.first_angle / .second_angle                 # 도 단위, 기본 360 / 0
 
 # Mirror는 평면에서 만들어지므로 sketch()가 없다
 mirror.name
+
+# RectangularPattern은 생성과 반환 객체 기반 삭제만 노출한다.
+# 이름 기반 조회/ensure/mutation은 검증하지 않았다.
+# signed axis의 sign이 유일한 방향 선택이며 별도 reverse flag는 없다.
+pattern.com_object
 ```
 
 ### Sketch 축 지정
@@ -431,11 +477,11 @@ PLMNewService.PLMCreate('VPMReference')  ->  [Licensing] Operation not authorize
 `CreateProgram`, `CreateRuleBase`, `CreateSetOfEquations`를 노출하지만 전부 미검증이다.
 formula만 구현되어 있다 (3.5 참조).
 
-### 5.3 여러 Part 동시 작업 — 미지원
+### 5.3 여러 Part 동시 작업 — 지원
 
-`Application.ActiveEditor` 하나만 따른다. Part를 여러 개 열어둔 상태에서 UI 탭을
-전환해도 `ActiveEditor`가 즉시 따라오지 않는 경우를 실제로 관찰했다. 의도한 Part가
-맞는지 `part.name`으로 확인하는 편이 안전하다.
+`ActiveEditor`가 UI 탭 전환을 즉시 따라오지 않는 실제 문제가 있어, `editors()` / `parts()` /
+`part_named(name)`을 제공한다. 변경할 Part는 `part_named()`로 명시적으로 고르는 편이 안전하고,
+반환된 각 Part는 자기 editor의 Selection과 measurement service를 사용한다.
 
 ### 5.4 스레드
 
@@ -462,15 +508,14 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 ## 7. 확장 순서 제안
 
-1. **Shaft / Groove / Stiffener** — 패드·포켓처럼 스케치만 받는다
-   (`AddNewShaft(iSketch)`, `AddNewGroove(iSketch)`, `AddNewStiffener(iSketch)`).
-   바로 이어서 할 수 있다.
-2. **Rib / Slot** — 스케치 2개를 받는다 (`AddNewRib(iSketch, iCenterCurve)`).
-3. **참조 레이어** — `Part.CreateReferenceFromObject` / BRep 이름 조사. 이게 열려야
-   Hole, Fillet, Chamfer, Shell, Draft, Mirror, Pattern 등 **약 80개**가 한꺼번에
-   풀린다. BRep 이름은 모델이 바뀌면 깨지므로 별도 설계가 필요하다.
-4. **Length 외 파라미터 타입** — `CreateReal`, `CreateInteger` 등. signature는 확인됨.
-5. **단위 시스템** — `Parameters.Units` 1887개에서 magnitude별 단위를 읽을 수 있다.
+1. **모서리 선택 레이어** — `Selection.Search('Topology.Edge,all')`은 열렸지만 모델 재빌드
+   뒤에도 같은 모서리를 재선택하는 안전한 selector가 아직 없다. probe 31 실측에서
+   변경 전 반복 검색은 안정적이었지만 Pad 높이 update 뒤 edge 수가 20→29로 바뀌고
+   BRep name multiset과 검색 순서가 모두 달라졌다. raw 이름과 index는 selector로 쓸 수
+   없고, `MeasurableService` 경로도 edge 길이를 노출하지 않았다.
+2. **Chamfer 인자 확정** — Edge Reference는 확보했지만 mode/orientation 정수의 뜻이 미확정이다.
+3. **사용자 정의 평면** — offset plane 스케치는 되지만 Pad와의 결합이 막혀 있다.
+4. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로 검증해야 한다.
 
 각 항목은 probe로 실제 동작을 확인한 뒤 라이브러리에 올린다. 기존 probe가 그 절차의
 예시다.

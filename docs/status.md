@@ -13,8 +13,8 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **318 unit + 24 integration** (integration은 세션 상태에 따라 skip)
-- probe: `scripts/probes/` 31개
+- 테스트: **414 unit + 27 integration 통과**
+- probe: `scripts/probes/`에 33개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -28,7 +28,7 @@
             파라미터 생성 / 수정 / 삭제 (Length·Angle·Dimension·Real·Integer·String·Boolean)
             스케치 생성 -> 점·선·원·호·사각형·스플라인 (+ 회전축)
             스케치 제약 9종 + 반지름·동심
-            패드 / 포켓 / Shaft / Groove / Mirror / Rib / Slot / 사각 패턴
+            패드 / 포켓 / Shaft / Groove / Mirror / Rib / Slot
             formula로 치수·각도 연동
             부피·면적·질량·무게중심 측정
             update
@@ -69,7 +69,7 @@ PLMNewService.getLastError()             ->  ('', 0)
 
 ```text
 ShapeFactory.AddNew* : 90개
-구현됨               : Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot — 7개
+구현됨               : Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot, RectPattern — 8개
 ```
 
 **참조 레이어를 조사한 결과, 기대했던 "80개 일괄 해금"은 일어나지 않았다** (probe 17).
@@ -107,7 +107,7 @@ AddNewHole(iSupport, iDepth)
 
 ```text
 AddNewStiffener(iSketch)   -> Stiffener 반환. Part.Update() 실패
-AddNewRectPattern(...)     -> RectPattern 반환. Part.Update() 실패
+AddNewRectPattern(...)     -> 방향 Reference 조합에 따라 생성 + Part.Update() 성공/실패
 ```
 
 **2026-09-11 갱신 — 경로가 뚫렸다 (probe 28).** 위 문단은 `Selection`을 "사용자가 찍는 것"으로
@@ -126,7 +126,12 @@ AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
 남은 문제는 두 가지다. 첫 fillet 이후의 모든 시도가 update에서 실패했는데, 모든 Reference를
 수정 전에 미리 잡아둔 탓으로 보인다(수정마다 재열거가 필요하다는 가설). 그리고 "어느
 모서리인가"를 재빌드 후에도 같은 것으로 지목할 방법이 필요하다. index는 보존 근거가 없고
-BRep 문자열은 구조적으로 깨진다. 측정으로 기하학적으로 고르는 방향을 probe 31에서 조사 중이다.
+BRep 문자열은 구조적으로 깨진다. probe 31 실측에서 변경 없는 반복 검색은 16개 edge의
+이름과 순서가 같았지만, 임시 Pad 높이를 바꿔 update하자 edge 수가 20→29로 바뀌고
+BRep name multiset과 순서가 모두 달라졌다. 이전 이름의
+`CreateReferenceFromBRepName`은 Part/Pad context 모두 실패했고,
+`MeasurableService` wrapper도 edge 길이를 노출하지 않았다. cleanup 뒤 edge 수는
+원래 16개로 돌아왔다. 따라서 raw BRep 이름과 index는 durable selector가 아니다.
 
 `AddNewChamfer`는 여전히 update 실패다. propagation/mode/orientation 정수의 의미가 type
 library에 없다.
@@ -136,6 +141,12 @@ library에 없다.
 `Sketch.Constraints`로 제약을 직접 걸 수 있다. **편집 세션 안에서만** 동작하고 인자는 raw
 2D 객체여야 한다(`Reference`는 거부). 그래서 제약 API는 `SketchEditor`에 있다. 치수 제약의
 `Dimension`은 읽기·쓰기가 되므로 formula로 구동할 수 있다. 상세는 conventions 1.2.4.
+
+호·스플라인·Construction 지정도 probe 27에서 생성 및 `Part.Update()` 성공을 확인했고,
+현재 `SketchEditor.arc()` / `spline()` / `set_construction()`으로 노출한다. 서로 다른 두
+`Circle2D`에 대한 동심 제약도 probe 27에서 생성 및 update 성공을 확인했고,
+`SketchEditor.concentric()`으로 노출한다. 곡선 live integration도 현재 공개 adapter로
+생성·update·cleanup까지 통과했다.
 
 남은 제약: `Constraints.Remove(i)`는 호출해 본 적이 없어 제약 삭제는 구현하지 않았다.
 `CatConstraintType`에 `Diameter`가 없어 지름 구속은 존재하지 않는다(반지름의 절반으로 쓴다).
@@ -165,15 +176,21 @@ COM은 이전 파트를 가리킴). 엉뚱한 파트를 조용히 편집할 수 
   (probe 29, conventions 1.2.7). 각도 평면은 update 실패.
 - 프로파일: 호·스플라인·점까지 probe 27에서 검증됐다. 곡선 프로파일도 pad 된다.
 
-### 2.6 update 성공 여부를 검증할 수 없다 — 측정으로 상당 부분 해결
+### 2.6 update 상태와 결과 검증 — rebuild 상태 + 측정으로 해결
 
-`Part.Update()`가 예외 없이 끝난 것과 모델이 정상인 것은 별개다. `IsUpToDate`는 여전히 인자
-형식을 확인하지 않아 쓰지 않는다.
+`Part.IsUpToDate(iObject)`는 probe 32에서 feature-driven 상태 전이를 확인했다. Pad 높이를
+바꾼 직후 Part/MainBody/Pad는 `False`, 영향받지 않은 Sketch는 `True`였고,
+`Part.Update()` 후 모두 `True`가 됐다. 이를 `Part.is_up_to_date(target=None)`으로
+노출한다. 단, 독립 사용자 Parameter 변경만으로는 Part/MainBody가 계속 `True`였으므로
+저장되지 않은 모든 변경을 감지하는 API가 아니라 **feature rebuild 상태**로만 해석한다.
 
 그런데 **결과를 직접 재는 쪽이 더 강한 검증**이고, 그게 probe 30에서 열렸다.
-`Editor.GetService('InertiaService')`로 부피·면적·질량·무게중심을 읽을 수 있다. 깎이지 않은
-pocket은 부피가 그대로라는 것으로 잡힌다. 값은 전부 SI(m, m3)이므로 mm 환산이 필수다.
-자세한 내용과 함정은 conventions 1.4에 있다.
+현재는 `Part.measurement`가 editor의 `InertiaService`를 감싸서 부피·면적·질량·무게중심을
+읽는다. `InertiaBoxService`는 세션에 따라 조용히 0을 돌려주므로 제외했다(3절 #9).
+값은 전부 SI(m, m², m³)이므로
+public 결과에서 mm·mm²·mm³로 환산하고 질량은 kg로 유지한다. 측정 live integration도
+현재 공개 adapter로 통과했고, 최초 live 동작 근거는 probe 30이다. 자세한 내용과 함정은
+conventions 1.4 및 6.18에 있다.
 
 ### 2.8 `AddNew*` 성공이 feature 유효를 뜻하지 않는다
 
@@ -185,9 +202,13 @@ AddNewChamfer(edge)      -> Chamfer 반환. 이후 Part.Update() 실패
 
 객체는 트리에 생겼는데 모델이 재계산에 실패한다. **생성 호출의 성공은 검증이 아니다.**
 
-패턴은 해결됐다. 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을
-만드는지도 probe 30에서 측정으로 확정했다(conventions 1.2.5). dir1과 dir2가 같은 축이 되면
-update가 실패하므로 라이브러리가 호출 전에 거부한다.
+패턴 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을 만드는지는
+probe 30에서 측정으로 확정했다(conventions 1.2.5). 이에 따라 public API
+`create_rectangular_pattern()`과 signed-axis 사전 검사가 구현됐고 unit 테스트가 있다.
+생성 뒤 update가 실패하면 반환된 wrapper를
+`remove_rectangular_pattern(pattern)`에 전달해 Selection으로 정리할 수 있다.
+public wrapper 자체도 create → `Part.Update()` → 반환 객체 기반 Selection cleanup의
+live integration을 통과했다. dir1과 dir2가 같은 축이 되면 COM 호출 전에 거부한다.
 
 - probe의 "검증됨" 기준을 **생성 성공 + `Part.Update()` 성공**으로 정했다.
 - 라이브러리의 `create_*`는 update를 호출하지 않으므로, 호출자가 update하고
@@ -216,7 +237,7 @@ CATIA가 **조용히 넘어가는데 모델을 망가뜨리는** 동작들이다
 | 6 | Pad 삭제 | 스케치까지 연쇄 삭제 | 문서화 |
 | 7 | **Pocket 삭제** | **스케치가 남는다** (Pad와 비대칭) | 문서화. 따로 지워야 함 |
 | 8 | formula 제거 | **마지막 계산값이 그대로 남음** (되돌아가지 않음) | 문서화. 직접 복원해야 함 |
-| 9 | `GetInertiaBoxElement` | 축 정렬이 아니라 **주관성축 정렬** bounding box. 단순 블록에서는 전역 축과 일치해서 맞아 보인다 | 판정에 쓰지 않는다. 부피·무게중심으로 판단 |
+| 9 | `GetInertiaBoxElement` | **세션에 따라 조용히 전부 0을 반환한다.** 같은 모델·같은 호출에서 한 세션은 실제 값, 다른 세션은 0. 게다가 축 정렬이 아니라 주관성축 정렬이다 | 공개 API에서 제외. 부피·무게중심으로 판단 |
 | 10 | `Selection.Search('Face,all')` | COM 오류. 올바른 쿼리는 `'Topology.Face,all'` | 검증된 쿼리 문자열만 쓴다 |
 | 11 | 측정값 단위 | 전부 **SI(m, m3)**. 나머지 API는 mm | 경계에서 환산. 이름에 단위를 박아 혼동을 막는다 |
 
@@ -291,19 +312,20 @@ CATIA는 중복 이름을 허용하지만 라이브러리는 거부한다. 존�
 
 ## 6. 다음 단계
 
-1~4번은 끝났다. 스케치 제약, 파라미터 타입과 단위, Rib/Slot, 그리고 Pattern까지 구현됐다.
+측정·곡선 스케치·직사각형 패턴까지 public API, 단위 테스트, live integration을 통과했다.
 Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 남긴다.
 
 | 순서 | 항목 | 난이도 | 비고 |
 |---|---|---|---|
-| 1 | **모서리 선택 레이어** | **높음** | fillet이 처음 검증됐다 (2.2). 재빌드를 넘어 같은 모서리를 지목하는 방법이 핵심. probe 31 |
+| 1 | **모서리 선택 레이어** | **높음** | probe 31에서 raw BRep 이름·검색 index·MeasurableService 길이 경로가 탈락했다. 다른 기하학적 selector 필요 |
 | 2 | chamfer 인자 확정 | 중간 | 모서리 Reference는 통하는데 정수 3개의 의미를 모른다 |
 | 3 | 사용자 정의 평면 | 중간 | offset 평면은 스케치까지 됐고 pad가 실패한다 (2.5, conventions 1.2.7) |
-| 4 | 측정 기반 검증 | 낮음 | 측정이 열렸으니 "의도한 형상이 나왔는가"를 테스트로 고정할 수 있다 (2.6) |
-| 5 | 스레드 안전성 | 중간 | 미검증 (2.7) |
-| 6 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
+| 4 | `IsUpToDate` 의미 확인 | 완료 | `Part.is_up_to_date()` 구현 및 live false→true 전이 검증 (2.6) |
+| 5 | 측정 기반 검증 | 완료 | `Part.measurement` 구현 및 live integration 완료 (2.6) |
+| 6 | 스레드 안전성 | 중간 | 미검증 (2.7) |
+| 7 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸으므로,
-남은 것은 "어느 모서리인가"를 안정적으로 표현하는 설계다. index는 재빌드를 넘어 보존된다는
-근거가 없고 BRep 문자열은 구조적으로 깨지므로, 측정으로 기하학적 조건을 걸어 매번 다시
-찾아내는 방향이 가장 유력하다.
+남은 것은 "어느 모서리인가"를 안정적으로 표현하는 설계다. probe 31에서 index와 BRep
+문자열이 실제 재빌드에서 바뀌고 MeasurableService 길이 경로도 막힌 것이 확인됐다. 다음
+후보는 검색 결과의 구체 wrapper가 노출하는 기하 속성 또는 다른 공식 측정 service다.
