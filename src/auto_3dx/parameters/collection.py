@@ -100,6 +100,54 @@ class ParameterCollection:
         """
         return [parameter.name for parameter in self.list()]
 
+    def user_parameters(self) -> "list[Parameter]":
+        """Lists only the parameters a person or script explicitly created.
+
+        Creating geometry makes CATIA auto-expose that feature's own dimensions
+        as parameters, so `list()` grows by roughly 15 entries per pad
+        (`<Pad>\\FirstLimit\\Length`, `<Sketch>\\Coincidence.3\\Activity`, and
+        so on). Those are real and useful -- a formula driving a pad's thickness
+        targets `...\\FirstLimit\\Length` -- but they are named after the
+        feature path, so they move when a feature is renamed and they are not
+        what "which parameters does this Part have?" means.
+
+        `RootParameterSet.DirectParameters` holds exactly the explicitly
+        created ones (verified: 3 of 18 after one pad).
+
+        Returns:
+            A `Parameter` wrapper for each explicitly created parameter. An
+            empty collection returns `[]`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            direct = self._com_object.RootParameterSet.DirectParameters
+            count = direct.Count
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+        parameters: list[Parameter] = []
+        for index in range(1, count + 1):
+            try:
+                com_object = direct.Item(index)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            parameters.append(Parameter(com_object))
+        return parameters
+
+    def user_names(self) -> "list[str]":
+        """Lists the short names of the explicitly created parameters.
+
+        Returns:
+            `Parameter.short_name` for each entry of `user_parameters()`, so
+            the caller sees `"Span"` rather than `"3D Shape00422534\\Span"`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return [parameter.short_name for parameter in self.user_parameters()]
+
     def get(self, name: str) -> Parameter:
         """Looks up a parameter by name.
 

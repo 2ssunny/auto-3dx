@@ -98,8 +98,14 @@ class Parameters:
         self,
         items: list[tuple[str, Any]] | None = None,
         container: str = "3D Shape00422533",
+        direct_items: list[tuple[str, Any]] | None = None,
     ) -> None:
         self._items: list[tuple[str, Any]] = list(items or [])
+        # Explicitly created parameters only. Seeded items default to being
+        # user parameters; pass direct_items=[] to model feature-internal ones.
+        self._direct: list[tuple[str, Any]] = (
+            list(direct_items) if direct_items is not None else list(self._items)
+        )
         self.container = container
         self.item_calls: list[Any] = []
         self.create_calls: list[tuple[str, str, Any]] = []
@@ -126,6 +132,15 @@ class Parameters:
                 return obj
         raise make_com_error()
 
+    @property
+    def RootParameterSet(self) -> "RootParameterSet":
+        """Exposes only the explicitly created parameters, as the real one does.
+
+        Verified: after one pad, `Parameters.Count` is 18 while
+        `RootParameterSet.DirectParameters.Count` is 3.
+        """
+        return RootParameterSet(self._direct)
+
     def CreateDimension(self, iName: str, iMagnitude: str, iValue: float) -> Any:
         """Mimics the real method, which qualifies the stored name.
 
@@ -136,6 +151,8 @@ class Parameters:
         self.create_calls.append((iName, iMagnitude, iValue))
         created = Length(name=f"{self.container}\\{iName}", value=iValue)
         self._items.append((created.Name, created))
+        # An explicitly created parameter shows up in BOTH collections.
+        self._direct.append((created.Name, created))
         return created
 
     def Remove(self, iIndex: Any) -> None:
@@ -145,6 +162,32 @@ class Parameters:
                 del self._items[position]
                 return
         raise make_com_error()
+
+
+class DirectParameters:
+    """Fake CATIA `Parameters` view holding only explicitly created parameters."""
+
+    def __init__(self, items: list[tuple[str, Any]]) -> None:
+        self._items = items
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def Item(self, index: int) -> Any:
+        position = index - 1
+        if 0 <= position < len(self._items):
+            return self._items[position][1]
+        raise make_com_error()
+
+
+class RootParameterSet:
+    """Fake CATIA `ParameterSet` returned by `Parameters.RootParameterSet`."""
+
+    def __init__(self, direct_items: list[tuple[str, Any]]) -> None:
+        self.Name = "Parameters"
+        self.DirectParameters = DirectParameters(direct_items)
+        self.AllParameters = DirectParameters(direct_items)
 
 
 class Part:

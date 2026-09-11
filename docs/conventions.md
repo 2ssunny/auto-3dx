@@ -131,6 +131,42 @@ CATIA UI f(x) 로 만든 것                -> Name == "AUTO3DX_TEST_LENGTH"    
 `Parameters.Remove(name)`는 정규화 이름으로 동작하고, 제거 후 `Count`가 정상적으로
 줄어든다. `Part.Update()`도 제거 후 성공한다.
 
+### 1.1.1 사용자 파라미터와 feature 내부 파라미터 (실측)
+
+형상을 만들면 CATIA가 그 feature의 치수를 파라미터로 **자동 노출**한다. 패드 하나와
+사각형 스케치 하나를 만든 뒤 실측한 결과:
+
+```text
+Parameters.Count                        = 18   <- 자동 생성분 15개 포함
+RootParameterSet.DirectParameters.Count = 3    <- 사람이 만든 것만
+RootParameterSet.AllParameters.Count    = 3
+RootParameterSet.ParameterSets.Count    = 0
+```
+
+자동 생성되는 것의 예:
+
+```text
+<Part>\PartBody\<Pad>\FirstLimit\Length              패드의 실제 돌출 길이
+<Part>\PartBody\<Pad>\ThickThin1 / ThickThin2        thin pad 두께
+<Part>\PartBody\<Pad>\Activity                       feature 활성/억제
+<Part>\PartBody\<Pad>\<Sketch>\Coincidence.3\Mode    스케치 구속의 모드
+<Part>\PartBody\<Pad>\<Sketch>\Coincidence.3\Activity
+```
+
+**이것들은 무의미한 값이 아니다.** formula로 패드 두께를 사용자 파라미터에 연동하려면
+대상이 바로 `...\<Pad>\FirstLimit\Length`다. 따라서 숨기면 안 된다.
+
+다만 성격이 다르다. 자동 생성분은 feature 경로를 이름으로 쓰므로 **패드 이름을 바꾸면
+경로가 통째로 바뀌고**, feature 하나당 15개씩 늘어난다. "이 파트의 파라미터가 뭐냐"는
+물음에 답할 때 쓸 목록이 아니다.
+
+그래서 둘 다 노출하되 구분한다.
+
+```text
+parameters.list()             -> Parameters.Item(1..Count)             전체
+parameters.user_parameters()  -> RootParameterSet.DirectParameters     사람이 만든 것만
+```
+
 ### 1.2 Sketch와 Pad (실측, `scripts/probes/12_sketch_and_pad.py`, `13_sketch_identity.py`)
 
 type library가 고정한 signature:
