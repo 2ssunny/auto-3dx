@@ -37,7 +37,7 @@ from auto_3dx.errors import (  # noqa: E402
     CatiaConnectionError,
     NoActiveEditorError,
     NoActivePartError,
-    StaleEdgeSnapshotError,
+    StaleSnapshotError,
 )
 from auto_3dx.geometry.part_design import (  # noqa: E402
     CHAMFER_ORIENTATION_0,
@@ -125,7 +125,7 @@ def test_edge_fillets_and_chamfer_round_trip(part: Any) -> None:
         # live model genuinely fails -- measured on a plain cube, for the next
         # edge, the middle edge and the last edge alike. The guard turns that
         # coin flip into a clear error before anything reaches COM.
-        with pytest.raises(StaleEdgeSnapshotError):
+        with pytest.raises(StaleSnapshotError):
             part.part_design.create_edge_fillet(
                 second_fillet, snapshot[1], FILLET_RADIUS
             )

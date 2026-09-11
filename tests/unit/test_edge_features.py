@@ -44,7 +44,7 @@ from auto_3dx.errors import (
     ParameterNameError,
     ParameterTypeError,
     PartialCreationError,
-    StaleEdgeSnapshotError,
+    StaleSnapshotError,
     UnsupportedUnitError,
 )
 from auto_3dx.geometry.edges import EDGE_SEARCH_QUERY, Edge, EdgeSnapshot, take_edge_snapshot
@@ -1025,9 +1025,9 @@ def test_an_edge_from_before_a_model_change_is_refused() -> None:
     edge = _edge("e1")
     design.create_edge_fillet(FILLET_NAME, edge, FILLET_RADIUS)
 
-    with pytest.raises(StaleEdgeSnapshotError):
+    with pytest.raises(StaleSnapshotError):
         design.create_edge_fillet("OTHER_FILLET", edge, FILLET_RADIUS)
-    with pytest.raises(StaleEdgeSnapshotError):
+    with pytest.raises(StaleSnapshotError):
         design.create_chamfer(
             "OTHER_CHAMFER",
             edge,
@@ -1050,7 +1050,7 @@ def test_a_removal_also_invalidates_an_outstanding_snapshot() -> None:
     fresh = _current_edge(design, "e2")
     design.remove_edge_fillet(FILLET_NAME)
 
-    with pytest.raises(StaleEdgeSnapshotError):
+    with pytest.raises(StaleSnapshotError):
         design.create_edge_fillet("ANOTHER", fresh, FILLET_RADIUS)
 
 

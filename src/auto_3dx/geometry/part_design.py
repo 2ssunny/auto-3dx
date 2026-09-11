@@ -45,6 +45,17 @@ measured limits (index and BRep name are both non-durable; there is no way to
 scope the search to one feature) and for why neither feature ships an
 `ensure_*`. Both still reduce to nothing more than `com_object`/`name`, exactly
 like `Mirror`/`Rib`/`Slot`, via the same `_NamedFeature` base.
+
+`Shell`, `Thickness`, and `Hole` (probe 37, `docs/conventions.md` section
+1.2.2.2) are the face-reference counterparts of `ConstRadEdgeFillet`/
+`Chamfer`: built on a `Reference` from `geometry.faces` instead of
+`geometry.edges`, for the same reason -- `AddNewShell`/`AddNewThickness`/
+`AddNewHole` each take a face, not an edge. They share the exact same
+`_list`/`_get`/`_create_feature`/`_remove` plumbing and the exact same
+single-generation staleness policy (`geometry.faces`, `_require_current_face`)
+as the edge features, and reduce to `com_object`/`name` for the same reason:
+there is no verified way to read a shell/thickness/hole's source face back,
+so there is no `ensure_shell`/`ensure_thickness`/`ensure_hole` either.
 """
 
 import math
@@ -59,11 +70,12 @@ from auto_3dx.errors import (
     FeatureNotFoundError,
     PartialCreationError,
     ParameterTypeError,
-    StaleEdgeSnapshotError,
+    StaleSnapshotError,
     UnsupportedSupportError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
 from auto_3dx.geometry.edges import Edge, EdgeSnapshot, take_edge_snapshot
+from auto_3dx.geometry.faces import Face, FaceSnapshot, take_face_snapshot
 from auto_3dx.geometry.sketch import (
     SUPPORT_YZ,
     SUPPORTED_SKETCH_SUPPORTS,
@@ -166,6 +178,15 @@ SUPPORTED_CHAMFER_ORIENTATIONS: frozenset[int] = frozenset(
     {CHAMFER_ORIENTATION_0, CHAMFER_ORIENTATION_1}
 )
 """The `iOrientation` values `create_chamfer` accepts."""
+
+SHELL_KIND: str = "Shell"
+"""The `type(com_object).__name__` value for a CATIA Shell feature."""
+
+THICKNESS_KIND: str = "Thickness"
+"""The `type(com_object).__name__` value for a CATIA Thickness feature."""
+
+HOLE_KIND: str = "Hole"
+"""The `type(com_object).__name__` value for a CATIA Hole feature."""
 
 RECTANGULAR_PATTERN_KIND: str = "RectPattern"
 """The `type(com_object).__name__` value for a CATIA rectangular pattern."""
@@ -276,6 +297,36 @@ def _validate_positive_length(value: float, label: str) -> float:
     coerced = validate_length_value(value)
     if not math.isfinite(coerced) or coerced <= 0.0:
         raise ParameterTypeError(f"{label} must be finite and positive, not {value!r}.")
+    return coerced
+
+
+def _validate_non_negative_length(value: float, label: str) -> float:
+    """Validates a finite, non-negative length-like value before a COM call.
+
+    Shared by `create_shell`'s `external_thickness`, the one argument among
+    all the face features whose verified value is zero rather than positive
+    (probe 37 used `(face, 2.0, 0.0)`): zero is exactly the value proven to
+    create and update successfully, so `_validate_positive_length`'s
+    strictly-greater-than-zero rule would be wrong here. A negative value has
+    never been tried and is refused for the same reason
+    `_validate_positive_length` refuses one -- there is no verified
+    justification for accepting it.
+
+    Args:
+        value: The candidate value.
+        label: What this value represents (e.g. `"external_thickness"`), used
+            only in the error message.
+
+    Returns:
+        `value` coerced to `float`.
+
+    Raises:
+        ParameterTypeError: If `value` is a `bool`, is not an `int`/`float`,
+            or is not finite and non-negative.
+    """
+    coerced = validate_length_value(value)
+    if not math.isfinite(coerced) or coerced < 0.0:
+        raise ParameterTypeError(f"{label} must be finite and non-negative, not {value!r}.")
     return coerced
 
 
@@ -797,6 +848,43 @@ class Chamfer(_NamedFeature):
     """
 
 
+class Shell(_NamedFeature):
+    """Wraps a raw CATIA `Shell` COM object.
+
+    Created by `AddNewShell(face_reference, internal_thickness,
+    external_thickness)` from one face `Reference` (`geometry.faces.Face`),
+    never an edge -- verified on the first face tried with
+    `(face, 2.0, 0.0)` (probe 37, `docs/conventions.md` section 1.2.2.2).
+    Reduces to `com_object`/`name` only, for the same reason as
+    `ConstRadEdgeFillet`/`Chamfer`: there is no verified way to read the
+    source face back, so there is no `ensure_shell` either (`geometry.faces`).
+    """
+
+
+class Thickness(_NamedFeature):
+    """Wraps a raw CATIA `Thickness` COM object.
+
+    Created by `AddNewThickness(face_reference, offset)` from one face
+    `Reference` (`geometry.faces.Face`) -- verified on the first face tried
+    with `(face, 3.0)` (probe 37, `docs/conventions.md` section 1.2.2.2).
+    Reduces to `com_object`/`name` only, for the same reason as `Shell`:
+    there is no verified way to read the source face back, so there is no
+    `ensure_thickness` either (`geometry.faces`).
+    """
+
+
+class Hole(_NamedFeature):
+    """Wraps a raw CATIA `Hole` COM object.
+
+    Created by `AddNewHole(face_reference, depth)` from one face `Reference`
+    (`geometry.faces.Face`) -- verified on the first face tried with
+    `(face, 5.0)` (probe 37, `docs/conventions.md` section 1.2.2.2). Reduces
+    to `com_object`/`name` only, for the same reason as `Shell`/`Thickness`:
+    there is no verified way to read the source face back, so there is no
+    `ensure_hole` either (`geometry.faces`).
+    """
+
+
 class RectangularPattern:
     """Wraps a raw CATIA `RectPattern` COM object.
 
@@ -859,6 +947,20 @@ class PartDesign:
     unlike a `Sketch`, an edge has no verified, stable handle a caller can
     read back and compare, so `_ensure_by_sketch` does not apply and no
     truthful substitute exists (`geometry.edges` explains why in full).
+
+    Shells, thicknesses, and holes (`Shell`/`Thickness`/`Hole`) are the face
+    counterpart, read and created the same way -- `_list`/`_get`/
+    `_create_feature`/`_remove` with `SHELL_KIND`/`THICKNESS_KIND`/
+    `HOLE_KIND` -- but they take a face `Reference` (`geometry.faces.Face`)
+    obtained through `snapshot_faces()`. `_require_current_face` mirrors
+    `_require_current_edge` exactly, and both share the one `_generation`
+    counter and the one `StaleSnapshotError`: a face reference and an
+    edge reference go stale for the same reason (a model change may or may
+    not have left the underlying topology intact), so this is one condition
+    with two producers, not two conditions. There is no
+    `ensure_shell`/`ensure_thickness`/`ensure_hole`, for the same reason
+    there is no `ensure_edge_fillet`/`ensure_chamfer` (`geometry.faces`
+    explains why in full).
     """
 
     def __init__(self, part_com_object: Any, selection: Any = None) -> None:
@@ -890,7 +992,7 @@ class PartDesign:
         An `EdgeSnapshot` is stamped with this value when it is taken, and is
         refused once the two no longer agree. Exposed so a caller can tell
         whether a snapshot it is holding is still current without having to
-        catch `StaleEdgeSnapshotError`.
+        catch `StaleSnapshotError`.
         """
         return self._generation
 
@@ -906,16 +1008,45 @@ class PartDesign:
             noun: What is being created, for the error message.
 
         Raises:
-            StaleEdgeSnapshotError: If the edge came from a snapshot taken
+            StaleSnapshotError: If the edge came from a snapshot taken
                 before this `PartDesign` last changed the model.
         """
         if edge.generation != self._generation:
-            raise StaleEdgeSnapshotError(
+            raise StaleSnapshotError(
                 f"This edge came from a snapshot of an older model "
                 f"(generation {edge.generation}, now {self._generation}), so it "
                 f"cannot be used to create a {noun}. CATIA would accept it "
                 "sometimes and fail unpredictably at creation or at update. "
                 "Call snapshot_edges() again and pick the edge from the new "
+                "snapshot."
+            )
+
+    def _require_current_face(self, face: Face, noun: str) -> None:
+        """Refuses a `Face` whose snapshot predates the latest model change.
+
+        Mirrors `_require_current_edge` exactly and reuses
+        `StaleSnapshotError` rather than adding a new one: a face
+        reference and an edge reference go stale under a model change for
+        the same reason (`geometry.faces`), so this is the same condition,
+        not a new one -- even though the error's name and docstring are
+        worded for edges specifically (see the module report for whether it
+        should be renamed).
+
+        Args:
+            face: The face the caller passed.
+            noun: What is being created, for the error message.
+
+        Raises:
+            StaleSnapshotError: If the face came from a snapshot taken
+                before this `PartDesign` last changed the model.
+        """
+        if face.generation != self._generation:
+            raise StaleSnapshotError(
+                f"This face came from a snapshot of an older model "
+                f"(generation {face.generation}, now {self._generation}), so it "
+                f"cannot be used to create a {noun}. CATIA would accept it "
+                "sometimes and fail unpredictably at creation or at update. "
+                "Call snapshot_faces() again and pick the face from the new "
                 "snapshot."
             )
 
@@ -2482,6 +2613,372 @@ class PartDesign:
                 deletion failed.
         """
         self._remove(name, self.get_chamfer, "chamfer")
+
+    def snapshot_faces(self) -> FaceSnapshot:
+        """Takes a fresh snapshot of every face of the Part's solid.
+
+        This is the face counterpart of `snapshot_edges` and is the only
+        verified way to obtain a face reference (`docs/conventions.md`
+        section 1.2.2.2, probe 37, `geometry.faces`): `Selection.Clear()`,
+        `Selection.Search("Topology.Face,all")`, then
+        `SelectedElement.Reference` for each hit. The result describes the
+        model exactly as it stands right now; take a new snapshot after a
+        `create_shell`/`create_thickness`/`create_hole` call rather than
+        reusing an old one across a model change. See `geometry.faces` for
+        the full rationale, including which parts of it are independently
+        measured for faces and which are carried over from the edge layer as
+        a conservative policy.
+
+        Returns:
+            A fresh `FaceSnapshot`.
+
+        Raises:
+            Auto3dxError: If no editor selection is available, or the
+                underlying COM call fails unexpectedly.
+        """
+        return take_face_snapshot(self._selection, self._generation)
+
+    @property
+    def shells(self) -> "list[Shell]":
+        """Lists every shell on the Part's `MainBody`.
+
+        Returns:
+            A `Shell` wrapper for each item in `MainBody.Shapes` whose
+            wrapper type is `SHELL_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(SHELL_KIND, Shell)
+
+    def get_shell(self, name: str) -> Shell:
+        """Looks up a shell by name.
+
+        Args:
+            name: The shell's name.
+
+        Returns:
+            The matching `Shell`.
+
+        Raises:
+            FeatureNotFoundError: If no shell named `name` exists.
+            AmbiguousNameError: If two or more shells named `name` exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(SHELL_KIND, Shell, "shell", name)
+
+    def create_shell(
+        self,
+        name: str,
+        face: Face,
+        internal_thickness: float,
+        external_thickness: float,
+        unit: str = MILLIMETRE,
+    ) -> Shell:
+        """Creates a new shell that hollows the solid, opening it at one face.
+
+        Verified (`docs/conventions.md` section 1.2.2.2, probe 37):
+        `AddNewShell(face_reference, internal_thickness, external_thickness)`
+        both created the feature and survived `Part.Update()`, on the first
+        face tried, with `internal_thickness = 2.0` and
+        `external_thickness = 0.0`. No other combination has been tried
+        against a live session.
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle
+        `PartUpdateError`. **A failed update leaves the shell in the tree,
+        and every later `Part.Update()` fails too until it is removed** --
+        exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Remove it with `remove_shell` before retrying;
+        do not retry blindly.
+
+        Args:
+            name: The new shell's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            face: The `Face` to open, from `snapshot_faces()`.
+            internal_thickness: The shell's wall thickness. Must be finite
+                and strictly positive -- only `2.0` is verified, and a zero
+                or negative wall thickness has no justified meaning here.
+            external_thickness: The shell's outward offset. Must be finite
+                and non-negative -- only `0.0` is verified, and that is
+                itself the boundary value, so zero is accepted but a
+                negative value is not (never tried, no justification).
+            unit: The unit `internal_thickness`/`external_thickness` are
+                expressed in. Defaults to `MILLIMETRE`.
+
+        Returns:
+            The newly created `Shell`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `face` is not a `Face`,
+                `internal_thickness` is not finite and positive, or
+                `external_thickness` is not finite and non-negative.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            FeatureConflictError: If a shell named `name` already exists.
+            AmbiguousNameError: If two or more shells named `name` already
+                exist.
+            PartialCreationError: If the shell was created but the follow-up
+                rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, `face` no longer resolves to a real face).
+        """
+        validate_parameter_name(name)
+        if not isinstance(face, Face):
+            raise ParameterTypeError(
+                "face must be a Face from PartDesign.snapshot_faces(), not "
+                f"{type(face).__name__}."
+            )
+        self._require_current_face(face, "shell")
+        validate_length_unit(unit)
+        coerced_internal = _validate_positive_length(internal_thickness, "internal_thickness")
+        coerced_external = _validate_non_negative_length(external_thickness, "external_thickness")
+        return self._create_feature(
+            name,
+            SHELL_KIND,
+            "AddNewShell",
+            (face.com_object, coerced_internal, coerced_external),
+            Shell,
+            "shell",
+        )
+
+    def remove_shell(self, name: str) -> None:
+        """Removes a shell from the model.
+
+        Args:
+            name: The shell's name.
+
+        Raises:
+            FeatureNotFoundError: If no shell named `name` exists.
+            Auto3dxError: If no editor selection is available, or the
+                deletion failed.
+        """
+        self._remove(name, self.get_shell, "shell")
+
+    @property
+    def thicknesses(self) -> "list[Thickness]":
+        """Lists every thickness feature on the Part's `MainBody`.
+
+        Returns:
+            A `Thickness` wrapper for each item in `MainBody.Shapes` whose
+            wrapper type is `THICKNESS_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(THICKNESS_KIND, Thickness)
+
+    def get_thickness(self, name: str) -> Thickness:
+        """Looks up a thickness feature by name.
+
+        Args:
+            name: The thickness feature's name.
+
+        Returns:
+            The matching `Thickness`.
+
+        Raises:
+            FeatureNotFoundError: If no thickness feature named `name`
+                exists.
+            AmbiguousNameError: If two or more thickness features named
+                `name` exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(THICKNESS_KIND, Thickness, "thickness", name)
+
+    def create_thickness(
+        self,
+        name: str,
+        face: Face,
+        offset: float,
+        unit: str = MILLIMETRE,
+    ) -> Thickness:
+        """Creates a new feature that thickens the solid at one face.
+
+        Verified (`docs/conventions.md` section 1.2.2.2, probe 37):
+        `AddNewThickness(face_reference, offset)` both created the feature
+        and survived `Part.Update()`, on the first face tried, with
+        `offset = 3.0`. No other value has been tried against a live
+        session.
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle
+        `PartUpdateError`. **A failed update leaves the thickness feature in
+        the tree, and every later `Part.Update()` fails too until it is
+        removed** -- exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Remove it with `remove_thickness` before
+        retrying; do not retry blindly.
+
+        Args:
+            name: The new feature's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            face: The `Face` to thicken, from `snapshot_faces()`.
+            offset: The thickening offset. Must be finite and strictly
+                positive -- only `3.0` is verified, and a zero offset would
+                do nothing while a negative one has never been tried, so
+                neither is justified.
+            unit: The unit `offset` is expressed in. Defaults to
+                `MILLIMETRE`.
+
+        Returns:
+            The newly created `Thickness`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `face` is not a `Face`, or `offset` is not
+                finite and positive.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            FeatureConflictError: If a thickness feature named `name` already
+                exists.
+            AmbiguousNameError: If two or more thickness features named
+                `name` already exist.
+            PartialCreationError: If the feature was created but the
+                follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, `face` no longer resolves to a real face).
+        """
+        validate_parameter_name(name)
+        if not isinstance(face, Face):
+            raise ParameterTypeError(
+                "face must be a Face from PartDesign.snapshot_faces(), not "
+                f"{type(face).__name__}."
+            )
+        self._require_current_face(face, "thickness")
+        validate_length_unit(unit)
+        coerced_offset = _validate_positive_length(offset, "offset")
+        return self._create_feature(
+            name,
+            THICKNESS_KIND,
+            "AddNewThickness",
+            (face.com_object, coerced_offset),
+            Thickness,
+            "thickness",
+        )
+
+    def remove_thickness(self, name: str) -> None:
+        """Removes a thickness feature from the model.
+
+        Args:
+            name: The thickness feature's name.
+
+        Raises:
+            FeatureNotFoundError: If no thickness feature named `name`
+                exists.
+            Auto3dxError: If no editor selection is available, or the
+                deletion failed.
+        """
+        self._remove(name, self.get_thickness, "thickness")
+
+    @property
+    def holes(self) -> "list[Hole]":
+        """Lists every hole on the Part's `MainBody`.
+
+        Returns:
+            A `Hole` wrapper for each item in `MainBody.Shapes` whose wrapper
+            type is `HOLE_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(HOLE_KIND, Hole)
+
+    def get_hole(self, name: str) -> Hole:
+        """Looks up a hole by name.
+
+        Args:
+            name: The hole's name.
+
+        Returns:
+            The matching `Hole`.
+
+        Raises:
+            FeatureNotFoundError: If no hole named `name` exists.
+            AmbiguousNameError: If two or more holes named `name` exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(HOLE_KIND, Hole, "hole", name)
+
+    def create_hole(
+        self,
+        name: str,
+        face: Face,
+        depth: float,
+        unit: str = MILLIMETRE,
+    ) -> Hole:
+        """Creates a new simple hole into the solid from one face.
+
+        Verified (`docs/conventions.md` section 1.2.2.2, probe 37):
+        `AddNewHole(face_reference, depth)` both created the feature and
+        survived `Part.Update()`, on the first face tried, with
+        `depth = 5.0`. No other value has been tried against a live session.
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle
+        `PartUpdateError`. **A failed update leaves the hole in the tree, and
+        every later `Part.Update()` fails too until it is removed** --
+        exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Remove it with `remove_hole` before retrying;
+        do not retry blindly.
+
+        Args:
+            name: The new hole's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            face: The `Face` to drill from, from `snapshot_faces()`.
+            depth: The hole's depth. Must be finite and strictly positive --
+                only `5.0` is verified, and a zero or negative depth has no
+                justified meaning for a hole.
+            unit: The unit `depth` is expressed in. Defaults to
+                `MILLIMETRE`.
+
+        Returns:
+            The newly created `Hole`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `face` is not a `Face`, or `depth` is not
+                finite and positive.
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            FeatureConflictError: If a hole named `name` already exists.
+            AmbiguousNameError: If two or more holes named `name` already
+                exist.
+            PartialCreationError: If the hole was created but the follow-up
+                rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, `face` no longer resolves to a real face).
+        """
+        validate_parameter_name(name)
+        if not isinstance(face, Face):
+            raise ParameterTypeError(
+                "face must be a Face from PartDesign.snapshot_faces(), not "
+                f"{type(face).__name__}."
+            )
+        self._require_current_face(face, "hole")
+        validate_length_unit(unit)
+        coerced_depth = _validate_positive_length(depth, "depth")
+        return self._create_feature(
+            name,
+            HOLE_KIND,
+            "AddNewHole",
+            (face.com_object, coerced_depth),
+            Hole,
+            "hole",
+        )
+
+    def remove_hole(self, name: str) -> None:
+        """Removes a hole from the model.
+
+        Args:
+            name: The hole's name.
+
+        Raises:
+            FeatureNotFoundError: If no hole named `name` exists.
+            Auto3dxError: If no editor selection is available, or the
+                deletion failed.
+        """
+        self._remove(name, self.get_hole, "hole")
 
     def create_rectangular_pattern(
         self,
