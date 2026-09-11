@@ -658,23 +658,47 @@ AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
 ```
 
 면 Reference를 fillet이나 chamfer에 넣으면 propagation 0·1·2 전부 실패한다. fillet은
-모서리를 요구한다. `AddNewChamfer`는 생성은 되지만 update가 실패했다. propagation/mode/
-orientation 정수의 의미가 type library에 없어서(enum 메타데이터 없는 순수 `VT_I4`) 어떤
-값이 맞는지 아직 모른다.
+모서리를 요구한다. chamfer도 모서리를 받으며, 인자는 아래에서 확정했다.
 
-**첫 fillet 이후의 모든 시도는 update가 실패했다.** 그 실행에서 모든 Reference를 수정 전에
-미리 잡아뒀으므로, fillet이 topology를 바꿔 기존 Reference가 무효가 된 것으로 보인다.
-probe 31로 실제 재열거·재생성 실험을 했다. 변경 없는 반복 검색은 16개 edge의 이름과
-순서가 같았지만, 임시 Pad의 높이를 바꾸고 update하자 edge 수가 20→29로 변했고 BRep name
-multiset과 검색 순서가 모두 달라졌다. **수정마다 재열거해야 하며**, 이전 raw 이름이나
-index를 durable selector로 저장하면 안 된다.
+**첫 fillet 이후 모든 시도가 update에서 실패한 원인은 stale reference가 아니었다**
+(probe 34). 신선한 검색으로 fillet 3개를 연달아 만들어도 전부 통과하고, **같은 검색 결과로
+2개를 만들어도 통과한다.** 수정 후에도 기존 Reference는 그대로 쓸 수 있다.
 
-이 Selection BRep name을 `CreateReferenceFromBRepName`에 다시 넣는 경로는 Part context와
-Pad context 모두 실패했다. `MeasurableService`도 현재 wrapper에서 edge `GetLength`를
-노출하지 않았다. cleanup 뒤 검색 edge 수는 원래 16개로 복원됐다.
+**실제 원인: update가 한 번 실패하면 그 feature를 지우기 전까지 이후 update가 전부 실패한다.**
+probe 28은 update가 실패한 chamfer를 트리에 남긴 채 다음으로 넘어갔다. 따라서 `create_*` 뒤
+update가 실패하면 호출자는 **반드시 그 feature를 지워야** 하고, 지우지 않고 이어가면 무관한
+실패가 줄줄이 따라온다.
 
-남은 설계 문제는 재열거한 후보 중 "어느 모서리인가"를 다시 고르는 방법이다. 다음 후보는
-검색 결과의 구체 wrapper가 노출하는 기하 속성 또는 다른 공식 측정 service다.
+**어느 모서리인지 재빌드를 넘어 지목하는 방법은 없다.** 네 경로가 모두 막혔다.
+
+```text
+BRep 이름 저장 후 재해석   : CreateReferenceFromBRepName -> Part·Pad context 모두 실패
+재빌드 후 이름·순서 보존   : pad 높이 하나 바꾸니 edge 20 -> 29개,
+                             이름 multiset과 검색 순서 둘 다 달라짐
+측정으로 기하 선택         : MeasurableService가 edge GetLength를 노출하지 않음
+검색 범위를 feature로 한정 : 'Topology.Edge,in,<이름>' 계열은 전부 COM 오류.
+                             'Topology.Edge,in'은 all과 동일(솔리드 전체)
+```
+
+**모델이 바뀌지 않는 동안에는** 검색이 정확히 재현된다(개수·이름·순서 모두 동일, 2회 확인).
+따라서 index는 **그 시점의 모델 상태에서만** 의미가 있다. 수정이 일어나면 개수부터 변한다
+(fillet을 걸수록 29 -> 32 -> 38 -> 41). API는 이 한계를 숨기지 말고 드러내야 한다.
+
+#### chamfer 인자 (실측, probe 35)
+
+type library에 enum 메타데이터가 없어(순수 `VT_I4`) 정수 3개의 의미를 몰랐다. 시도마다
+chamfer를 지워 깨끗한 상태에서 다시 시작하며 조합을 훑었다.
+
+```text
+AddNewChamfer(iObjectToChamfer, iPropagation, iMode, iOrientation,
+              iLength1, iLength2OrAngle) -> Chamfer
+
+mode=0  -> 생성은 되나 update 실패
+mode=1  -> 생성 + update 성공     (propagation 0·1, orientation 0·1 모두)
+mode=2  -> 생성 자체가 실패
+```
+
+**mode는 1이어야 한다.** 다른 값은 제공하지 않는다.
 
 ### 1.2.5 Rib / Stiffener / Pattern (실측, probes 24·26·30)
 

@@ -14,7 +14,7 @@
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
 - 테스트: **414 unit + 27 integration 통과**
-- probe: `scripts/probes/`에 33개 존재
+- probe: `scripts/probes/`에 35개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -123,18 +123,27 @@ AddNewEdgeFilletWithConstantRadius(모서리 Reference, 1, 반지름)
   -> 생성 + Part.Update() 성공. 면·모서리 feature 중 최초로 검증됨
 ```
 
-남은 문제는 두 가지다. 첫 fillet 이후의 모든 시도가 update에서 실패했는데, 모든 Reference를
-수정 전에 미리 잡아둔 탓으로 보인다(수정마다 재열거가 필요하다는 가설). 그리고 "어느
-모서리인가"를 재빌드 후에도 같은 것으로 지목할 방법이 필요하다. index는 보존 근거가 없고
-BRep 문자열은 구조적으로 깨진다. probe 31 실측에서 변경 없는 반복 검색은 16개 edge의
-이름과 순서가 같았지만, 임시 Pad 높이를 바꿔 update하자 edge 수가 20→29로 바뀌고
-BRep name multiset과 순서가 모두 달라졌다. 이전 이름의
-`CreateReferenceFromBRepName`은 Part/Pad context 모두 실패했고,
-`MeasurableService` wrapper도 edge 길이를 노출하지 않았다. cleanup 뒤 edge 수는
-원래 16개로 돌아왔다. 따라서 raw BRep 이름과 index는 durable selector가 아니다.
+probe 34·35에서 나머지가 풀렸다.
 
-`AddNewChamfer`는 여전히 update 실패다. propagation/mode/orientation 정수의 의미가 type
-library에 없다.
+첫 fillet 이후의 실패는 stale reference 때문이 아니었다. 신선한 검색으로 fillet 3개를
+연달아 만들어도, 같은 검색 결과로 2개를 만들어도 전부 update가 통과한다. 진짜 원인은
+**update가 한 번 실패하면 그 feature를 지우기 전까지 이후 update가 전부 실패한다**는 것이고,
+probe 28은 update가 실패한 chamfer를 트리에 남긴 채 진행했다.
+
+chamfer 인자도 확정했다. `iMode=1`만 동작한다(0은 update 실패, 2는 생성 실패). propagation과
+orientation은 0·1 모두 통과한다.
+
+**남은 한계는 "어느 모서리인가"다.** 네 경로가 모두 막혔다.
+
+```text
+BRep 이름 저장 후 재해석   : CreateReferenceFromBRepName -> Part·Pad context 모두 실패
+재빌드 후 이름·순서 보존   : pad 높이 하나 바꾸니 edge 20 -> 29개, 이름·순서 모두 달라짐
+측정으로 기하 선택         : MeasurableService가 edge 길이를 노출하지 않음
+검색 범위를 feature로 한정 : 'Topology.Edge,in,<이름>' 계열 전부 COM 오류
+```
+
+모델이 바뀌지 않는 동안에는 검색이 정확히 재현되므로(개수·이름·순서 동일, 2회 확인) index는
+**그 시점의 모델 상태에서만** 유효하다. API는 이 한계를 숨기지 않고 드러내는 방식으로 만든다.
 
 ### 2.3 스케치 제약 — 해결됨
 
@@ -317,8 +326,8 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 
 | 순서 | 항목 | 난이도 | 비고 |
 |---|---|---|---|
-| 1 | **모서리 선택 레이어** | **높음** | probe 31에서 raw BRep 이름·검색 index·MeasurableService 길이 경로가 탈락했다. 다른 기하학적 selector 필요 |
-| 2 | chamfer 인자 확정 | 중간 | 모서리 Reference는 통하는데 정수 3개의 의미를 모른다 |
+| 1 | **모서리 fillet·chamfer API** | 중간 | 두 feature 모두 검증됐다 (2.2). durable selector가 없다는 한계를 드러내는 설계가 핵심 |
+| 2 | chamfer 인자 확정 | 완료 | `iMode=1`만 동작한다 (probe 35) |
 | 3 | 사용자 정의 평면 | 중간 | offset 평면은 스케치까지 됐고 pad가 실패한다 (2.5, conventions 1.2.7) |
 | 4 | `IsUpToDate` 의미 확인 | 완료 | `Part.is_up_to_date()` 구현 및 live false→true 전이 검증 (2.6) |
 | 5 | 측정 기반 검증 | 완료 | `Part.measurement` 구현 및 live integration 완료 (2.6) |
