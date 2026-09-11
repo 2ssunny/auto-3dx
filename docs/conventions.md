@@ -360,6 +360,61 @@ Pad 제거    : Shapes 1->0, Sketches 1->0   (연쇄됨)
 Pocket 제거 : Shapes 1->0, Sketches 그대로  (연쇄 안 됨)
 ```
 
+### 1.2.3 Shaft / Groove / Mirror (실측, probes 17·18·19)
+
+```text
+ShapeFactory.AddNewShaft(iSketch)   -> Shaft
+ShapeFactory.AddNewGroove(iSketch)  -> Groove
+ShapeFactory.AddNewMirror(iMirroringElement) -> Mirror
+Part.CreateReferenceFromObject(iObject) -> Reference
+Part.FindObjectByName(iObjName)         -> 해당 객체 (Pad / Body / AnyObject 확인)
+```
+
+**Shaft와 Groove는 회전 feature다.** Pad/Pocket과 달리 `FirstLimit`이 아니라
+`FirstAngle` / `SecondAngle`(`Angle` 객체)을 갖는다.
+
+```text
+Angle.Value  읽기/쓰기 모두 가능
+기본값       FirstAngle 360.0, SecondAngle 0.0     (단위 deg)
+90.0으로 설정 후 Part.Update() 성공
+그 외 읽기 가능: Unit, ReadOnly, RangeMin/Max, Comment, ...
+```
+
+**축이 필요하다.** 스케치에 `CenterLine`을 지정해야 한다. 쓰기 가능하며, 프로파일은 축에서
+떨어져 있어야 한다.
+
+```python
+with sketch.edit() as editor:
+    editor.rectangle(10.0, 6.0, origin_x=20.0, origin_y=0.0)   # 축에서 떨어진 프로파일
+    axis = editor.line(0.0, 0.0, 0.0, 20.0)
+sketch.com_object.CenterLine = axis
+```
+
+**Mirror는 평면을 받는다.** `OriginElements.PlaneYZ`를 그대로 넘기면 동작한다. BRep 이름이
+필요 없는 유일한 대칭/변환 기능이다.
+
+### 1.2.2.1 `AddNew*` 성공이 feature 유효를 뜻하지 않는다 (중요)
+
+실측:
+
+```text
+AddNewStiffener(sketch)   -> Stiffener 객체 반환.  이후 Part.Update() 실패
+AddNewRectPattern(...)    -> RectPattern 객체 반환. 이후 Part.Update() 실패
+```
+
+객체는 트리에 생겼는데 모델이 재계산에 실패한다. 즉 **생성 호출이 성공해도 모델은 깨져 있을
+수 있고, 그 feature는 트리에 남는다.**
+
+따라서:
+
+- probe에서 "검증됨"의 기준은 **생성 성공 + `Part.Update()` 성공**이다. 생성만 성공한 것은
+  검증되지 않은 것으로 취급한다.
+- 라이브러리의 `create_*`는 `Part.Update()`를 호출하지 않으므로, 호출자가 update하고
+  `PartUpdateError`를 처리해야 한다. **실패해도 feature는 모델에 남으므로** 호출자가 지워야
+  한다. 이 점을 docstring에 명시한다.
+
+이 기준으로 Stiffener와 Pattern은 **미검증**이며 구현하지 않는다.
+
 ### 1.2.2 아직 참조 레이어가 없어 막힌 Part Design 기능
 
 `ShapeFactory`는 `AddNew*`를 90개 노출한다. 스케치만 받는 것은 지금 구현할 수 있지만,
@@ -701,6 +756,47 @@ set(...)   -> get(name).set(value, unit)      # update는 호출하지 않는다
 __contains__ -> get()이 성공하면 True, ParameterNotFoundError면 False
 ```
 
+### 6.8 `auto_3dx/core/application.py` 확장 (여러 editor)
+
+`Application.ActiveEditor`가 UI 탭 전환을 즉시 따라오지 않는 경우를 실측했다. 탭은 새
+파트인데 COM은 이전 파트를 가리켰다. 엉뚱한 파트를 편집하는 사고를 막으려면 editor를
+직접 고를 수 있어야 한다.
+
+실측한 것 (`Application.Editors`):
+
+```text
+Editors.Count = 4
+Editors.Item(i)  1-based
+  [1] CATIAEditor4 | ActiveObject 접근 시 com_error      <- 이런 editor가 섞여 있다
+  [2] CATIAEditor0 | Part 'ohShape00422533'
+  [3] CATIAEditor5 | VPMRootOccurrence
+  [4] CATIAEditor6 | Part '3D Shape00422534'
+editor.Name / editor.ActiveObject / editor.Selection
+```
+
+`ActiveObject`가 실패하는 editor가 실제로 존재하므로, 열거는 **실패한 항목을 건너뛰고
+계속**해야 한다. 하나 때문에 전체가 죽으면 안 된다.
+
+```python
+@dataclasses.dataclass(frozen=True)
+class EditorInfo:
+    name: str                 # "CATIAEditor6"
+    object_kind: str | None   # "Part" / "VPMRootOccurrence" / None (읽기 실패)
+    object_name: str | None   # "3D Shape00422534" / None
+    is_part: bool
+
+class Catia:
+    def editors(self) -> "list[EditorInfo]": ...
+    def parts(self) -> "list[Part]": ...          # Part를 편집 중인 editor만, 각자 Selection 연결
+    def part_named(self, name: str) -> Part: ...  # 없으면 NoActivePartError,
+                                                  # 둘 이상이면 AmbiguousNameError
+```
+
+`parts()`와 `part_named()`가 돌려주는 `Part`에는 **그 editor의 `Selection`**을 넣어 준다.
+다른 editor의 selection을 쓰면 엉뚱한 창에서 삭제가 일어난다.
+
+기존 `active_editor()` / `active_part()`는 그대로 둔다.
+
 ### 6.9 `auto_3dx/geometry/sketch.py`
 
 ```python
@@ -853,6 +949,66 @@ class Pocket(SketchFeature): ...
 `ensure_pocket`의 정책은 `ensure_pad`와 동일하다 (1.3 참조). 기존 `Pad` 공개 signature
 (`height`, `set_height`, `create_pad`, `ensure_pad`, `get_pad`, `pads`, `remove_pad`)는
 바꾸지 않는다.
+
+### 6.13 Shaft / Groove / Mirror
+
+`parameters/parameter.py`에 각도 지원을 추가한다 (길이 validator와 같은 패턴).
+
+```python
+DEGREE: str = "deg"
+SUPPORTED_ANGLE_UNITS: frozenset[str] = frozenset({DEGREE})
+def validate_angle_unit(unit: str) -> None: ...      # UnsupportedUnitError
+def validate_angle_value(value: float) -> float: ... # ParameterTypeError, float 반환
+```
+
+`geometry/sketch.py`의 `Sketch`에 축 지정을 추가한다.
+
+```python
+def set_center_line(self, line: Any) -> None: ...   # Sketch.CenterLine = line
+```
+
+`geometry/part_design.py`:
+
+```python
+SHAFT_KIND = "Shaft"; GROOVE_KIND = "Groove"; MIRROR_KIND = "Mirror"
+FULL_REVOLUTION: float = 360.0
+
+class RevolvedFeature:          # Shaft/Groove 공통
+    com_object, name
+    @property first_angle -> float          # FirstAngle.Value, deg
+    @property second_angle -> float         # SecondAngle.Value, deg
+    def set_first_angle(self, angle: float, unit: str = DEGREE) -> None: ...
+    def set_second_angle(self, angle: float, unit: str = DEGREE) -> None: ...
+    def sketch(self) -> Sketch: ...
+    def first_angle_parameter(self) -> Parameter: ...   # formula 대상
+    def __repr__(self) -> str: ...
+
+class Shaft(RevolvedFeature): ...
+class Groove(RevolvedFeature): ...
+
+class Mirror:
+    com_object, name, __repr__
+```
+
+`PartDesign`에 Pad/Pocket과 대칭인 메서드를 추가한다.
+
+```python
+.shafts / .get_shaft / .create_shaft(name, sketch)  / .ensure_shaft  / .remove_shaft
+.grooves/ .get_groove/ .create_groove(name, sketch) / .ensure_groove / .remove_groove
+.mirrors/ .get_mirror/ .create_mirror(name, support=SUPPORT_YZ) / .ensure_mirror
+         / .remove_mirror
+```
+
+`create_shaft`/`create_groove`는 스케치에 `CenterLine`이 지정돼 있어야 한다. 라이브러리가
+미리 확인할 방법이 없으므로 docstring에 요구사항으로 명시하고, 실패는 그대로 전달한다.
+
+`ensure_shaft`/`ensure_groove`의 sketch 비교는 `ensure_pad`와 같다(COM 동일성 `==`).
+각도는 `ensure`에서 건드리지 않는다 — 생성 시 기본값(360/0)이고, 바꾸려면
+`set_first_angle`을 명시적으로 부른다.
+
+`ensure_mirror`는 support 문자열이 다르면 `FeatureConflictError`를 낸다. Mirror의 평면을
+되읽는 방법이 검증되지 않았으므로, 같은 이름이면 support를 비교하지 않고 그대로 재사용하되
+그 한계를 docstring에 적는다.
 
 ### 6.12 `auto_3dx/formulas/`
 

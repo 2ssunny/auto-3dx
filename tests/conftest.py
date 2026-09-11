@@ -315,12 +315,50 @@ class Editor:
         self.Selection = selection if selection is not None else Selection()
 
 
+class Editors:
+    """Fake CATIA `Editors` collection (1-based `Item`, `Count`).
+
+    `count_exception`, when set, is raised by `Count` -- this is how
+    `test_multi_editor.py` pins that a failure reading `Editors.Count` itself
+    (as opposed to one editor's `ActiveObject`) surfaces as `Auto3dxError`.
+    """
+
+    def __init__(
+        self,
+        items: list[Any] | None = None,
+        count_exception: BaseException | None = None,
+    ) -> None:
+        self._items: list[Any] = list(items or [])
+        self.count_exception = count_exception
+
+    @property
+    def Count(self) -> int:
+        if self.count_exception is not None:
+            raise self.count_exception
+        return len(self._items)
+
+    def Item(self, index: int) -> Any:
+        position = index - 1
+        if 0 <= position < len(self._items):
+            return self._items[position]
+        raise make_com_error()
+
+
 class Application:
     """Fake CATIA `Application`, as returned by `attach_running_application`."""
 
-    def __init__(self, active_editor: Any = None, name: str = "3DEXPERIENCE") -> None:
+    def __init__(
+        self,
+        active_editor: Any = None,
+        name: str = "3DEXPERIENCE",
+        editors: Any = None,
+    ) -> None:
         self.ActiveEditor = active_editor
         self.Name = name
+        # Defaults to an empty fake `Editors` so existing callers that never
+        # pass `editors` (all tests predating multi-editor support) are
+        # unaffected.
+        self.Editors = editors if editors is not None else Editors([])
 
 
 @pytest.fixture
@@ -375,6 +413,12 @@ def editor_factory() -> Callable[..., Editor]:
 def application_factory() -> Callable[..., Application]:
     """Returns a factory for fake `Application` objects."""
     return Application
+
+
+@pytest.fixture
+def editors_factory() -> Callable[..., Editors]:
+    """Returns a factory for fake `Editors` collections."""
+    return Editors
 
 
 @pytest.fixture
