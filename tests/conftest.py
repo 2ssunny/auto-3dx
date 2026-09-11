@@ -549,6 +549,146 @@ class GeometricElements:
         raise make_com_error()
 
 
+_CONSTRAINT_RESULT_BY_REQUESTED_CODE: "dict[int, tuple[int, str, bool]]" = {
+    10: (8, "Parallelism", False),  # Horizontality -> normalized to Parallelism
+    13: (8, "Parallelism", False),  # Verticality   -> normalized to Parallelism
+    11: (11, "Perpendicularity", False),
+    8: (8, "Parallelism", False),
+    4: (4, "Tangency", False),
+    5: (5, "Length", True),
+    14: (14, "Radius", True),
+    1: (1, "Offset", True),
+    2: (2, "Coincidence", False),
+}
+"""Maps a requested `AddMonoEltCst`/`AddBiEltCst` type code to the (resulting
+`Constraint.Type`, name family, has-Dimension) CATIA actually reports (verified,
+docs/conventions.md 1.2.4/6.14). Horizontality/Verticality both normalize to
+Parallelism (Type 8) -- the whole point of pinning this in a fake is so nothing
+later "fixes" a lookup by the requested code instead of the reported one."""
+
+CONSTRAINT_LENGTH_DEFAULT_VALUE: float = 12.5
+"""Default `Dimension.Value` a fake Length constraint is created with.
+
+Deliberately distinct from any value a test explicitly writes (e.g. 40.0), so
+a test asserting "no value was written" cannot pass by coincidence."""
+
+CONSTRAINT_RADIUS_DEFAULT_VALUE: float = 7.5
+"""Default `Dimension.Value` a fake Radius constraint is created with. See
+`CONSTRAINT_LENGTH_DEFAULT_VALUE` for why this is deliberately distinctive."""
+
+CONSTRAINT_DISTANCE_DEFAULT_VALUE: float = 17.5
+"""Default `Dimension.Value` a fake Offset (Distance) constraint is created
+with. See `CONSTRAINT_LENGTH_DEFAULT_VALUE` for why this is deliberately
+distinctive."""
+
+_CONSTRAINT_DEFAULT_VALUE_BY_FAMILY: dict[str, float] = {
+    "Length": CONSTRAINT_LENGTH_DEFAULT_VALUE,
+    "Radius": CONSTRAINT_RADIUS_DEFAULT_VALUE,
+    "Offset": CONSTRAINT_DISTANCE_DEFAULT_VALUE,
+}
+
+
+class Constraint:
+    """Fake CATIA `Constraint`, as returned by `AddMonoEltCst`/`AddBiEltCst`.
+
+    `Dimension` is present only for dimensional kinds (Length/Radius/Offset).
+    Reading it on a non-dimensional constraint RAISES `pywintypes.com_error`,
+    matching the real object (verified, docs/conventions.md 6.14) -- the
+    library has to catch that and report `value is None` rather than letting
+    it escape.
+    """
+
+    def __init__(
+        self,
+        name: str = "Constraint.1",
+        type_code: int = 8,
+        status: int = 0,
+        dimension: Any = None,
+    ) -> None:
+        self.Name = name
+        self.Type = type_code
+        self.Status = status
+        self._dimension = dimension
+
+    @property
+    def Dimension(self) -> Any:
+        if self._dimension is None:
+            raise make_com_error()
+        return self._dimension
+
+
+class Constraints:
+    """Fake CATIA `Constraints` collection (`Sketch.Constraints`).
+
+    `AddMonoEltCst`/`AddBiEltCst` record their exact arguments (so a test can
+    assert the raw element -- never a `Reference` -- was passed) and return a
+    `Constraint` whose `Name`/`Type` follow the verified requested-code ->
+    resulting-type table (docs/conventions.md 6.14). Setting `outside_edition`
+    makes both raise `pywintypes.com_error`, mimicking the verified fact that
+    every constraint call fails once `CloseEdition()` has run (1.2.4).
+    """
+
+    def __init__(
+        self,
+        items: list[Any] | None = None,
+        outside_edition: bool = False,
+        broken_count: int = 0,
+        unupdated_count: int = 0,
+    ) -> None:
+        self._items: list[Any] = list(items or [])
+        self.outside_edition = outside_edition
+        self.broken_count = broken_count
+        self.unupdated_count = unupdated_count
+        self.mono_calls: list[tuple[int, Any]] = []
+        self.bi_calls: list[tuple[int, Any, Any]] = []
+        self._name_counters: dict[str, int] = {}
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    @property
+    def BrokenConstraintsCount(self) -> int:
+        return self.broken_count
+
+    @property
+    def UnUpdatedConstraintsCount(self) -> int:
+        return self.unupdated_count
+
+    def Item(self, index: int) -> Any:
+        position = index - 1
+        if 0 <= position < len(self._items):
+            return self._items[position]
+        raise make_com_error()
+
+    def _next_name(self, family: str) -> str:
+        self._name_counters[family] = self._name_counters.get(family, 0) + 1
+        return f"{family}.{self._name_counters[family]}"
+
+    def _create(self, requested_code: int) -> Constraint:
+        type_code, family, dimensional = _CONSTRAINT_RESULT_BY_REQUESTED_CODE[requested_code]
+        dimension = (
+            Length(value=_CONSTRAINT_DEFAULT_VALUE_BY_FAMILY[family]) if dimensional else None
+        )
+        constraint = Constraint(
+            name=self._next_name(family), type_code=type_code, dimension=dimension
+        )
+        self._items.append(constraint)
+        return constraint
+
+    def AddMonoEltCst(self, iCstType: int, iElem: Any) -> Constraint:
+        self.mono_calls.append((iCstType, iElem))
+        if self.outside_edition:
+            raise make_com_error()
+        return self._create(iCstType)
+
+    def AddBiEltCst(self, iCstType: int, iFirst: Any, iSecond: Any) -> Constraint:
+        self.bi_calls.append((iCstType, iFirst, iSecond))
+        if self.outside_edition:
+            raise make_com_error()
+        return self._create(iCstType)
+
+
 class Sketch:
     """Fake CATIA `Sketch`.
 
@@ -567,6 +707,7 @@ class Sketch:
         identity: Any = None,
         name_write_exception: BaseException | None = None,
         axis_data_result: Any = _UNSET,
+        constraints: Any = None,
     ) -> None:
         self._identity = identity if identity is not None else object()
         self._name = name
@@ -579,6 +720,9 @@ class Sketch:
         self.GeometricElements = GeometricElements()
         # Writable, and how a revolve feature's axis is supplied.
         self.CenterLine: Any = None
+        # Constraints only work inside OpenEdition()/CloseEdition() (verified,
+        # docs/conventions.md 1.2.4); reading Count/Item/etc. works anytime.
+        self.Constraints = constraints if constraints is not None else Constraints()
 
     @property
     def Name(self) -> str:
@@ -1184,3 +1328,15 @@ def groove_factory() -> Callable[..., Groove]:
 def mirror_factory() -> Callable[..., Mirror]:
     """Returns a factory for fake `Mirror` objects."""
     return Mirror
+
+
+@pytest.fixture
+def constraint_factory() -> Callable[..., Constraint]:
+    """Returns a factory for fake `Constraint` objects."""
+    return Constraint
+
+
+@pytest.fixture
+def constraints_factory() -> Callable[..., Constraints]:
+    """Returns a factory for fake `Constraints` collections."""
+    return Constraints

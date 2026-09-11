@@ -28,8 +28,26 @@ from auto_3dx.errors import (
     SketchSupportMismatchError,
     UnsupportedSupportError,
 )
+from auto_3dx.geometry.constraint import (
+    CONSTRAINT_COINCIDENT,
+    CONSTRAINT_DISTANCE,
+    CONSTRAINT_HORIZONTAL,
+    CONSTRAINT_LENGTH,
+    CONSTRAINT_PARALLEL,
+    CONSTRAINT_PERPENDICULAR,
+    CONSTRAINT_RADIUS,
+    CONSTRAINT_TANGENT,
+    CONSTRAINT_VERTICAL,
+    Constraint,
+    ConstraintCollection,
+)
 from auto_3dx.geometry.deletion import delete_via_selection
-from auto_3dx.parameters.parameter import validate_length_value, validate_parameter_name
+from auto_3dx.parameters.parameter import (
+    MILLIMETRE,
+    validate_length_unit,
+    validate_length_value,
+    validate_parameter_name,
+)
 
 SUPPORT_XY: str = "XY"
 """Support string for `OriginElements.PlaneXY`."""
@@ -79,6 +97,32 @@ def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
     return Auto3dxError(f"Unexpected COM failure (HRESULT={hresult_hex}).")
 
 
+def _wrap_constraint_com_error(error: pywintypes.com_error) -> Auto3dxError:
+    """Converts a failed constraint-creation COM call into an `Auto3dxError`.
+
+    Verified (`docs/conventions.md` sections 1.2.4 and 6.14): `AddMonoEltCst`/
+    `AddBiEltCst` only succeed while the owning sketch is open for editing,
+    between `OpenEdition()` and `CloseEdition()`; after `CloseEdition()` they
+    always raise. That is by far the most likely cause of a failure here, so
+    the message names it explicitly instead of only reporting the HRESULT.
+
+    Args:
+        error: The COM error to convert.
+
+    Returns:
+        An `Auto3dxError` describing the failure and naming the most likely
+        cause.
+    """
+    hresult = error.args[0] if error.args else None
+    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
+    return Auto3dxError(
+        f"Failed to create the constraint (HRESULT={hresult_hex}). Constraints "
+        "only work while the sketch is open for editing, i.e. inside a "
+        "`Sketch.edit()` block; this is the most likely cause if that block "
+        "has already exited."
+    )
+
+
 def _axis_data_matches(actual: tuple[float, ...], expected: tuple[float, ...]) -> bool:
     """Compares two 9-tuples of axis data within `AXIS_TOLERANCE`.
 
@@ -118,19 +162,35 @@ class SketchEditor:
     """Wraps a `Factory2D` obtained from `Sketch.OpenEdition()`.
 
     Only valid for the lifetime of the `Sketch.edit()` context manager that
-    created it. Every method here is a thin, validated pass-through to the
-    verified `Factory2D` COM methods (`CreatePoint`, `CreateLine`,
-    `CreateClosedCircle`) -- no constraints, relations, or other unverified
-    2D geometry APIs are exposed.
+    created it. Geometry creation (`point`/`line`/`circle`/`rectangle`) is a
+    thin, validated pass-through to the verified `Factory2D` COM methods
+    (`CreatePoint`, `CreateLine`, `CreateClosedCircle`).
+
+    Constraint creation (`horizontal`, `vertical`, `perpendicular`,
+    `parallel`, `coincident`, `tangent`, `length`, `radius`, `distance`) lives
+    here too, and only here: verified (`docs/conventions.md` 1.2.4/6.14),
+    `Constraints.AddMonoEltCst`/`AddBiEltCst` only succeed while the sketch is
+    open for editing, which is exactly the lifetime of this object. Their
+    arguments are the raw `Line2D`/`Circle2D` COM objects returned by
+    `line()`/`circle()` -- a `Reference` built with
+    `CreateReferenceFromObject` is verified to be rejected here, unlike Part
+    Design's face/edge references. None of these methods calls
+    `Part.Update()`.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(self, com_object: Any, constraints: Any) -> None:
         """Initializes the wrapper.
 
         Args:
-            com_object: The raw `Factory2D` COM object to wrap.
+            com_object: The raw `Factory2D` COM object to wrap. This is what
+                `SketchEditor.com_object` returns, unchanged from before
+                constraints were added.
+            constraints: The raw `Constraints` COM collection
+                (`Sketch.Constraints`) used by the constraint-creation
+                methods below.
         """
         self._com_object = com_object
+        self._constraints = constraints
 
     @property
     def com_object(self) -> Any:
@@ -260,6 +320,257 @@ class SketchEditor:
             self.line(origin_x_value, far_y, origin_x_value, origin_y_value),
         ]
 
+    def _mono(self, constraint_type: int, element: Any) -> Constraint:
+        """Creates a single-element constraint via `Constraints.AddMonoEltCst`.
+
+        Args:
+            constraint_type: One of the `CONSTRAINT_*` codes.
+            element: The raw 2D element COM object (as returned by `line()`
+                or `circle()`).
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        try:
+            raw = self._constraints.AddMonoEltCst(constraint_type, element)
+        except pywintypes.com_error as error:
+            raise _wrap_constraint_com_error(error) from error
+        return Constraint(raw)
+
+    def _bi(self, constraint_type: int, first: Any, second: Any) -> Constraint:
+        """Creates a two-element constraint via `Constraints.AddBiEltCst`.
+
+        Args:
+            constraint_type: One of the `CONSTRAINT_*` codes.
+            first: The raw first 2D element COM object.
+            second: The raw second 2D element COM object.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        try:
+            raw = self._constraints.AddBiEltCst(constraint_type, first, second)
+        except pywintypes.com_error as error:
+            raise _wrap_constraint_com_error(error) from error
+        return Constraint(raw)
+
+    def horizontal(self, line: Any) -> Constraint:
+        """Constrains a line to be horizontal.
+
+        Verified (`docs/conventions.md` 1.2.4): CATIA normalises the created
+        constraint's `Type` to `CONSTRAINT_PARALLEL`, not `CONSTRAINT_HORIZONTAL`
+        -- do not look the result back up by the code used to request it.
+
+        Args:
+            line: The raw `Line2D` COM object (as returned by `line()`).
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        return self._mono(CONSTRAINT_HORIZONTAL, line)
+
+    def vertical(self, line: Any) -> Constraint:
+        """Constrains a line to be vertical.
+
+        Verified (`docs/conventions.md` 1.2.4): CATIA normalises the created
+        constraint's `Type` to `CONSTRAINT_PARALLEL`, not `CONSTRAINT_VERTICAL`
+        -- do not look the result back up by the code used to request it.
+
+        Args:
+            line: The raw `Line2D` COM object (as returned by `line()`).
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        return self._mono(CONSTRAINT_VERTICAL, line)
+
+    def perpendicular(self, first: Any, second: Any) -> Constraint:
+        """Constrains two lines to be perpendicular.
+
+        Args:
+            first: The raw first `Line2D` COM object.
+            second: The raw second `Line2D` COM object.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        return self._bi(CONSTRAINT_PERPENDICULAR, first, second)
+
+    def parallel(self, first: Any, second: Any) -> Constraint:
+        """Constrains two lines to be parallel.
+
+        Args:
+            first: The raw first `Line2D` COM object.
+            second: The raw second `Line2D` COM object.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        return self._bi(CONSTRAINT_PARALLEL, first, second)
+
+    def coincident(self, first: Any, second: Any) -> Constraint:
+        """Constrains two elements to be coincident.
+
+        Args:
+            first: The raw first 2D element COM object.
+            second: The raw second 2D element COM object.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        return self._bi(CONSTRAINT_COINCIDENT, first, second)
+
+    def tangent(self, first: Any, second: Any) -> Constraint:
+        """Constrains two elements to be tangent.
+
+        Args:
+            first: The raw first 2D element COM object.
+            second: The raw second 2D element COM object.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        return self._bi(CONSTRAINT_TANGENT, first, second)
+
+    def length(
+        self, line: Any, value: float | None = None, unit: str = MILLIMETRE
+    ) -> Constraint:
+        """Constrains a line's length, optionally driving it to a value.
+
+        Args:
+            line: The raw `Line2D` COM object (as returned by `line()`).
+            value: If given, the length to write to the new constraint's
+                `Dimension.Value` right after creation. Validated *before*
+                any COM call. `None` (the default) leaves the constraint at
+                the length already captured from the drawn geometry.
+            unit: The unit `value` is expressed in. Only used when `value` is
+                given. Defaults to `MILLIMETRE`.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint (type
+            `CONSTRAINT_LENGTH`, dimensional).
+
+        Raises:
+            UnsupportedUnitError: If `value` is given and `unit` is not a
+                supported unit.
+            ParameterTypeError: If `value` is given and is not an `int`/
+                `float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        if value is not None:
+            validate_length_unit(unit)
+            value = validate_length_value(value)
+        constraint = self._mono(CONSTRAINT_LENGTH, line)
+        if value is not None:
+            constraint.set_value(value, unit)
+        return constraint
+
+    def radius(
+        self, circle: Any, value: float | None = None, unit: str = MILLIMETRE
+    ) -> Constraint:
+        """Constrains a circle's radius, optionally driving it to a value.
+
+        Args:
+            circle: The raw `Circle2D` COM object (as returned by `circle()`).
+            value: If given, the radius to write to the new constraint's
+                `Dimension.Value` right after creation. Validated *before*
+                any COM call. `None` (the default) leaves the constraint at
+                the radius already captured from the drawn geometry.
+            unit: The unit `value` is expressed in. Only used when `value` is
+                given. Defaults to `MILLIMETRE`.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint (type
+            `CONSTRAINT_RADIUS`, dimensional).
+
+        Raises:
+            UnsupportedUnitError: If `value` is given and `unit` is not a
+                supported unit.
+            ParameterTypeError: If `value` is given and is not an `int`/
+                `float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        if value is not None:
+            validate_length_unit(unit)
+            value = validate_length_value(value)
+        constraint = self._mono(CONSTRAINT_RADIUS, circle)
+        if value is not None:
+            constraint.set_value(value, unit)
+        return constraint
+
+    def distance(
+        self,
+        first: Any,
+        second: Any,
+        value: float | None = None,
+        unit: str = MILLIMETRE,
+    ) -> Constraint:
+        """Constrains the distance between two elements, optionally driving it.
+
+        Args:
+            first: The raw first 2D element COM object.
+            second: The raw second 2D element COM object.
+            value: If given, the distance to write to the new constraint's
+                `Dimension.Value` right after creation. Validated *before*
+                any COM call. `None` (the default) leaves the constraint at
+                the distance already captured from the drawn geometry.
+            unit: The unit `value` is expressed in. Only used when `value` is
+                given. Defaults to `MILLIMETRE`.
+
+        Returns:
+            A `Constraint` wrapping the newly created constraint (type
+            `CONSTRAINT_DISTANCE`, dimensional).
+
+        Raises:
+            UnsupportedUnitError: If `value` is given and `unit` is not a
+                supported unit.
+            ParameterTypeError: If `value` is given and is not an `int`/
+                `float` (or is a `bool`).
+            Auto3dxError: If the underlying COM call fails -- most likely
+                because this sketch's `edit()` block has already exited.
+        """
+        if value is not None:
+            validate_length_unit(unit)
+            value = validate_length_value(value)
+        constraint = self._bi(CONSTRAINT_DISTANCE, first, second)
+        if value is not None:
+            constraint.set_value(value, unit)
+        return constraint
+
 
 class Sketch:
     """Wraps a raw CATIA `Sketch` COM object.
@@ -277,6 +588,7 @@ class Sketch:
         """
         self._com_object = com_object
         self._editing = False
+        self._constraints: ConstraintCollection | None = None
 
     @property
     def com_object(self) -> Any:
@@ -418,6 +730,23 @@ class Sketch:
                 raise _wrap_com_error(error) from error
         return names
 
+    @property
+    def constraints(self) -> ConstraintCollection:
+        """Returns a read-only view over this sketch's constraints.
+
+        Built on first access and cached, matching `Part.parameters`/
+        `Part.sketches`/`Part.part_design`. Reading this collection works
+        whether or not the sketch is currently open for editing; only
+        *creating* a new constraint requires `edit()` (see
+        `SketchEditor`).
+
+        Returns:
+            A `ConstraintCollection` over this sketch's `Constraints`.
+        """
+        if self._constraints is None:
+            self._constraints = ConstraintCollection(self._com_object)
+        return self._constraints
+
     @contextlib.contextmanager
     def edit(self) -> Iterator[SketchEditor]:
         """Opens the sketch for editing and yields a `SketchEditor`.
@@ -434,19 +763,28 @@ class Sketch:
         calls `CloseEdition()`, so a failed block never leaves the sketch
         permanently locked out of `edit()`.
 
+        Also reads `Constraints` up front and passes it into the
+        `SketchEditor`, since constraint creation (`docs/conventions.md`
+        1.2.4/6.14) is verified to work only inside this block.
+
         Yields:
-            A `SketchEditor` wrapping the `Factory2D` from `OpenEdition()`.
+            A `SketchEditor` wrapping the `Factory2D` from `OpenEdition()` and
+            this sketch's `Constraints` collection.
 
         Raises:
             Auto3dxError: If `edit()` is called while already active for this
-                `Sketch`, or if `OpenEdition()` or `CloseEdition()` fails
-                unexpectedly.
+                `Sketch`, or if reading `Constraints`, `OpenEdition()`, or
+                `CloseEdition()` fails unexpectedly.
         """
         if self._editing:
             raise Auto3dxError(
                 "This sketch is already being edited; edit() does not support "
                 "re-entrant or concurrent use."
             )
+        try:
+            constraints = self._com_object.Constraints
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
         self._editing = True
         try:
             factory = self._com_object.OpenEdition()
@@ -454,7 +792,7 @@ class Sketch:
             self._editing = False
             raise _wrap_com_error(error) from error
         try:
-            yield SketchEditor(factory)
+            yield SketchEditor(factory, constraints)
         finally:
             try:
                 self._com_object.CloseEdition()

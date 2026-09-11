@@ -5,7 +5,7 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 마지막 검증: 205 unit + 12 live integration 통과
+- 마지막 검증: 237 unit + 15 live integration 통과
 
 ---
 
@@ -95,7 +95,10 @@ part.update()
 | 점 / 선 / 원 | 동작 | |
 | 사각형 | 동작 | 닫힌 프로파일 4선분 |
 | 삭제 | 동작 | `Editor.Selection` 경유 |
-| **제약(Constraint) 지정** | **불가** | 사각형을 그리면 CATIA가 Coincidence를 자동 생성하지만, 직접 거는 API는 없다 |
+| **제약(Constraint) 지정** | 동작 | `edit()` 안에서만. 9종 검증 (아래) |
+| **치수 제약 값 읽기/쓰기** | 동작 | Length / Radius / Distance. formula로 구동 가능 |
+| **제약 상태 조회** | 동작 | `constraints.broken_count` / `unupdated_count` |
+| **제약 삭제** | **불가** | `Constraints.Remove` 미검증 |
 | **사용자 정의 평면 위 스케치** | **불가** | 원점 평면 3개만 |
 | **호·스플라인·기타 프로파일** | **불가** | |
 
@@ -139,13 +142,38 @@ part.update()
 미구현 예:
 
 ```text
-AddNewHole        AddNewShaft       AddNewGroove      AddNewStiffener
-AddNewChamfer     AddNewEdgeFillet* AddNewDraft       AddNewShell
-AddNewMirror      AddNewRectPattern AddNewCircPattern AddNewUserPattern
-AddNewRib         AddNewSlot        AddNewStiffener   AddNewLoft
-AddNewThickness   AddNewSplit       AddNewTrim        AddNewSolidCombine
+AddNewHole        AddNewChamfer     AddNewEdgeFillet* AddNewDraft
+AddNewShell       AddNewThickness   AddNewStiffener   AddNewRectPattern
+AddNewCircPattern AddNewUserPattern AddNewRib         AddNewSlot
+AddNewLoft        AddNewSplit       AddNewTrim        AddNewSolidCombine
 ... 외 70여 개
 ```
+
+### 3.4.1 스케치 제약
+
+**제약은 `sketch.edit()` 안에서만 걸린다.** 편집 세션이 닫힌 뒤에는 전부 실패한다. 그래서
+생성 메서드는 `SketchEditor`에만 있다 — 위치가 곧 계약이다.
+
+인자는 `line()` / `circle()`이 돌려준 **raw COM 객체를 그대로** 넘긴다. Part Design과 달리
+`Reference`로 감싸면 거부된다.
+
+```python
+with sketch.edit() as editor:
+    bottom = editor.line(0, 0, 40, 0)
+    right  = editor.line(40, 0, 40, 25)
+    editor.horizontal(bottom)
+    editor.perpendicular(bottom, right)
+    width = editor.length(bottom, 40)      # 치수 제약
+part.update()
+```
+
+검증된 9종: `horizontal`, `vertical`, `perpendicular`, `parallel`, `coincident`,
+`tangent`, `length`, `radius`, `distance`. 뒤의 셋이 치수 제약이다.
+
+**요청한 타입과 결과 타입이 다를 수 있다.** `horizontal`은 `Parallelism`(Type 8)이 된다.
+따라서 요청 코드로 제약을 되찾으면 안 된다.
+
+미구현: 제약 삭제(`Constraints.Remove` 미검증), `concentric`(probe 입력 오류로 미검증).
 
 ### 3.5 Formula
 
@@ -193,7 +221,7 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 ```text
 HybridShapeFactory     GSD surface geometry
 Bodies / HybridBodies  MainBody 외 body
-Constraints            스케치·어셈블리 구속
+Part.Constraints       어셈블리 구속 (스케치 구속은 3.4.1에서 지원)
 AxisSystems            축 시스템
 OrderedGeometricalSets / UserSurfaces / AnnotationSets
 ```
@@ -266,11 +294,34 @@ part.sketches.count / .list() / .names() / .get(name)
              .remove(name)
 
 sketch.name / .rename(name) / .support() / .axis_data() / .element_names()
+      .set_center_line(line)          # Shaft / Groove용 회전축
+      .constraints -> ConstraintCollection
+
 with sketch.edit() as editor:
     editor.point(x, y)
     editor.line(x1, y1, x2, y2)
     editor.circle(cx, cy, radius)
     editor.rectangle(width, height, origin_x=0.0, origin_y=0.0)
+    # 제약 — edit() 안에서만 유효하다
+    editor.horizontal(line) / .vertical(line)
+    editor.perpendicular(a, b) / .parallel(a, b)
+    editor.coincident(a, b) / .tangent(a, b)
+    editor.length(line, value=None, unit="mm")     -> Constraint
+    editor.radius(circle, value=None, unit="mm")   -> Constraint
+    editor.distance(a, b, value=None, unit="mm")   -> Constraint
+```
+
+### ConstraintCollection / Constraint
+
+```python
+sketch.constraints.count / .list() / .names() / .get(name)
+                  .broken_count / .unupdated_count
+len(...) / iter(...) / name in ...
+
+constraint.name / .type_code / .status        # status 0이 정상
+          .value                              # 치수 제약이 아니면 None
+          .set_value(value, unit="mm")
+          .dimension_parameter() -> Parameter # formula 대상
 ```
 
 `support`는 `"XY"`, `"YZ"`, `"ZX"` 중 하나다.

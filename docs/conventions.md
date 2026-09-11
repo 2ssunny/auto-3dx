@@ -360,6 +360,61 @@ Pad 제거    : Shapes 1->0, Sketches 1->0   (연쇄됨)
 Pocket 제거 : Shapes 1->0, Sketches 그대로  (연쇄 안 됨)
 ```
 
+### 1.2.4 스케치 제약 (실측, probes 20·21·22)
+
+```text
+Sketch.Constraints                                  -> Constraints
+Constraints.AddMonoEltCst(iCstType: int, iElem)     -> Constraint
+Constraints.AddBiEltCst(iCstType: int, iFirst, iSecond) -> Constraint
+Constraints.Count / Item(i) / Remove(i)   [1-based]
+Constraints.BrokenConstraintsCount / UnUpdatedConstraintsCount
+Constraint: Name, Type, Status, Dimension, Mode, ...
+```
+
+**제약은 편집 세션 안에서만 걸린다.** 이게 가장 중요한 사실이다.
+
+```text
+CloseEdition() 이후 AddMonoEltCst(...)  -> 전부 com_error
+OpenEdition()~CloseEdition() 사이        -> 동작
+```
+
+그리고 인자는 **raw `Line2D` / `Circle2D`를 그대로** 넘긴다. `CreateReferenceFromObject`로
+감싼 `Reference`는 거부된다. Part Design의 face/edge 참조와 정반대다.
+
+따라서 제약 생성 API는 `edit()` 안에서만 존재하는 `SketchEditor`에 둔다.
+
+검증된 제약 타입 (요청 코드 -> CATIA가 실제로 만든 것):
+
+```text
+10 Horizontality    -> 'Parallelism.1'      Type=8
+13 Verticality      -> 'Parallelism.2'      Type=8
+ 5 Length           -> 'Length.3'           Type=5    <- Dimension 있음
+14 Radius           -> 'Radius.4'           Type=14   <- Dimension 있음
+11 Perpendicularity -> 'Perpendicularity.5' Type=11
+ 8 Parallelism      -> 'Parallelism.6'      Type=8
+ 1 Distance         -> 'Offset.7'           Type=1    <- Dimension 있음
+ 2 On               -> 'Coincidence.8'      Type=2
+ 4 Tangency         -> 'Tangency.9'         Type=4
+ 3 Concentricity    -> 미검증 (같은 원을 두 번 넘긴 probe 입력 오류)
+```
+
+**요청한 타입과 결과 타입이 다를 수 있다.** Horizontality/Verticality는 둘 다 Parallelism
+(Type 8)으로 정규화된다. 따라서 만들어진 제약을 타입 코드로 되찾으려 하면 안 된다.
+
+**치수 제약의 `Dimension`은 읽기·쓰기 모두 가능하다** (실측).
+
+```text
+'Length.3' 40.0 -> 45.0    'Radius.4' 4.0 -> 9.0    'Offset.7' 25.0 -> 30.0
+쓰기 후 Part.Update() 성공, BrokenConstraintsCount 0 유지
+```
+
+이것이 파라메트릭 모델의 핵심이다. formula가 구동할 대상이 된다.
+
+건강 신호: `Status == 0`이 정상이고, `BrokenConstraintsCount` / `UnUpdatedConstraintsCount`로
+스케치 상태를 확인할 수 있다.
+
+**미검증:** `Constraints.Remove(i)`는 호출해 보지 않았다. 제약 삭제는 구현하지 않는다.
+
 ### 1.2.3 Shaft / Groove / Mirror (실측, probes 17·18·19)
 
 ```text
@@ -1009,6 +1064,70 @@ class Mirror:
 `ensure_mirror`는 support 문자열이 다르면 `FeatureConflictError`를 낸다. Mirror의 평면을
 되읽는 방법이 검증되지 않았으므로, 같은 이름이면 support를 비교하지 않고 그대로 재사용하되
 그 한계를 docstring에 적는다.
+
+### 6.14 스케치 제약
+
+`geometry/constraint.py` (신규):
+
+```python
+CONSTRAINT_HORIZONTAL: int = 10
+CONSTRAINT_VERTICAL: int = 13
+CONSTRAINT_LENGTH: int = 5
+CONSTRAINT_RADIUS: int = 14
+CONSTRAINT_PERPENDICULAR: int = 11
+CONSTRAINT_PARALLEL: int = 8
+CONSTRAINT_DISTANCE: int = 1
+CONSTRAINT_COINCIDENT: int = 2
+CONSTRAINT_TANGENT: int = 4
+
+class Constraint:
+    def __init__(self, com_object: Any) -> None: ...
+    @property com_object -> Any
+    @property name -> str                  # 'Length.3'
+    @property type_code -> int             # Constraint.Type. 요청 코드와 다를 수 있다
+    @property status -> int                # 0이 정상
+    @property value -> float | None        # Dimension.Value, 치수 제약이 아니면 None
+    def set_value(self, value: float, unit: str = MILLIMETRE) -> None: ...
+    def dimension_parameter(self) -> Parameter    # formula 대상. 없으면 ParameterTypeError
+    def __repr__(self) -> str: ...
+
+class ConstraintCollection:            # 읽기 전용 뷰
+    def __init__(self, sketch_com_object: Any) -> None: ...
+    @property count -> int
+    @property broken_count -> int
+    @property unupdated_count -> int
+    def list(self) -> "list[Constraint]": ...
+    def names(self) -> "list[str]": ...
+    def get(self, name: str) -> Constraint: ...   # ConstraintNotFoundError / AmbiguousNameError
+    def __len__ / __iter__ / __contains__ / __repr__
+```
+
+`Sketch`에 `constraints -> ConstraintCollection` 속성을 추가한다 (최초 접근 시 캐시).
+
+`SketchEditor`에 제약 생성 메서드를 추가한다. **편집 세션 안에서만 유효하므로 여기가 유일하게
+올바른 위치다.** 인자는 `line()` / `circle()` 이 돌려준 raw COM 객체를 그대로 받는다.
+
+```python
+def horizontal(self, line: Any) -> Constraint: ...
+def vertical(self, line: Any) -> Constraint: ...
+def perpendicular(self, first: Any, second: Any) -> Constraint: ...
+def parallel(self, first: Any, second: Any) -> Constraint: ...
+def coincident(self, first: Any, second: Any) -> Constraint: ...
+def tangent(self, first: Any, second: Any) -> Constraint: ...
+def length(self, line: Any, value: float | None = None,
+           unit: str = MILLIMETRE) -> Constraint: ...
+def radius(self, circle: Any, value: float | None = None,
+           unit: str = MILLIMETRE) -> Constraint: ...
+def distance(self, first: Any, second: Any, value: float | None = None,
+             unit: str = MILLIMETRE) -> Constraint: ...
+```
+
+치수 제약 세 가지는 `value`가 주어지면 생성 직후 `Dimension.Value`에 쓴다. `None`이면 현재
+형상에서 잡힌 값을 그대로 둔다.
+
+`SketchEditor`는 제약을 만들 때 `Part.Update()`를 호출하지 않는다.
+
+추가 예외: `ConstraintNotFoundError(Auto3dxError)`.
 
 ### 6.12 `auto_3dx/formulas/`
 

@@ -117,3 +117,7 @@ class FormulaNotFoundError(Auto3dxError):
 
 class FormulaAlreadyExistsError(Auto3dxError):
     """Raised when creating a formula whose name is already taken."""
+
+
+class ConstraintNotFoundError(Auto3dxError):
+    """Raised when a constraint cannot be found by name in a Constraints collection."""

@@ -1,13 +1,27 @@
 """Geometry layer: sketches and Part Design features on top of `core.Part`.
 
-Exposes `Sketch`/`SketchCollection` (2D profiles on origin planes) and
+Exposes `Sketch`/`SketchCollection` (2D profiles on origin planes),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
-`PartDesign` (extruded, pocketed, revolved, and mirrored solid features),
-matching the verified COM surface documented in `docs/conventions.md`
-sections 1.2/1.2.1/1.2.3/1.3 and the public API contract in sections
-6.9/6.10/6.11/6.13.
+`PartDesign` (extruded, pocketed, revolved, and mirrored solid features), and
+`Constraint`/`ConstraintCollection` (sketch constraints, created only through
+`SketchEditor` inside `Sketch.edit()`), matching the verified COM surface
+documented in `docs/conventions.md` sections 1.2/1.2.1/1.2.3/1.2.4/1.3 and the
+public API contract in sections 6.9/6.10/6.11/6.13/6.14.
 """
 
+from auto_3dx.geometry.constraint import (
+    CONSTRAINT_COINCIDENT,
+    CONSTRAINT_DISTANCE,
+    CONSTRAINT_HORIZONTAL,
+    CONSTRAINT_LENGTH,
+    CONSTRAINT_PARALLEL,
+    CONSTRAINT_PERPENDICULAR,
+    CONSTRAINT_RADIUS,
+    CONSTRAINT_TANGENT,
+    CONSTRAINT_VERTICAL,
+    Constraint,
+    ConstraintCollection,
+)
 from auto_3dx.geometry.part_design import (
     FULL_REVOLUTION,
     GROOVE_KIND,
@@ -60,4 +74,15 @@ __all__ = [
     "Groove",
     "Mirror",
     "PartDesign",
+    "CONSTRAINT_HORIZONTAL",
+    "CONSTRAINT_VERTICAL",
+    "CONSTRAINT_LENGTH",
+    "CONSTRAINT_RADIUS",
+    "CONSTRAINT_PERPENDICULAR",
+    "CONSTRAINT_PARALLEL",
+    "CONSTRAINT_DISTANCE",
+    "CONSTRAINT_COINCIDENT",
+    "CONSTRAINT_TANGENT",
+    "Constraint",
+    "ConstraintCollection",
 ]

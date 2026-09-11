@@ -7,6 +7,7 @@ from auto_3dx.errors import (
     Auto3dxError,
     CatiaConnectionError,
     Com3dxNotFoundError,
+    ConstraintNotFoundError,
     FeatureConflictError,
     FeatureNotFoundError,
     FormulaAlreadyExistsError,
@@ -27,6 +28,7 @@ from auto_3dx.errors import (
 )
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.formulas.formula import Formula
+from auto_3dx.geometry.constraint import Constraint, ConstraintCollection
 from auto_3dx.geometry.part_design import (
     Groove,
     Mirror,
@@ -48,6 +50,8 @@ __all__ = [
     "Parameter",
     "ParameterCollection",
     "ParameterInfo",
+    "Constraint",
+    "ConstraintCollection",
     "Formula",
     "FormulaCollection",
     "Groove",
@@ -65,6 +69,7 @@ __all__ = [
     "Auto3dxError",
     "CatiaConnectionError",
     "Com3dxNotFoundError",
+    "ConstraintNotFoundError",
     "FeatureConflictError",
     "FeatureNotFoundError",
     "FormulaAlreadyExistsError",
