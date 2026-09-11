@@ -1,9 +1,9 @@
 """Wrapper around the 3DEXPERIENCE ``Part`` COM object.
 
 :class:`Part` exposes only the verified surface of the CATIA ``Part`` object:
-its name, its parameters, its sketches, its Part Design features, its
-measurements, ``IsUpToDate()``, and ``Update()``. ``HybridShapeFactory``
-and other unverified members are intentionally not wrapped here.
+its name, its parameters, its sketches, its planes, its Part Design features,
+its measurements, ``IsUpToDate()``, and ``Update()``. Unverified members are
+intentionally not wrapped here.
 """
 
 from typing import Any
@@ -13,6 +13,7 @@ import pywintypes
 from auto_3dx.errors import Auto3dxError, NoActiveEditorError, PartUpdateError
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.geometry.part_design import PartDesign
+from auto_3dx.geometry.planes import PlaneCollection
 from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.measurement.inertia import SolidMeasurement
 from auto_3dx.parameters.collection import ParameterCollection
@@ -65,6 +66,7 @@ class Part:
         self._parameters: ParameterCollection | None = None
         self._sketches: SketchCollection | None = None
         self._part_design: PartDesign | None = None
+        self._planes: PlaneCollection | None = None
         self._formulas: FormulaCollection | None = None
         self._measurement: SolidMeasurement | None = None
 
@@ -131,6 +133,23 @@ class Part:
         if self._part_design is None:
             self._part_design = PartDesign(self._com_object, self._selection)
         return self._part_design
+
+    @property
+    def planes(self) -> PlaneCollection:
+        """PlaneCollection: Offset and angled planes to sketch on.
+
+        Built on first access and cached afterwards. The cache matters here
+        more than elsewhere: the collection owns the one geometrical set every
+        plane it creates is appended to, so a fresh collection would create a
+        second set.
+
+        A plane from here can be passed straight to
+        ``sketches.create(name, support=plane)``; the three origin-plane
+        strings still work unchanged.
+        """
+        if self._planes is None:
+            self._planes = PlaneCollection(self._com_object, self._selection)
+        return self._planes
 
     @property
     def formulas(self) -> FormulaCollection:

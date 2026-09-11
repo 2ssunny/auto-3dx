@@ -1,15 +1,34 @@
 """Wrappers around CATIA `Sketch` and `Sketches` COM objects.
 
-A `Sketch` is a 2D profile attached to one of the three origin planes
-(`OriginElements.PlaneXY` / `PlaneYZ` / `PlaneZX`). Those planes are wrapped
+A `Sketch` is a 2D profile attached to a plane. For the three origin planes
+(`OriginElements.PlaneXY` / `PlaneYZ` / `PlaneZX`), those planes are wrapped
 as generic `AnyObject` COM objects, not a dedicated `Plane` type, so a plane
 is never identified by `type(obj).__name__`; instead callers pass one of the
 `SUPPORT_*` strings and this module resolves it to the matching
 `OriginElements` attribute.
 
+A sketch can also sit on a user-defined offset or angled plane, created by
+`auto_3dx.geometry.planes.PlaneCollection` (`docs/conventions.md` 1.2.7).
+`SketchCollection.create`'s `support` parameter therefore accepts either kind
+interchangeably: a `SUPPORT_*` string, resolved exactly as before, or a plane
+wrapper (`planes.Plane`/`OffsetPlane`/`AnglePlane`) accepted by duck typing
+-- anything exposing a `com_object` attribute -- rather than by importing
+that type here. `planes.py` already imports this module's private
+`_PLANE_ATTRIBUTE_BY_SUPPORT`/`_wrap_com_error` (the same way
+`geometry.part_design` does), so importing `planes.Plane` back into this
+module would create a circular import; duck typing on `com_object` avoids it
+while keeping `create`'s existing string-based behaviour and signature
+completely unchanged for existing callers. The plane wrapper's raw
+`com_object` is what actually reaches `Sketches.Add`, unwrapped -- verified
+(`docs/conventions.md` 1.2.7) to need no `Reference` wrapper, the same as an
+origin plane.
+
 `Sketch` itself has no support/plane property. Which plane a sketch is on can
 only be recovered by comparing `GetAbsoluteAxisData` against the three
-verified reference frames (see `docs/conventions.md` section 1.2).
+verified reference frames (see `docs/conventions.md` section 1.2). That
+comparison has no equivalent for a user-defined plane (there is no verified
+reference frame for an arbitrary offset/angle), which is why `ensure` below
+still only accepts the three origin-plane strings.
 """
 
 import contextlib
@@ -1104,6 +1123,46 @@ class SketchCollection:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    def _resolve_support(self, support: Any) -> Any:
+        """Resolves a `support` argument to a raw plane COM object.
+
+        Args:
+            support: Either one of `SUPPORTED_SKETCH_SUPPORTS` (a string),
+                resolved through `OriginElements` exactly like `_plane`; or a
+                plane wrapper from `auto_3dx.geometry.planes`
+                (`OffsetPlane`/`AnglePlane`) -- anything exposing a
+                `com_object` attribute holding the raw hybrid plane shape
+                that `Sketches.Add` accepts directly, with no `Reference`
+                wrapper needed (verified, `docs/conventions.md` 1.2.7).
+
+        Returns:
+            The raw plane COM object.
+
+        Raises:
+            UnsupportedSupportError: If `support` is a string not in
+                `SUPPORTED_SKETCH_SUPPORTS`, or is neither a string nor an
+                object exposing `com_object`.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        if isinstance(support, str):
+            return self._plane(support)
+        # Duck-typed rather than an `isinstance` check against
+        # `auto_3dx.geometry.planes.Plane`: that module already imports this
+        # module's private plane-resolution helpers (mirroring
+        # `geometry.part_design`'s existing reuse of them), so importing
+        # `planes.Plane` back here would create a circular import. Anything
+        # exposing `com_object` -- in practice an `OffsetPlane`/`AnglePlane`
+        # -- is accepted instead.
+        try:
+            return support.com_object
+        except AttributeError as error:
+            raise UnsupportedSupportError(
+                "support must be one of "
+                f"{sorted(SUPPORTED_SKETCH_SUPPORTS)} or a plane object "
+                "exposing `com_object` (e.g. from auto_3dx.geometry.planes), "
+                f"got {type(support).__name__}."
+            ) from error
+
     @property
     def count(self) -> int:
         """Returns the number of sketches in the collection.
@@ -1208,7 +1267,7 @@ class SketchCollection:
             )
         return matches[0]
 
-    def create(self, name: str, support: str = SUPPORT_XY) -> Sketch:
+    def create(self, name: str, support: Any = SUPPORT_XY) -> Sketch:
         """Creates a new sketch on the given support plane.
 
         The existence check enumerates the collection (see `_matching`)
@@ -1225,7 +1284,11 @@ class SketchCollection:
         Args:
             name: The new sketch's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
-            support: One of `SUPPORTED_SKETCH_SUPPORTS`. Defaults to `SUPPORT_XY`.
+            support: One of `SUPPORTED_SKETCH_SUPPORTS` (`"XY"`/`"YZ"`/
+                `"ZX"`), or a plane wrapper returned by
+                `auto_3dx.geometry.planes.PlaneCollection`
+                (`OffsetPlane`/`AnglePlane`) -- see `_resolve_support`.
+                Defaults to `SUPPORT_XY`.
 
         Returns:
             The newly created `Sketch`, already renamed to `name`.
@@ -1241,7 +1304,7 @@ class SketchCollection:
         validate_parameter_name(name)
         if self._matching(name):
             raise SketchAlreadyExistsError(f"A sketch named {name!r} already exists.")
-        plane = self._plane(support)
+        plane = self._resolve_support(support)
         try:
             com_object = self._sketches().Add(plane)
         except pywintypes.com_error as error:
@@ -1269,6 +1332,15 @@ class SketchCollection:
         axis data must also match the requested support (see
         `docs/conventions.md` section 1.3). The ambiguous-name check inside
         `get()` runs first, before any axis comparison.
+
+        Unlike `create`, `support` here only accepts the three origin-plane
+        strings, not a plane wrapper: reuse is decided by comparing
+        `axis_data()` against the verified reference frames in
+        `_AXIS_DATA_BY_SUPPORT`, and no such reference frame exists for an
+        arbitrary user-defined offset/angle plane, so an honest comparison
+        for that case cannot be made yet. Create a sketch on a plane wrapper
+        with `create()` directly; managing its reuse across runs is left to
+        the caller.
 
         Args:
             name: The sketch's name.

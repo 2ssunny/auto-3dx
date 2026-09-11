@@ -13,7 +13,7 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **414 unit + 27 integration 통과**
+- 테스트: **520 unit + 30 integration 통과** (integration 1건은 수동 준비가 필요해 skip)
 - probe: `scripts/probes/`에 36개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
@@ -26,9 +26,11 @@
    |
 [auto-3dx]  attach  (이름으로 Part 선택 가능)
             파라미터 생성 / 수정 / 삭제 (Length·Angle·Dimension·Real·Integer·String·Boolean)
+            평면 생성 -> 원점 3개 + offset + 각도
             스케치 생성 -> 점·선·원·호·사각형·스플라인 (+ 회전축)
             스케치 제약 9종 + 반지름·동심
-            패드 / 포켓 / Shaft / Groove / Mirror / Rib / Slot
+            패드 / 포켓 / Shaft / Groove / Mirror / Rib / Slot / 사각 패턴
+            모서리 fillet / chamfer
             formula로 치수·각도 연동
             부피·면적·질량·무게중심 측정
             update
