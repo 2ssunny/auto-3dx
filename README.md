@@ -86,6 +86,14 @@ probe는 현재 환경을 조사하기 위한 개발 도구다. 검증이 끝난
 
 ### `docs`
 
+| 문서 | 내용 |
+|---|---|
+| `capabilities.md` | 기능별로 무엇이 되고 안 되는지 |
+| `status.md` | 진행 상황, 미해결 문제, 설계 결정 기록 |
+| `conventions.md` | 실측한 COM 사실과 코드 계약 |
+| `plm_object_creation.md` | Part 생성이 막힌 경위 |
+
+
 로컬 `DSYAutomation.chm`, 등록된 type library와 실제 CATIA 실행 결과에서 확인한 내용을
 기록한다. 릴리스별 차이, 지원하는 객체와 메서드, 안전한 작업 순서도 이 영역에서 관리한다.
 
