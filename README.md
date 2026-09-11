@@ -10,10 +10,11 @@
 - 열린 Editor와 Part 선택
 - 사용자 Parameter 생성·조회·변경
 - Formula 생성·조회·변경
-- Sketch와 2D 프로파일 생성
+- Sketch와 2D 프로파일 생성 (원점 평면 또는 사용자 정의 offset/각도 평면 위)
 - Sketch constraint 지정
 - Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot 생성
 - 사각 패턴 생성 API
+- 모서리 필렛 / 챔퍼 생성 API
 - 솔리드의 부피·면적·질량·무게중심 측정
 
 Part 자체의 PLM 생성과 저장은 이 라이브러리의 책임 범위가 아닙니다. 먼저
@@ -252,6 +253,51 @@ Shaft와 Groove의 회전 프로파일은 편집 중 얻은 line을
 `sketch.set_center_line(line)`으로 지정해야 합니다. 프로파일은 회전축을
 가로지르거나 축에 닿지 않는 검증된 형태여야 합니다.
 
+## 사용자 정의 평면 (Offset / Angle)
+
+원점 평면 3개(`XY`/`YZ`/`ZX`) 문자열은 그대로 동작합니다. 그 외에 `part.planes`
+(`PlaneCollection`)로 offset 평면과 각도 평면을 만들고, 그 평면을 `support`로
+넘겨 스케치할 수 있습니다.
+
+```python
+plane = part.planes.create_offset("TOP_OFFSET", support="XY", offset=30)
+sketch = part.sketches.create("TOP_SKETCH", support=plane)
+
+with sketch.edit() as editor:
+    editor.rectangle(20, 20)
+part.update()
+
+part.part_design.create_pad("OFFSET_PAD", sketch, 10, unit="mm")
+part.update()
+```
+
+각도 평면은 회전축으로 addressable한 3D 선이 필요합니다. 스케치 안의 2D 선이나
+원점 평면 자체를 축으로 주면 생성은 되지만 `Part.Update()`가 실패하므로,
+`create_angle`은 내부적으로 점 2개와 선 1개를 따로 만들어 축으로 씁니다.
+
+```python
+angled = part.planes.create_angle(
+    "TILTED",
+    support="XY",
+    angle=45,
+    axis_start=(0, 0, 0),
+    axis_end=(0, 0, 10),
+)
+sketch_on_angle = part.sketches.create("TILTED_SKETCH", support=angled)
+```
+
+이 컬렉션이 만드는 평면과 각도 평면의 축 점·축 선은 전부 하나의 기하 세트
+(`HybridBody`, 이름 `auto_3dx_Planes`)에 들어갑니다. `remove(plane)`은 평면
+하나만 지우고, 각도 평면의 축 점 2개와 축 선은 남습니다. 이것까지 함께
+지우려면 `remove_geometrical_set()`으로 이 컬렉션이 만든 것 전부를 지워야
+합니다.
+
+`ensure_offset`/`ensure_angle`은 제공하지 않습니다. 기하 세트 안의 도형을
+이름으로 다시 찾아 읽는 경로가 검증되지 않았기 때문입니다. 재사용이 필요하면
+호출자가 반환된 `Plane` 객체를 직접 들고 있어야 합니다. `sketches.ensure()`의
+`support`도 여전히 원점 평면 문자열 3개만 받으므로, offset/각도 평면 위
+스케치의 재사용은 `sketches.create()`로 직접 관리해야 합니다.
+
 ## Part Design
 
 Part Design wrapper는 `part.part_design`에서 얻습니다. 생성 메서드는 모델을
@@ -296,6 +342,8 @@ assert part.is_up_to_date()
 | Mirror | `mirrors`, `get_mirror`, `create_mirror`, `ensure_mirror`, `remove_mirror` | `XY`/`YZ`/`ZX` 평면 |
 | Rib | `ribs`, `get_rib`, `create_rib`, `ensure_rib`, `remove_rib` | profile Sketch + path Sketch |
 | Slot | `slots`, `get_slot`, `create_slot`, `ensure_slot`, `remove_slot` | profile Sketch + path Sketch |
+| Edge Fillet | `edge_fillets`, `get_edge_fillet`, `create_edge_fillet`, `remove_edge_fillet` | `Edge` (`ensure_*` 없음) |
+| Chamfer | `chamfers`, `get_chamfer`, `create_chamfer`, `remove_chamfer` | `Edge` (`ensure_*` 없음) |
 
 회전 feature는 다음처럼 각도를 조절할 수 있습니다.
 
@@ -341,6 +389,65 @@ except PartUpdateError:
 `remove_rectangular_pattern(pattern)`에 전달해 Selection 경로로 정리할 수
 있습니다. 이 create → update → cleanup 경로는 B428_Cloud live integration으로
 검증했습니다.
+
+### 모서리 필렛과 챔퍼
+
+면·모서리를 지목할 수 없어 막혀 있던 약 80개 face/edge feature 중 첫 두 개가
+`create_edge_fillet`/`create_chamfer`로 구현되었습니다. 모서리는 이름이나
+좌표가 아니라 `part.part_design.snapshot_edges()`가 돌려주는 `EdgeSnapshot`
+에서 얻습니다. 이 snapshot은 스케치가 아니라 **솔리드 전체**의 모서리를
+검색한 결과이고, 한 feature의 모서리만 골라 검색 범위를 좁히는 방법은 없습니다.
+
+```python
+snapshot = part.part_design.snapshot_edges()
+
+fillet = design.create_edge_fillet("F1", snapshot[0], radius=3, unit="mm")
+part.update()
+
+chamfer = design.create_chamfer(
+    "C1", snapshot[1],
+    length1=1.5, length2_or_angle=45,
+    propagation=0, orientation=0,
+)
+part.update()
+```
+
+반드시 알아야 할 제약이 세 가지 있습니다.
+
+- **모서리를 재빌드 너머로 지목하는 방법이 없습니다.** `Edge.descriptor`가 주는
+  BRep 이름 문자열을 저장했다가 나중에 같은 모서리로 되돌리는 경로,
+  재빌드 후 이름·순서를 보존하는 경로, 측정으로 모서리를 고르는 경로, 검색
+  범위를 한 feature로 좁히는 경로, 이 네 가지를 모두 시도했고 전부 막혔습니다.
+  `Edge.index`는 그 snapshot을 만든 순간의 모델에서만 의미가 있습니다.
+- **모델이 바뀌면 이전 snapshot은 거부됩니다.** 같은 snapshot으로 필렛을 두 번
+  만들면 성공할 때도 실패할 때도 있고, 호출자는 미리 알 수 없습니다. 그래서
+  `PartDesign`이 모델을 바꾸는 순간(다른 `create_*`/`remove_*` 호출) 기존
+  snapshot을 stale로 표시하고, 그 뒤로 쓰면 COM에 닿기도 전에
+  `StaleSnapshotError`를 냅니다.
+
+  ```python
+  from auto_3dx.errors import StaleSnapshotError
+
+  try:
+      design.create_edge_fillet("F2", snapshot[1], radius=2, unit="mm")
+  except StaleSnapshotError:
+      snapshot = part.part_design.snapshot_edges()  # 새로 떠야 한다
+  ```
+- **`ensure_edge_fillet`/`ensure_chamfer`는 없습니다.** `ensure_pad`처럼 기존
+  feature의 소스를 비교하려면 안정적으로 다시 읽을 수 있는 핸들이 필요한데
+  모서리에는 그런 핸들이 없습니다. 잘못된 모서리를 조용히 재사용하는 것보다
+  메서드가 없는 편이 낫습니다.
+
+챔퍼의 `mode`는 인자로 노출하지 않습니다. 검증된 세 값 중 1만 생성과 update
+모두 성공해서(0은 update 실패, 2는 생성 자체가 실패) 내부에 고정했습니다.
+`propagation`/`orientation`은 CATIA type library에 뜻이 문서화되어 있지 않아
+검증된 정수 값만 상수(`CHAMFER_PROPAGATION_0`/`_1`, `CHAMFER_ORIENTATION_0`/`_1`,
+`auto_3dx.geometry.part_design`)로 제공합니다.
+
+필렛/챔퍼 모두 `create_*` 뒤 update가 실패하면 그 feature가 트리에 남고,
+**지우기 전까지 이후의 모든 `Part.Update()`가 실패합니다.**
+`remove_edge_fillet(name)`/`remove_chamfer(name)`으로 지운 뒤에 재시도해야
+합니다.
 
 ## 측정
 
@@ -398,18 +505,19 @@ Automation 경로의 PLM Physical Product/3D Shape 생성은 설치 환경에서
 
 ### BRep 의존 feature
 
-면·모서리 같은 안정적인 BRep reference가 필요한 Chamfer, EdgeFillet, Hole,
-Draft, Shell, Thickness 등의 API는 아직 제공하지 않습니다. feature 전체를
-넘기는 것만으로는 CATIA가 요구하는 면·모서리 reference를 만들 수 없고, 모델
-변경 시 문자열 BRep 이름도 깨질 수 있기 때문입니다.
+면·모서리 참조가 필요한 feature 중 `Chamfer`와 `EdgeFillet`(모서리 참조)만
+제공합니다. `Selection.Search('Topology.Edge,all')` + `SelectedElement.Reference`
+로 모서리 `Reference`를 얻는 경로 하나가 뚫렸을 뿐이고, 그 모서리를 재빌드
+너머로 다시 지목하는 방법은 없습니다(`snapshot_edges()`를 다시 불러야 합니다).
+Hole, Draft, Shell, Thickness처럼 **면** reference가 필요한 API는 아직
+제공하지 않습니다. 같은 Search 경로가 면에도 통하는지 아직 시험하지
+않았습니다.
 
 Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더라도
 follow-up `Part.Update()`에서 실패한 사례가 있어 검증된 API로 승격하지
-않았습니다. GSD surface, HybridShape, assembly constraint, 축 시스템,
-다른 Body/HybridBody도 현재 public wrapper 범위 밖입니다.
-
-사용자 정의 offset plane 위 Sketch는 일부 동작이 확인되었지만, 그 Sketch를
-사용한 Pad까지 안정적으로 검증된 상태는 아닙니다.
+않았습니다. GSD surface(평면 생성에 쓰는 것 외의 HybridShape), assembly
+constraint, 축 시스템, 다른 Body/HybridBody도 현재 public wrapper 범위
+밖입니다.
 
 ## 테스트
 
@@ -437,8 +545,9 @@ python -m pytest tests/integration -m integration -q
 정리하므로, 저장하지 않은 별도 작업 세션에서 실행하는 것이 좋습니다. 테스트와
 라이브러리 모두 `Save()`와 `PLMPropagate()`를 호출하지 않습니다.
 
-현재 fake-COM 단위 테스트 414개와 B428_Cloud live 통합 테스트 27개가
-통과했습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
+현재 fake-COM 단위 테스트 520개와 B428_Cloud live 통합 테스트 30개가
+통과했고, 1개는 skip됩니다(열려 있는 Part에 수동으로 파라미터를 추가해야
+통과합니다). 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 
 ## 저장소 문서

@@ -690,7 +690,7 @@ snapshot으로 두 번째를 만들면 다음 모서리·중간 모서리·마�
 
 즉 **수정 후 기존 Reference가 통할지는 예측할 수 없다.** 그 모서리가 변경을 그대로 견뎠는지에
 달려 있고 호출자는 그걸 알 수 없다. 그래서 라이브러리는 `PartDesign`이 모델을 바꾸는 순간
-기존 snapshot을 stale로 표시하고, 이후 사용은 COM에 닿기 전에 `StaleEdgeSnapshotError`로
+기존 snapshot을 stale로 표시하고, 이후 사용은 COM에 닿기 전에 `StaleSnapshotError`로
 거부한다. 되는지 안 되는지 모르는 호출을 그대로 내보내지 않는다.
 
 **실제 원인: update가 한 번 실패하면 그 feature를 지우기 전까지 이후 update가 전부 실패한다.**

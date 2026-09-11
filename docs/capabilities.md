@@ -6,9 +6,10 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 현재 정적 검증: **414 unit 통과**
-- 현재 라이브 검증: 측정·곡선 스케치·직사각 패턴을 포함한
-  **27 integration 통과**
+- 현재 정적 검증: **520 unit 통과**
+- 현재 라이브 검증: 측정·곡선 스케치·직사각 패턴·모서리 필렛/챔퍼·사용자 정의 평면을 포함한
+  **30 integration 통과, 1건 skip**(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야
+  통과한다)
 
 ---
 
@@ -26,7 +27,9 @@
    |
 [auto-3dx]  attach -> 파라미터 생성/수정
                    -> 스케치 생성 -> 직선·곡선 프로파일 그리기
+                      (원점 평면 또는 offset/각도 평면 위)
                    -> 패드 / 포켓 / 회전 / Rib·Slot / 사각 패턴 생성
+                   -> 모서리 필렛 / 챔퍼 생성
                    -> formula로 치수 연동
                    -> 결과 측정
                    -> update
@@ -110,7 +113,37 @@ part.update()
 | **제약 상태 조회** | 동작 | `constraints.broken_count` / `unupdated_count` |
 | **동심 제약** | 동작 | `edit()` 안에서 서로 다른 두 `Circle2D`에 지정 |
 | **제약 삭제** | **불가** | `Constraints.Remove` 미검증 |
-| **사용자 정의 평면 위 스케치** | **부분 동작** | offset plane에 스케치는 가능하지만 그 스케치로 Pad 생성은 미검증/실패 |
+| **사용자 정의 평면(offset/각도) 위 스케치** | 동작 | `part.planes`로 평면을 만들어 스케치. Pad까지 검증 (3.3.1) |
+
+### 3.3.1 사용자 정의 평면 (Offset / Angle)
+
+원점 평면(`XY`/`YZ`/`ZX`) 3개 문자열은 그대로 쓸 수 있고, 이제 `part.planes`
+(`PlaneCollection`)로 그 위에 offset 평면과 각도 평면도 만들 수 있다.
+
+```python
+plane = part.planes.create_offset("TOP_OFFSET", support="XY", offset=30)
+sketch = part.sketches.create("TOP_SKETCH", support=plane)
+
+angled = part.planes.create_angle(
+    "TILTED", support="XY", angle=45,
+    axis_start=(0, 0, 0), axis_end=(0, 0, 10),
+)
+```
+
+- 각도 평면은 회전축으로 **주소 지정 가능한 3D 선**이 필요하다. 스케치 안의 2D 선이나
+  원점 평면 자체는 생성은 되지만 `Part.Update()`가 실패하므로, 라이브러리가 내부에서
+  점 2개(`axis_start`/`axis_end`) + 선 1개를 따로 만들어 축으로 쓴다.
+- 이 컬렉션이 만드는 평면은 전부 하나의 기하 세트(`HybridBody`, 이름
+  `auto_3dx_Planes`)에 들어간다. 평면·축 점·축 선을 개별 세트로 나누지 않는다.
+- `remove(plane)`은 평면 하나만 지운다. 각도 평면의 축 점 2개와 축 선은 그대로 남는다.
+  이것까지 함께 지우려면 `remove_geometrical_set()`으로 이 컬렉션이 만든 것 전부를
+  지워야 한다.
+- `ensure_offset`/`ensure_angle`은 없다. 기하 세트 안의 도형을 이름으로 다시 찾아
+  읽는 경로가 검증되지 않았기 때문이다(`Sketches`/`Shapes`/`Parameters`와 달리
+  `HybridShapes` 컬렉션을 `Count`/`Item(i)`로 순회해 본 적이 없다). 재사용이 필요하면
+  호출자가 반환된 `Plane` 객체를 직접 들고 있어야 한다.
+- `sketches.ensure(name, support=...)`의 `support`는 여전히 원점 평면 문자열 3개만
+  받는다. offset/각도 평면 위 스케치의 재사용 여부는 `create()`로 직접 관리해야 한다.
 
 ### 3.4 Part Design
 
@@ -126,7 +159,9 @@ part.update()
 | **Mirror 생성 / ensure / 삭제** | 동작 | 원점 평면을 받는다. BRep 참조 불필요 |
 | **Rib / Slot 생성 / ensure / 삭제** | 동작 | 프로파일 + 경로 스케치 2개. Slot은 절삭 |
 | **사각 패턴 생성 / 실패 후 삭제** | 동작 | `create_rectangular_pattern()` / `remove_rectangular_pattern(pattern)`. signed axis만 받고 같은 축 조합은 COM 호출 전 거부. 방향 매핑은 probe 26·30, 공개 adapter는 live integration으로 검증 |
-| 목록 / 이름 조회 | 동작 | `pads`, `pockets`, `shafts`, `grooves`, `mirrors`, `ribs`, `slots` 분리 |
+| **모서리 필렛 생성 / 조회 / 삭제** | 동작 | `create_edge_fillet`. `snapshot_edges()`의 `Edge`만 받는다 (3.4.2) |
+| **챔퍼 생성 / 조회 / 삭제** | 동작 | `create_chamfer`. mode는 내부 고정값 1, 인자로 노출 안 함 (3.4.2) |
+| 목록 / 이름 조회 | 동작 | `pads`~`slots`에 `edge_fillets`, `chamfers` 추가 |
 | formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` / `first_angle_parameter()` |
 | **그 외 전부** | **불가** | 아래 참고 |
 
@@ -139,14 +174,24 @@ part.update()
 
 `ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`,
 `AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror`, `AddNewRib`, `AddNewSlot`,
-`AddNewRectPattern` **8개**다.
+`AddNewRectPattern`, `AddNewEdgeFilletWithConstantRadius`, `AddNewChamfer` **10개**다.
 
-나머지가 막힌 이유는 두 가지다.
+면·모서리를 지목할 수 없어 막혀 있던 약 80개 중 처음 두 개(EdgeFillet, Chamfer)가 이번에
+뚫렸다. 그 둘을 가능하게 한 것은 `Selection.Search('Topology.Edge,all')` +
+`SelectedElement.Reference`라는 모서리 참조 경로 하나이지 범용 참조 레이어가 아니다.
+Shell/Thickness/Draft/Hole처럼 **면** 참조를 요구하는 factory는 이 경로를 아직 시험하지
+않았으므로 여전히 미구현이다.
+
+나머지가 막힌 이유는 세 가지다.
 
 ```text
-면/모서리 참조가 필요       Chamfer, EdgeFillet, Shell, Thickness, Draft, Hole
-                            -> feature를 통째로 넘기는 것은 거부된다 (실측).
-                               유효한 BRep 이름이 있어야 하는데 모델이 바뀌면 깨진다.
+모서리 참조로 해결됨        Chamfer, EdgeFillet
+                            -> Selection.Search + SelectedElement.Reference로 모서리
+                               Reference를 얻어 넘긴다. 단, 그 Reference로 나중에 같은
+                               모서리를 다시 지목할 방법은 없다 (아래 3.4.2).
+면 참조가 아직 필요         Shell, Thickness, Draft, Hole
+                            -> feature를 통째로 넘기는 것은 거부된다 (실측). 모서리와
+                               같은 Search 경로가 면에도 통하는지는 아직 시험하지 않았다.
 생성은 되는데 update 실패    Stiffener, CircPattern
                             -> 객체는 트리에 생기지만 모델이 재계산에 실패한다.
                                "생성 성공"을 검증으로 쳐주지 않는 이유다.
@@ -155,10 +200,9 @@ part.update()
 미구현 예:
 
 ```text
-AddNewHole        AddNewChamfer     AddNewEdgeFillet* AddNewDraft
-AddNewShell       AddNewThickness   AddNewStiffener
-AddNewCircPattern AddNewUserPattern AddNewLoft        AddNewSplit
-AddNewTrim        AddNewSolidCombine ... 외 70여 개
+AddNewHole        AddNewDraft       AddNewShell       AddNewThickness
+AddNewStiffener   AddNewCircPattern AddNewUserPattern AddNewLoft
+AddNewSplit       AddNewTrim        AddNewSolidCombine ... 외 69개
 ```
 
 ### 3.4.1 스케치 제약
@@ -187,6 +231,50 @@ part.update()
 
 미구현: 제약 삭제(`Constraints.Remove` 미검증). `concentric`은 서로 다른 원 두 개로 생성과
 `Part.Update()`까지 확인했다.
+
+### 3.4.2 모서리 필렛과 챔퍼
+
+면·모서리를 지목할 방법이 없어 막혀 있던 약 80개 feature 중 처음 두 개다. 이 둘 때문에
+새 참조 레이어(`geometry.edges`)가 생겼다.
+
+```python
+snapshot = part.part_design.snapshot_edges()   # 솔리드 전체 모서리, EdgeSnapshot
+fillet = part.part_design.create_edge_fillet("F1", snapshot[0], radius=3)
+part.update()
+
+chamfer = part.part_design.create_chamfer(
+    "C1", snapshot[1], length1=1.5, length2_or_angle=45,
+    propagation=0, orientation=0,
+)
+part.update()
+```
+
+세 가지 제약을 반드시 알아야 한다.
+
+- **`snapshot_edges()`는 솔리드 전체를 검색한다.** 한 feature의 모서리만 골라 검색
+  범위를 좁히는 방법이 없다(네 가지 경로를 시험했고 전부 막혔다). 필요한 모서리는
+  호출자가 `EdgeSnapshot`을 순회하며 스스로 걸러야 한다.
+- **모서리를 안정적으로 다시 지목할 방법이 없다.** `Edge.descriptor`는 BRep 이름 문자열을
+  주지만 저장했다가 나중에 다시 그 모서리로 되돌리는 경로가 전부 막혔고, 재빌드가 일어나면
+  모서리 개수와 순서(그리고 `Edge.index`)가 전부 바뀐다. 그래서 `snapshot_edges()`를 다시
+  부르는 것 외에는 답이 없다.
+- **모델이 바뀌면 이전 snapshot은 거부된다.** 같은 snapshot으로 필렛을 두 번 만들면
+  성공할 때도 실패할 때도 있고, 호출자는 어느 쪽인지 미리 알 수 없다. 그래서
+  `PartDesign`이 모델을 바꾸는 순간(즉 이 클래스의 다른 `create_*`/`remove_*`가 호출되는
+  순간) 기존 snapshot을 stale로 표시하고, 그 뒤로 쓰면 COM에 닿기 전에
+  `StaleSnapshotError`를 낸다. 새 작업 전에는 항상 새 `snapshot_edges()`를 부른다.
+
+그 외:
+
+- 챔퍼의 `mode`는 인자로 노출하지 않는다. 세 값 중 1만 생성과 update 모두 성공해서
+  내부에 고정했다(0은 update 실패, 2는 생성 자체가 실패). `propagation`/`orientation`은
+  정수 뜻이 문서화되어 있지 않아 검증된 값만 상수로 남겼다.
+- `ensure_edge_fillet`/`ensure_chamfer`는 없다. `ensure_pad`처럼 기존 feature의 소스를
+  비교하려면 안정적으로 다시 읽을 수 있는 핸들이 필요한데, 모서리에는 그런 핸들이 없다.
+  잘못된 모서리를 조용히 재사용하는 것보다 메서드가 없는 편이 낫다.
+- 필렛/챔퍼 모두 `create_*` 뒤 update가 실패하면 그 feature가 트리에 남고, **지우기 전까지
+  이후의 모든 `Part.Update()`가 실패한다.** `remove_edge_fillet(name)`/`remove_chamfer(name)`
+  으로 지운 뒤에 재시도해야 한다.
 
 ### 3.5 Formula
 
@@ -226,15 +314,16 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | `Update()` | 동작 |
 | **`Save()`** | **하지 않음** (아래 6) |
 | **feature rebuild 상태** | 동작 | `part.is_up_to_date(target=None)`. feature 변경 전후 false→true 검증. unsaved-change 감지는 아님 |
-| **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심·관성 상자 조회 |
+| **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심 조회. bounding box는 제공 안 함 |
 
 ### 3.7 손대지 않은 영역
 
 `Part`가 노출하지만 라이브러리가 쓰지 않는 것:
 
 ```text
-HybridShapeFactory     GSD surface geometry
-Bodies / HybridBodies  MainBody 외 body
+HybridShapeFactory     평면(AddNewPlaneOffset/AddNewPlaneAngle)과 그 축용 점/선만 사용.
+                       그 외 GSD surface geometry는 쓰지 않음
+Bodies / HybridBodies  MainBody 외 body. HybridBodies는 평면을 담는 기하 세트 하나(3.3.1)에만 사용
 Part.Constraints       어셈블리 구속 (스케치 구속은 3.4.1에서 지원)
 AxisSystems            축 시스템
 OrderedGeometricalSets / UserSurfaces / AnnotationSets
@@ -267,6 +356,7 @@ Catia.attach(com3dx_path=None) -> Catia
 .parameters      -> ParameterCollection
 .sketches        -> SketchCollection
 .part_design     -> PartDesign
+.planes          -> PlaneCollection   # offset/각도 평면
 .formulas        -> FormulaCollection
 .update()        # 실패 시 PartUpdateError
 .measurement     -> SolidMeasurement  # editor 기반 read-only 측정
@@ -329,7 +419,10 @@ len(...) / iter(...) / name in ...
 ```python
 part.sketches.count / .list() / .names() / .get(name)
              .create(name, support="XY")   -> Sketch
+             # support는 "XY"/"YZ"/"ZX" 문자열이거나
+             # part.planes가 만든 OffsetPlane/AnglePlane
              .ensure(name, support="XY")   -> Sketch
+             # ensure의 support는 원점 평면 문자열만 받는다 (아래)
              .remove(name)
 
 sketch.name / .rename(name) / .support() / .axis_data() / .element_names()
@@ -404,6 +497,44 @@ mirror.name
 pattern.com_object
 ```
 
+### PartDesign / 모서리 필렛 / 챔퍼
+
+```python
+part.part_design.snapshot_edges()  -> EdgeSnapshot   # 솔리드 전체, 모델이 바뀌면 stale
+                .edge_fillets / .chamfers
+                .get_edge_fillet(name) / .get_chamfer(name)
+                .create_edge_fillet(name, edge, radius, unit="mm",
+                                     propagation=EDGE_FILLET_PROPAGATION_VERIFIED)
+                .create_chamfer(name, edge, length1, length2_or_angle,
+                                 propagation, orientation, unit="mm")
+                .remove_edge_fillet(name) / .remove_chamfer(name)
+
+edge_snapshot[i] / len(edge_snapshot) / iter(edge_snapshot)  -> Edge
+edge.com_object / edge.index / edge.descriptor   # index/descriptor는 이 snapshot 안에서만 유효
+
+# ensure_edge_fillet / ensure_chamfer 없음. edge에는 재사용 가능 여부를
+# 안전하게 비교할 핸들이 없다.
+# propagation/orientation은 검증된 정수만 상수로 제공된다. mode는 노출하지 않는다
+# (내부에서 항상 1).
+```
+
+### PlaneCollection / OffsetPlane / AnglePlane
+
+```python
+part.planes.create_offset(name, support, offset, orientation=False) -> OffsetPlane
+           .create_angle(name, support, angle, axis_start, axis_end,
+                          orientation=False) -> AnglePlane
+           .remove(plane)                 # 평면 하나만
+           .remove_geometrical_set()      # 이 컬렉션이 만든 전부(축 점·선 포함)
+
+plane.com_object / plane.name / plane.base_display_name
+offset_plane.offset     # OffsetPlane 전용
+angle_plane.angle       # AnglePlane 전용
+
+# ensure_offset / ensure_angle 없음. support는 "XY"/"YZ"/"ZX" 또는
+# 이 컬렉션이 이미 만든 Plane.
+```
+
 ### Sketch 축 지정
 
 ```python
@@ -446,7 +577,8 @@ SketchNotFoundError        이름으로 스케치를 못 찾음
 SketchAlreadyExistsError   이미 있는 이름으로 생성 시도
 SketchSupportMismatchError 같은 이름인데 다른 평면
 FeatureNotFoundError       이름으로 feature를 못 찾음
-FeatureConflictError       같은 이름인데 다른 스케치 기반
+FeatureConflictError       같은 이름인데 다른 스케치 기반, 또는 패턴 방향이 같은 축
+StaleSnapshotError     모델이 바뀐 뒤 옛 EdgeSnapshot의 Edge를 사용
 UnsupportedSupportError    "XY"/"YZ"/"ZX" 외의 평면 문자열
 FormulaNotFoundError       이름으로 formula를 못 찾음
 FormulaAlreadyExistsError  이미 있는 이름으로 생성 시도
@@ -508,14 +640,19 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 ## 7. 확장 순서 제안
 
-1. **모서리 선택 레이어** — `Selection.Search('Topology.Edge,all')`은 열렸지만 모델 재빌드
-   뒤에도 같은 모서리를 재선택하는 안전한 selector가 아직 없다. probe 31 실측에서
-   변경 전 반복 검색은 안정적이었지만 Pad 높이 update 뒤 edge 수가 20→29로 바뀌고
-   BRep name multiset과 검색 순서가 모두 달라졌다. raw 이름과 index는 selector로 쓸 수
-   없고, `MeasurableService` 경로도 edge 길이를 노출하지 않았다.
-2. **Chamfer 인자 확정** — Edge Reference는 확보했지만 mode/orientation 정수의 뜻이 미확정이다.
-3. **사용자 정의 평면** — offset plane 스케치는 되지만 Pad와의 결합이 막혀 있다.
-4. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로 검증해야 한다.
+완료: 모서리 선택 레이어(`snapshot_edges`/`EdgeSnapshot`), Chamfer 인자 확정
+(mode=1 고정), 사용자 정의 offset/각도 평면(스케치 + Pad까지 검증). 이제 남은 순서는
+다음과 같다.
+
+1. **면 참조 레이어** — 모서리와 같은 `Selection.Search('Topology.Face,all')` +
+   `SelectedElement.Reference` 경로가 Shell/Thickness/Draft/Hole 같은 face-taking
+   factory에도 통하는지 아직 시험하지 않았다. 통한다면 이 네 개가 다음 후보다.
+2. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
+   검증해야 한다. 지금 기준으로는 미검증이며 구현하지 않는다.
+3. **모서리 재선택 selector** — 지금은 재빌드마다 `snapshot_edges()`를 새로 불러야
+   한다. BRep 이름 재해석, 재빌드 후 이름/순서 보존, 측정 기반 선택, feature 단위
+   검색 범위 한정 네 가지 경로를 모두 시험했고 전부 막혔다(`geometry.edges`). 새로운
+   돌파구가 없으면 이 항목은 열린 채로 남는다.
 
 각 항목은 probe로 실제 동작을 확인한 뒤 라이브러리에 올린다. 기존 probe가 그 절차의
 예시다.

@@ -136,7 +136,7 @@ probe 34·35에서 나머지가 풀렸다.
 전부 실패했다(둘은 생성, 하나는 update). 새 snapshot은 성공한다.
 
 **되는지 안 되는지 예측할 수 없으므로** 라이브러리가 막는다. `PartDesign`이 모델을 바꾸면
-기존 edge snapshot이 stale이 되고, 이후 사용은 COM 전에 `StaleEdgeSnapshotError`가 된다.
+기존 edge snapshot이 stale이 되고, 이후 사용은 COM 전에 `StaleSnapshotError`가 된다.
 
 chamfer 인자도 확정했다. `iMode=1`만 동작한다(0은 update 실패, 2는 생성 실패). propagation과
 orientation은 0·1 모두 통과한다.
