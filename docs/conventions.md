@@ -286,6 +286,103 @@ Shapes.Count / Item(i)              OK   (Item(i).Name 읽기 가능)
 GeometricElements.Count / Item(i)   OK   (Item(1).Name == 'AbsoluteAxis')
 ```
 
+### 1.2.1 Pocket과 Formula (실측, `scripts/probes/16_pocket_and_formula.py`)
+
+```text
+ShapeFactory.AddNewPocket(iSketch, iHeight)                  -> Pocket
+Relations.CreateFormula(iName, iComment, iOutputParameter, iFormulaBody) -> Formula
+Relations.Count / Item(i) / Remove(i) / GetItem(name)
+Parameters.GetNameToUseInRelation(iObject)                   -> str
+```
+
+**Pocket은 Pad의 구조적 쌍둥이다.** 읽기 가능 속성이 완전히 같다.
+
+```text
+Application, DirectionOrientation, DirectionType, FirstLimit, IsSymmetric,
+IsThin, MergeEnd, Name, NeutralFiber, Parent, SecondLimit, Sketch
+FirstLimit.Dimension.Value == AddNewPocket에 넘긴 깊이 (실측 5.0)
+Name 쓰기 가능
+```
+
+따라서 Pad wrapper를 공통 기반으로 일반화하고 Pocket은 그 위에 얹는다.
+
+**수식에 쓸 이름은 `Parameter.name`과 다르다.** 반드시
+`Parameters.GetNameToUseInRelation(obj)`로 얻는다.
+
+```text
+사용자 파라미터
+  Parameter.name           = '3D Shape00422534\AUTO3DX_THICKNESS'
+  GetNameToUseInRelation() = 'AUTO3DX_THICKNESS'              <- 접두어 없음
+
+feature 내부 파라미터 (pad 높이)
+  GetNameToUseInRelation() = 'PartBody\AUTO3DX_BASE_PAD\FirstLimit\Length'
+```
+
+`.name`으로 수식 문자열을 조립하면 깨진다.
+
+**formula는 실제로 모델을 구동한다** (실측).
+
+```text
+CreateFormula('F', 'comment', <pad FirstLimit Dimension>, 'AUTO3DX_THICKNESS * 2')
+  driver 12.0 -> Part.Update() -> pad.height 24.0
+  driver 20.0 -> Part.Update() -> pad.height 40.0
+```
+
+`Formula`가 읽어주는 것:
+
+```text
+Value          수식 본문 문자열 ('AUTO3DX_THICKNESS * 2')
+Activated      True
+Comment        생성 시 넘긴 주석
+NbInParameters 1
+Name, Hidden, IsConst, Context, NbOutParameters
+쓰기 가능: Comment, Hidden, IsConst, Name
+메서드: Activate, Deactivate, Modify(iValue), Rename(iName),
+        GetInParameter(i), GetOutParameter(i)
+```
+
+`Relations.Remove(index)`로 제거된다 (1-based). 제거 후 `Count`가 정상적으로 줄고
+`Part.Update()`도 성공한다.
+
+**formula를 제거해도 마지막으로 계산된 값은 되돌아가지 않는다** (실측). 대상 파라미터에는
+그 값이 그대로 남으므로, 원래 값으로 복원하려면 제거 후 직접 써 줘야 한다.
+
+```text
+pad height 12.0 -> formula 'THICKNESS * 3' 적용 -> 30.0
+  -> formula 제거 -> pad height 30.0  (12.0으로 돌아가지 않음)
+```
+
+**Pocket을 제거해도 그 스케치는 함께 지워지지 않는다** (실측). Pad 제거는 스케치까지
+연쇄 삭제되지만(1.2 참조) Pocket은 그렇지 않다. 정리할 때는 스케치를 따로 지워야 한다.
+
+```text
+Pad 제거    : Shapes 1->0, Sketches 1->0   (연쇄됨)
+Pocket 제거 : Shapes 1->0, Sketches 그대로  (연쇄 안 됨)
+```
+
+### 1.2.2 아직 참조 레이어가 없어 막힌 Part Design 기능
+
+`ShapeFactory`는 `AddNew*`를 90개 노출한다. 스케치만 받는 것은 지금 구현할 수 있지만,
+면·모서리를 받는 것은 그 대상을 지목할 방법이 없어 불가능하다.
+
+```text
+구현 가능 (스케치만)      AddNewPad, AddNewPocket, AddNewShaft, AddNewGroove,
+                          AddNewStiffener
+스케치 2개                AddNewRib(iSketch, iCenterCurve), AddNewSlot(...)
+면/모서리 참조 필요        AddNewChamfer(iObjectToChamfer, ...)
+                          AddNewEdgeFilletWithConstantRadius(iEdgeToFillet, ...)
+                          AddNewShell(iFaceToRemove, ...)
+                          AddNewThickness(iFaceToThicken, ...)
+                          AddNewDraft(iFaceToDraft, ...)
+                          AddNewHole(iSupport, iDepth)
+feature + 방향 참조 필요   AddNewMirror(iMirroringElement)
+                          AddNewRectPattern(인자 12개), AddNewCircPattern(12개)
+```
+
+면·모서리 참조는 `Part.CreateReferenceFromObject` / BRep 이름이 필요한데, BRep 이름은
+모델이 바뀌면 깨지므로 별도 설계가 필요하다. **참조 레이어가 생기기 전까지 이 기능들은
+구현하지 않는다.**
+
 ### 1.3 `ensure_*` 정책 (형상)
 
 이름만 같다고 형상을 재사용하면 안 된다. 아래 비교는 모두 실측으로 읽을 수 있는 값이다.
@@ -711,6 +808,112 @@ FeatureNotFoundError(Auto3dxError)
 FeatureConflictError(Auto3dxError)
 UnsupportedSupportError(Auto3dxError)
 ```
+
+### 6.11 `auto_3dx/geometry/part_design.py` 확장 (Pocket)
+
+Pad와 Pocket은 COM 구조가 같으므로 공통 기반으로 일반화한다.
+
+```python
+PAD_KIND: str = "Pad"
+POCKET_KIND: str = "Pocket"
+
+class SketchFeature:
+    """Pad/Pocket 공통. FirstLimit.Dimension.Value를 depth로 읽고 쓴다."""
+    def __init__(self, com_object: Any) -> None: ...
+    @property
+    def com_object(self) -> Any: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def depth(self) -> float: ...            # FirstLimit.Dimension.Value
+    def set_depth(self, depth: float, unit: str = MILLIMETRE) -> None: ...
+    def sketch(self) -> Sketch: ...
+    def depth_parameter(self) -> Parameter: ...   # FirstLimit.Dimension, formula 대상
+    def __repr__(self) -> str: ...
+
+class Pad(SketchFeature):
+    @property
+    def height(self) -> float: ...           # depth의 별칭 (기존 API 유지)
+    def set_height(self, height, unit=MILLIMETRE) -> None: ...
+
+class Pocket(SketchFeature): ...
+```
+
+`PartDesign`은 Pad와 Pocket에 대해 대칭적인 메서드를 갖는다.
+
+```python
+.pads     -> list[Pad]          .pockets   -> list[Pocket]
+.get_pad(name)                  .get_pocket(name)
+.create_pad(name, sketch, height, unit=MILLIMETRE)
+.create_pocket(name, sketch, depth, unit=MILLIMETRE)
+.ensure_pad(...)                .ensure_pocket(...)
+.remove_pad(name)               .remove_pocket(name)
+```
+
+`ensure_pocket`의 정책은 `ensure_pad`와 동일하다 (1.3 참조). 기존 `Pad` 공개 signature
+(`height`, `set_height`, `create_pad`, `ensure_pad`, `get_pad`, `pads`, `remove_pad`)는
+바꾸지 않는다.
+
+### 6.12 `auto_3dx/formulas/`
+
+```python
+# formulas/formula.py
+class Formula:
+    def __init__(self, com_object: Any) -> None: ...
+    @property
+    def com_object(self) -> Any: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def body(self) -> str: ...               # Formula.Value = 수식 본문
+    @property
+    def comment(self) -> str: ...
+    @property
+    def activated(self) -> bool: ...
+    @property
+    def input_count(self) -> int: ...        # NbInParameters
+    def modify(self, body: str) -> None: ...
+    def rename(self, name: str) -> None: ...
+    def activate(self) -> None: ...
+    def deactivate(self) -> None: ...
+    def __repr__(self) -> str: ...
+
+# formulas/collection.py
+class FormulaCollection:
+    def __init__(self, part_com_object: Any) -> None: ...   # Part.Relations + Part.Parameters
+    @property
+    def count(self) -> int: ...
+    def list(self) -> list[Formula]: ...
+    def names(self) -> "list[str]": ...
+    def get(self, name: str) -> Formula: ...
+    def relation_name(self, parameter: Parameter) -> str: ...
+    def create(self, name: str, target: Parameter, body: str,
+               comment: str = "") -> Formula: ...
+    def ensure(self, name: str, target: Parameter, body: str,
+               comment: str = "") -> Formula: ...
+    def remove(self, name: str) -> None: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[Formula]: ...
+    def __contains__(self, name: object) -> bool: ...
+```
+
+`Part`가 `part.formulas -> FormulaCollection`을 추가로 노출한다 (최초 접근 시 캐시).
+
+`relation_name()`은 `Parameters.GetNameToUseInRelation`을 감싼다. **수식 본문을 만들 때
+`Parameter.name`을 쓰면 안 되고 이것을 써야 한다.** 1.2.1의 실측 참조.
+
+`ensure` 정책:
+
+```text
+이름 2개 이상            -> AmbiguousNameError
+이름 없음                -> 생성
+이름 있음 + 본문 같음     -> 그대로 재사용
+이름 있음 + 본문 다름     -> Modify(body)로 갱신
+```
+
+`create`/`ensure`/`modify`는 `Part.Update()`를 호출하지 않는다.
+
+추가 예외: `FormulaNotFoundError(Auto3dxError)`, `FormulaAlreadyExistsError(Auto3dxError)`.
 
 ### 6.7 `auto_3dx/__init__.py`
 

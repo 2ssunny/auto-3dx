@@ -132,6 +132,20 @@ class Parameters:
                 return obj
         raise make_com_error()
 
+    def GetNameToUseInRelation(self, iObject: Any) -> str:
+        """Returns the name a formula body must use to reference a parameter.
+
+        This is NOT `Parameter.Name`. Verified against a live session: the
+        container prefix is dropped, so `'3D Shape1\\WIDTH'` becomes `'WIDTH'`
+        and `'3D Shape1\\PartBody\\Pad.1\\FirstLimit\\Length'` becomes
+        `'PartBody\\Pad.1\\FirstLimit\\Length'`. Building a body from `.Name`
+        instead produces a broken formula.
+        """
+        name = getattr(iObject, "Name", "")
+        if "\\" not in name:
+            return name
+        return name.split("\\", 1)[1]
+
     @property
     def RootParameterSet(self) -> "RootParameterSet":
         """Exposes only the explicitly created parameters, as the real one does.
@@ -206,9 +220,11 @@ class Part:
         origin_elements: Any = None,
         main_body: Any = None,
         shape_factory: Any = None,
+        relations: Any = None,
     ) -> None:
         self.Name = name
         self._parameters = parameters
+        self.Relations = relations if relations is not None else Relations()
         self.parameters_access_count = 0
         self.update_calls = 0
         self.update_exception: BaseException | None = None
@@ -686,6 +702,121 @@ class Pad:
         self._name = value
 
 
+class Pocket:
+    """Fake CATIA `Pocket`, as returned by `ShapeFactory.AddNewPocket`.
+
+    Verified structural twin of `Pad`: the same readable properties, the same
+    writable `Name`, and `FirstLimit.Dimension.Value` carrying the depth
+    (docs/conventions.md 1.2.1).
+    """
+
+    def __init__(
+        self,
+        name: str = "Pocket.1",
+        sketch: Any = None,
+        depth: float = 0.0,
+        name_write_exception: BaseException | None = None,
+    ) -> None:
+        self._name = name
+        self.name_write_exception = name_write_exception
+        self.Sketch = sketch
+        self.FirstLimit = Limit(depth)
+        self.SecondLimit = Limit(0.0)
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        if self.name_write_exception is not None:
+            raise self.name_write_exception
+        self._name = value
+
+
+class Formula:
+    """Fake CATIA `Formula`, as returned by `Relations.CreateFormula`.
+
+    `Value` is the formula BODY text, not a number -- verified: a formula made
+    with body ``'AUTO3DX_THICKNESS * 2'`` reports exactly that string.
+    """
+
+    def __init__(
+        self,
+        name: str = "Formula.1",
+        comment: str = "",
+        target: Any = None,
+        body: str = "",
+    ) -> None:
+        self.Name = name
+        self.Comment = comment
+        self.Value = body
+        self.Activated = True
+        self.Hidden = False
+        self.IsConst = False
+        self.NbInParameters = 1
+        self.NbOutParameters = 1
+        self._target = target
+        self.modify_calls: list[str] = []
+
+    def Modify(self, iValue: str) -> None:
+        self.modify_calls.append(iValue)
+        self.Value = iValue
+
+    def Rename(self, iName: str) -> None:
+        self.Name = iName
+
+    def Activate(self) -> None:
+        self.Activated = True
+
+    def Deactivate(self) -> None:
+        self.Activated = False
+
+
+class Relations:
+    """Fake CATIA `Relations` collection (1-based `Item`/`Remove`).
+
+    `CreateFormula` records its arguments so tests can assert the exact call,
+    and appends the formula so enumeration finds it afterwards.
+    """
+
+    def __init__(self, items: list[Any] | None = None) -> None:
+        self._items: list[Any] = list(items or [])
+        self.create_calls: list[tuple[str, str, Any, str]] = []
+        self.remove_calls: list[int] = []
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def Item(self, index: int) -> Any:
+        position = index - 1
+        if 0 <= position < len(self._items):
+            return self._items[position]
+        raise make_com_error()
+
+    def Remove(self, index: int) -> None:
+        self.remove_calls.append(index)
+        position = index - 1
+        if not 0 <= position < len(self._items):
+            raise make_com_error()
+        del self._items[position]
+
+    def CreateFormula(
+        self,
+        iName: str,
+        iComment: str,
+        iOutputParameter: Any,
+        iFormulaBody: str,
+    ) -> Formula:
+        self.create_calls.append((iName, iComment, iOutputParameter, iFormulaBody))
+        formula = Formula(
+            name=iName, comment=iComment, target=iOutputParameter, body=iFormulaBody
+        )
+        self._items.append(formula)
+        return formula
+
+
 class Shapes:
     """Fake CATIA `Shapes` collection (1-based `Item`, `Count`), holding Pads."""
 
@@ -737,9 +868,13 @@ class ShapeFactory:
         self,
         shapes: Any = None,
         pad_name_write_exception: BaseException | None = None,
+        pocket_name_write_exception: BaseException | None = None,
     ) -> None:
         self.add_new_pad_calls: list[tuple[Any, float]] = []
+        self.add_new_pocket_calls: list[tuple[Any, float]] = []
         self._pad_count = 0
+        self._pocket_count = 0
+        self.pocket_name_write_exception = pocket_name_write_exception
         # The real AddNewPad registers the pad in the body's Shapes collection,
         # which is how `PartDesign.get_pad` finds it afterwards.
         self.shapes = shapes
@@ -757,6 +892,19 @@ class ShapeFactory:
         if self.shapes is not None:
             self.shapes._append(pad)
         return pad
+
+    def AddNewPocket(self, iSketch: Any, iHeight: float) -> Pocket:
+        self.add_new_pocket_calls.append((iSketch, iHeight))
+        self._pocket_count += 1
+        pocket = Pocket(
+            name=f"Pocket.{self._pocket_count}",
+            sketch=iSketch,
+            depth=iHeight,
+            name_write_exception=self.pocket_name_write_exception,
+        )
+        if self.shapes is not None:
+            self.shapes._append(pocket)
+        return pocket
 
 
 @pytest.fixture
@@ -829,3 +977,21 @@ def shape_factory_factory() -> Callable[..., ShapeFactory]:
 def selection_factory() -> Callable[..., Selection]:
     """Returns a factory for fake `Selection` objects."""
     return Selection
+
+
+@pytest.fixture
+def pocket_factory() -> Callable[..., Pocket]:
+    """Returns a factory for fake `Pocket` objects."""
+    return Pocket
+
+
+@pytest.fixture
+def formula_factory() -> Callable[..., Formula]:
+    """Returns a factory for fake `Formula` objects."""
+    return Formula
+
+
+@pytest.fixture
+def relations_factory() -> Callable[..., Relations]:
+    """Returns a factory for fake `Relations` collections."""
+    return Relations

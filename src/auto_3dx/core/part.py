@@ -11,6 +11,7 @@ from typing import Any
 import pywintypes
 
 from auto_3dx.errors import Auto3dxError, PartUpdateError
+from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.parameters.collection import ParameterCollection
@@ -57,6 +58,7 @@ class Part:
         self._parameters: ParameterCollection | None = None
         self._sketches: SketchCollection | None = None
         self._part_design: PartDesign | None = None
+        self._formulas: FormulaCollection | None = None
 
     @property
     def com_object(self) -> Any:
@@ -121,6 +123,18 @@ class Part:
         if self._part_design is None:
             self._part_design = PartDesign(self._com_object, self._selection)
         return self._part_design
+
+    @property
+    def formulas(self) -> FormulaCollection:
+        """FormulaCollection: The Part's formulas (`Relations`).
+
+        Built on first access and cached afterwards. The collection is given
+        the raw `Part` object because it needs both `Relations` (the formulas)
+        and `Parameters` (for `GetNameToUseInRelation`).
+        """
+        if self._formulas is None:
+            self._formulas = FormulaCollection(self._com_object)
+        return self._formulas
 
     def update(self) -> None:
         """Recompute the Part by calling ``Part.Update()``.

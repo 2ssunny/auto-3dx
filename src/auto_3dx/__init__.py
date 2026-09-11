@@ -9,6 +9,8 @@ from auto_3dx.errors import (
     Com3dxNotFoundError,
     FeatureConflictError,
     FeatureNotFoundError,
+    FormulaAlreadyExistsError,
+    FormulaNotFoundError,
     NoActiveEditorError,
     NoActivePartError,
     ParameterAlreadyExistsError,
@@ -23,7 +25,9 @@ from auto_3dx.errors import (
     UnsupportedSupportError,
     UnsupportedUnitError,
 )
-from auto_3dx.geometry.part_design import Pad, PartDesign
+from auto_3dx.formulas.collection import FormulaCollection
+from auto_3dx.formulas.formula import Formula
+from auto_3dx.geometry.part_design import Pad, PartDesign, Pocket, SketchFeature
 from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
 from auto_3dx.parameters.collection import ParameterCollection
 from auto_3dx.parameters.parameter import Parameter, ParameterInfo
@@ -34,8 +38,12 @@ __all__ = [
     "Parameter",
     "ParameterCollection",
     "ParameterInfo",
+    "Formula",
+    "FormulaCollection",
     "Pad",
     "PartDesign",
+    "Pocket",
+    "SketchFeature",
     "Sketch",
     "SketchCollection",
     "SketchEditor",
@@ -45,6 +53,8 @@ __all__ = [
     "Com3dxNotFoundError",
     "FeatureConflictError",
     "FeatureNotFoundError",
+    "FormulaAlreadyExistsError",
+    "FormulaNotFoundError",
     "NoActiveEditorError",
     "NoActivePartError",
     "ParameterAlreadyExistsError",

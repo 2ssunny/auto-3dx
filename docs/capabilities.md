@@ -5,7 +5,7 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 마지막 검증: 146 unit + 3 live integration 통과
+- 마지막 검증: 171 unit + 4 live integration 통과
 
 ---
 
@@ -23,7 +23,8 @@
    |
 [auto-3dx]  attach -> 파라미터 생성/수정
                    -> 스케치 생성 -> 프로파일 그리기
-                   -> 패드 생성
+                   -> 패드 / 포켓 생성
+                   -> formula로 치수 연동
                    -> update
    |
 [사람]  결과 확인 후 직접 저장                 <- 자동화 안 함 (아래 6)
@@ -100,18 +101,26 @@ part.update()
 
 | 기능 | 상태 | 비고 |
 |---|---|---|
-| 패드 생성 | 동작 | 스케치 + 높이 |
-| 패드 ensure | 동작 | 같은 스케치면 높이만 갱신, 다른 스케치면 거부 |
+| 패드 생성 / ensure / 삭제 | 동작 | 스케치 + 높이 |
 | 패드 높이 읽기/쓰기 | 동작 | `FirstLimit.Dimension.Value` |
-| 패드 목록 / 이름 조회 | 동작 | |
-| 패드 삭제 | 동작 | 스케치까지 연쇄 삭제됨 |
+| **포켓 생성 / ensure / 삭제** | 동작 | 스케치 + 깊이. 패드와 구조 동일 |
+| 포켓 깊이 읽기/쓰기 | 동작 | |
+| 목록 / 이름 조회 | 동작 | `pads`, `pockets` 분리 |
+| formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` |
 | **그 외 전부** | **불가** | 아래 참고 |
 
-`ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`
-**1개**다. 미구현 예:
+삭제 시 주의 (실측으로 확인된 비대칭):
 
 ```text
-AddNewPocket      AddNewHole        AddNewShaft       AddNewGroove
+패드 삭제   -> 그 스케치까지 연쇄 삭제됨
+포켓 삭제   -> 스케치는 남는다. 따로 지워야 한다
+```
+
+`ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`와
+`AddNewPocket` **2개**다. 미구현 예:
+
+```text
+AddNewHole        AddNewShaft       AddNewGroove      AddNewStiffener
 AddNewChamfer     AddNewEdgeFillet* AddNewDraft       AddNewShell
 AddNewMirror      AddNewRectPattern AddNewCircPattern AddNewUserPattern
 AddNewRib         AddNewSlot        AddNewStiffener   AddNewLoft
@@ -119,7 +128,37 @@ AddNewThickness   AddNewSplit       AddNewTrim        AddNewSolidCombine
 ... 외 70여 개
 ```
 
-### 3.5 Part
+### 3.5 Formula
+
+| 기능 | 상태 | 비고 |
+|---|---|---|
+| 목록 / 이름 조회 | 동작 | |
+| 이름으로 조회 | 동작 | 같은 이름이 둘 이상이면 거부 |
+| 생성 | 동작 | 대상 파라미터 + 수식 본문 |
+| ensure | 동작 | 본문이 다르면 `Modify`로 갱신 |
+| 본문 / 주석 / 활성 상태 읽기 | 동작 | |
+| 본문 수정, 이름 변경, 활성/비활성 | 동작 | |
+| 삭제 | 동작 | |
+| 수식에 쓸 이름 얻기 | 동작 | `relation_name(parameter)` |
+| **Law / DesignTable / Check / Program** | **불가** | `Relations`에 있지만 미검증 |
+
+**수식 본문에는 `Parameter.name`을 쓰면 안 된다.** 반드시 `relation_name()`으로 얻는다.
+
+```python
+driver = part.parameters.get("THICKNESS")
+pad = part.part_design.get_pad("BASE_PAD")
+
+body = f"{part.formulas.relation_name(driver)} * 2"
+part.formulas.create("PAD_DRIVER", pad.depth_parameter(), body)
+part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
+```
+
+실측 확인: `driver 12 -> 패드 24mm`, `driver 20 -> 패드 40mm`.
+
+**formula를 지워도 마지막 계산값은 되돌아가지 않는다.** 대상 파라미터에 그대로 남으므로
+원래 값이 필요하면 직접 써 줘야 한다.
+
+### 3.6 Part
 
 | 기능 | 상태 |
 |---|---|
@@ -128,12 +167,11 @@ AddNewThickness   AddNewSplit       AddNewTrim        AddNewSolidCombine
 | **`Save()`** | **하지 않음** (아래 6) |
 | **update 성공 여부 검증** | **불가** | `IsUpToDate` 미검증 |
 
-### 3.6 손대지 않은 영역
+### 3.7 손대지 않은 영역
 
 `Part`가 노출하지만 라이브러리가 쓰지 않는 것:
 
 ```text
-Relations              Formula / Relation      (2번 항목, 아래 5.2)
 HybridShapeFactory     GSD surface geometry
 Bodies / HybridBodies  MainBody 외 body
 Constraints            스케치·어셈블리 구속
@@ -165,6 +203,7 @@ Catia.attach(com3dx_path=None) -> Catia
 .parameters      -> ParameterCollection
 .sketches        -> SketchCollection
 .part_design     -> PartDesign
+.formulas        -> FormulaCollection
 .update()        # 실패 시 PartUpdateError
 ```
 
@@ -214,16 +253,34 @@ with sketch.edit() as editor:
 
 `support`는 `"XY"`, `"YZ"`, `"ZX"` 중 하나다.
 
-### PartDesign / Pad
+### PartDesign / Pad / Pocket
 
 ```python
-part.part_design.pads                -> list[Pad]
-                .get_pad(name)       -> Pad
-                .create_pad(name, sketch, height, unit="mm") -> Pad
-                .ensure_pad(name, sketch, height, unit="mm") -> Pad
-                .remove_pad(name)
+part.part_design.pads     -> list[Pad]      .pockets -> list[Pocket]
+                .get_pad(name)              .get_pocket(name)
+                .create_pad(name, sketch, height, unit="mm")
+                .create_pocket(name, sketch, depth, unit="mm")
+                .ensure_pad(...)            .ensure_pocket(...)
+                .remove_pad(name)           .remove_pocket(name)
 
-pad.name / .height / .set_height(height, unit="mm") / .sketch()
+# Pad와 Pocket은 SketchFeature를 공유한다
+feature.name / .depth / .set_depth(depth, unit="mm") / .sketch()
+        .depth_parameter()   -> Parameter   # formula가 구동할 대상
+pad.height / pad.set_height(height, unit="mm")   # depth의 별칭
+```
+
+### FormulaCollection / Formula
+
+```python
+part.formulas.count / .list() / .names() / .get(name)
+             .relation_name(parameter)    -> str   # 수식 본문에 쓸 이름
+             .create(name, target, body, comment="") -> Formula
+             .ensure(name, target, body, comment="") -> Formula
+             .remove(name)
+len(...) / iter(...) / name in ...
+
+formula.name / .body / .comment / .activated / .input_count
+       .modify(body) / .rename(name) / .activate() / .deactivate()
 ```
 
 ### 예외
@@ -247,6 +304,8 @@ SketchSupportMismatchError 같은 이름인데 다른 평면
 FeatureNotFoundError       이름으로 feature를 못 찾음
 FeatureConflictError       같은 이름인데 다른 스케치 기반
 UnsupportedSupportError    "XY"/"YZ"/"ZX" 외의 평면 문자열
+FormulaNotFoundError       이름으로 formula를 못 찾음
+FormulaAlreadyExistsError  이미 있는 이름으로 생성 시도
 AmbiguousNameError         같은 이름이 둘 이상
 PartialCreationError       생성은 됐는데 이름 지정이 실패 (모델에 흔적 남음)
 ```
@@ -268,21 +327,11 @@ PLMNewService.PLMCreate('VPMReference')  ->  [Licensing] Operation not authorize
 
 따라서 Part 생성은 사람이 UI에서 한다.
 
-### 5.2 Formula / Relation — 미구현
+### 5.2 Relations 중 formula 외의 것 — 미구현
 
-`Part.Relations`를 아직 조사하지 않았다. 라이브러리에 formula API가 없다.
-
-CATIA UI에서는 언제든 f(x)로 만들 수 있고, 그렇게 만든 formula는 이 라이브러리가
-파라미터 값을 바꿀 때 정상적으로 재계산된다. 다만 **formula 자체를 코드로 만들거나
-읽는 기능은 없다.**
-
-연동 대상이 될 feature 내부 파라미터는 이미 접근 가능하다.
-
-```python
-part.parameters.get(r"3D Shape1\PartBody\Pad.1\FirstLimit\Length")
-```
-
-이 값은 `pad.height`와 같은 값이다 (실측 확인).
+`Relations`는 formula 말고도 `CreateLaw`, `CreateDesignTable`, `CreateCheck`,
+`CreateProgram`, `CreateRuleBase`, `CreateSetOfEquations`를 노출하지만 전부 미검증이다.
+formula만 구현되어 있다 (3.5 참조).
 
 ### 5.3 여러 Part 동시 작업 — 미지원
 
@@ -315,9 +364,13 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 ## 7. 확장 순서 제안
 
-1. **Pocket** — 패드와 구조가 같아 가장 쉽다 (`AddNewPocket(sketch, depth)`).
-2. **Formula** (`Part.Relations`) — 파라미터 연동. 대상 파라미터는 이미 읽힌다.
-3. **Hole / Fillet / Chamfer** — 기존 face·edge 참조가 필요해 난이도가 올라간다.
+1. **Shaft / Groove / Stiffener** — 패드·포켓처럼 스케치만 받는다
+   (`AddNewShaft(iSketch)`, `AddNewGroove(iSketch)`, `AddNewStiffener(iSketch)`).
+   바로 이어서 할 수 있다.
+2. **Rib / Slot** — 스케치 2개를 받는다 (`AddNewRib(iSketch, iCenterCurve)`).
+3. **참조 레이어** — `Part.CreateReferenceFromObject` / BRep 이름 조사. 이게 열려야
+   Hole, Fillet, Chamfer, Shell, Draft, Mirror, Pattern 등 **약 80개**가 한꺼번에
+   풀린다. BRep 이름은 모델이 바뀌면 깨지므로 별도 설계가 필요하다.
 4. **Length 외 파라미터 타입** — `CreateReal`, `CreateInteger` 등. signature는 확인됨.
 5. **단위 시스템** — `Parameters.Units` 1887개에서 magnitude별 단위를 읽을 수 있다.
 

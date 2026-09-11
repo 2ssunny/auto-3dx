@@ -109,3 +109,11 @@ class PartialCreationError(Auto3dxError):
     model even though the caller sees an error. Retrying naively would then
     add more geometry on top of the leftover object instead of replacing it.
     """
+
+
+class FormulaNotFoundError(Auto3dxError):
+    """Raised when a formula cannot be found by name in a Relations collection."""
+
+
+class FormulaAlreadyExistsError(Auto3dxError):
+    """Raised when creating a formula whose name is already taken."""
