@@ -463,7 +463,7 @@ OpenEdition()~CloseEdition() 사이        -> 동작
 
 **미검증:** `Constraints.Remove(i)`는 호출해 보지 않았다. 제약 삭제는 구현하지 않는다.
 
-### 1.2.7 사용자 정의 평면 (부분 검증, probe 29)
+### 1.2.7 사용자 정의 평면 (실측, probes 29·33·36)
 
 지금은 원점 평면 3개(XY/YZ/ZX)에만 스케치를 만들 수 있다. offset 평면까지는 길이 났다.
 
@@ -483,12 +483,33 @@ Sketches.Add(raw hybrid shape) -> Sketch        (Reference로 감쌀 필요 없�
 그 스케치에 사각형 + Part.Update()              -> 성공
 ```
 
-**미검증(구현하지 않는다):**
+**pad가 실패하던 원인은 평면이 아니라 in-work object였다 (probe 36).**
 
 ```text
-그 스케치에 pad          -> AddNewPad 실패 (0x80020009). 원인 미파악
-AddNewPlaneAngle(...)    -> 생성은 되지만 Part.Update() 실패
+HybridBodies.Add()  -> 새 기하 세트가 Part의 in-work object가 된다
+pad는 기하 세트에 들어갈 수 없으므로 AddNewPad가 거부된다
+Part.InWorkObject = MainBody 로 되돌리면 통과한다
 ```
+
+기하 세트에 무언가 추가할 때마다 in-work object가 다시 바뀌므로, **`AppendHybridShape` 뒤에는
+매번 body를 되찾아야 한다.** 이걸 놓치면 평면과 무관한 지점에서 COM 오류가 난다.
+
+**각도 평면은 회전축이 주소 지정 가능한 3D 선이어야 한다 (probe 36).**
+
+```text
+회전축 = 스케치 안의 Line2D  -> 생성은 되나 update 실패 (probe 29)
+회전축 = 원점 평면           -> 생성은 되나 update 실패
+회전축 = AddNewLinePtPt(점, 점) -> 생성 + update 성공 -> 검증됨
+```
+
+```text
+AddNewPointCoord(iX, iY, iZ)                            -> HybridShapePointCoord
+AddNewLinePtPt(iPtOrigine, iPtExtremite)                -> HybridShapeLinePtPt
+AddNewPlaneAngle(iPlane, iRevolAxis, iAngle, iOrientation) -> HybridShapePlaneAngle
+```
+
+이제 **offset 평면과 각도 평면 모두** 평면 -> 스케치 -> pad 전 단계에서 update가 성공한다.
+되읽기는 `Offset.Value`, `Angle.Value`, `Plane.DisplayName`이 동작한다.
 
 `iOrientation`은 `VT_BOOL`로 넘기는데 되읽기는 `VT_I4` 정수다. 대응 관계가 문서에 없으므로
 `False == 0`이라고 가정하면 안 된다.

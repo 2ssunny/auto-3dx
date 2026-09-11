@@ -14,7 +14,7 @@
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
 - 테스트: **414 unit + 27 integration 통과**
-- probe: `scripts/probes/`에 35개 존재
+- probe: `scripts/probes/`에 36개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -181,8 +181,8 @@ COM은 이전 파트를 가리킴). 엉뚱한 파트를 조용히 편집할 수 
 
 남은 제약:
 
-- 스케치 평면: 원점 3개(XY/YZ/ZX)만. offset 평면은 스케치까지 되고 pad가 실패한다
-  (probe 29, conventions 1.2.7). 각도 평면은 update 실패.
+- 스케치 평면: 라이브러리 API는 아직 원점 3개(XY/YZ/ZX)만 받는다. offset 평면과 각도 평면은
+  probe 36에서 pad까지 전부 검증됐으므로 API로 올리는 일만 남았다 (conventions 1.2.7).
 - 프로파일: 호·스플라인·점까지 probe 27에서 검증됐다. 곡선 프로파일도 pad 된다.
 
 ### 2.6 update 상태와 결과 검증 — rebuild 상태 + 측정으로 해결
@@ -249,6 +249,8 @@ CATIA가 **조용히 넘어가는데 모델을 망가뜨리는** 동작들이다
 | 9 | `GetInertiaBoxElement` | **세션에 따라 조용히 전부 0을 반환한다.** 같은 모델·같은 호출에서 한 세션은 실제 값, 다른 세션은 0. 게다가 축 정렬이 아니라 주관성축 정렬이다 | 공개 API에서 제외. 부피·무게중심으로 판단 |
 | 10 | `Selection.Search('Face,all')` | COM 오류. 올바른 쿼리는 `'Topology.Face,all'` | 검증된 쿼리 문자열만 쓴다 |
 | 11 | 측정값 단위 | 전부 **SI(m, m3)**. 나머지 API는 mm | 경계에서 환산. 이름에 단위를 박아 혼동을 막는다 |
+| 12 | `HybridBodies.Add()` | **새 기하 세트가 in-work object가 된다.** pad는 기하 세트에 들어갈 수 없어 이후 `AddNewPad`가 평면과 무관한 COM 오류로 거부된다 | `AppendHybridShape` 뒤마다 `InWorkObject = MainBody`로 되찾는다 |
+| 13 | update 실패의 전파 | **한 번 실패한 feature를 지우기 전까지 이후 update가 전부 실패한다.** 무관한 연쇄 실패로 보인다 | `create_*` 뒤 update가 실패하면 반드시 그 feature를 지운다 |
 
 추가로, 코드 쪽에서 잡힌 것들:
 
@@ -328,7 +330,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 |---|---|---|---|
 | 1 | **모서리 fillet·chamfer API** | 중간 | 두 feature 모두 검증됐다 (2.2). durable selector가 없다는 한계를 드러내는 설계가 핵심 |
 | 2 | chamfer 인자 확정 | 완료 | `iMode=1`만 동작한다 (probe 35) |
-| 3 | 사용자 정의 평면 | 중간 | offset 평면은 스케치까지 됐고 pad가 실패한다 (2.5, conventions 1.2.7) |
+| 3 | 사용자 정의 평면 API | 중간 | offset·각도 평면 모두 pad까지 검증됐다 (probe 36, conventions 1.2.7) |
 | 4 | `IsUpToDate` 의미 확인 | 완료 | `Part.is_up_to_date()` 구현 및 live false→true 전이 검증 (2.6) |
 | 5 | 측정 기반 검증 | 완료 | `Part.measurement` 구현 및 live integration 완료 (2.6) |
 | 6 | 스레드 안전성 | 중간 | 미검증 (2.7) |
