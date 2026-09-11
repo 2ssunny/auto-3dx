@@ -2,11 +2,12 @@
 
 Exposes `Sketch`/`SketchCollection` (2D profiles on origin planes),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
-`PartDesign` (extruded, pocketed, revolved, and mirrored solid features), and
-`Constraint`/`ConstraintCollection` (sketch constraints, created only through
-`SketchEditor` inside `Sketch.edit()`), matching the verified COM surface
-documented in `docs/conventions.md` sections 1.2/1.2.1/1.2.3/1.2.4/1.3 and the
-public API contract in sections 6.9/6.10/6.11/6.13/6.14.
+`Rib`/`Slot`/`PartDesign` (extruded, pocketed, revolved, mirrored, ribbed,
+and slotted solid features), and `Constraint`/`ConstraintCollection` (sketch
+constraints, created only through `SketchEditor` inside `Sketch.edit()`),
+matching the verified COM surface documented in `docs/conventions.md`
+sections 1.2/1.2.1/1.2.3/1.2.4/1.2.5/1.3 and the public API contract in
+sections 6.9/6.10/6.11/6.13/6.14/6.16.
 """
 
 from auto_3dx.geometry.constraint import (
@@ -29,15 +30,19 @@ from auto_3dx.geometry.part_design import (
     MIRROR_KIND,
     PAD_KIND,
     POCKET_KIND,
+    RIB_KIND,
     SHAFT_KIND,
+    SLOT_KIND,
     Groove,
     Mirror,
     Pad,
     PartDesign,
     Pocket,
     RevolvedFeature,
+    Rib,
     Shaft,
     SketchFeature,
+    Slot,
 )
 from auto_3dx.geometry.sketch import (
     AXIS_TOLERANCE,
@@ -65,6 +70,8 @@ __all__ = [
     "SHAFT_KIND",
     "GROOVE_KIND",
     "MIRROR_KIND",
+    "RIB_KIND",
+    "SLOT_KIND",
     "FULL_REVOLUTION",
     "SketchFeature",
     "Pad",
@@ -73,6 +80,8 @@ __all__ = [
     "Shaft",
     "Groove",
     "Mirror",
+    "Rib",
+    "Slot",
     "PartDesign",
     "CONSTRAINT_HORIZONTAL",
     "CONSTRAINT_VERTICAL",

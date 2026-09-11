@@ -1,4 +1,5 @@
-"""Wrappers around CATIA `Pad`/`Pocket`/`Shaft`/`Groove`/`Mirror` Part Design features.
+"""Wrappers around CATIA `Pad`/`Pocket`/`Shaft`/`Groove`/`Mirror`/`Rib`/`Slot` Part
+Design features.
 
 A `Pad` extrudes a `Sketch` profile along its normal by a fixed height. A
 `Pocket` removes material along the same profile by a fixed depth. Verified
@@ -15,9 +16,19 @@ section 1.2.3): each revolves a `Sketch` profile around the axis set on that
 sketch's `CenterLine`, adding material for a `Shaft` and removing it for a
 `Groove`, and both expose `FirstAngle`/`SecondAngle` instead of `FirstLimit`.
 That symmetry is factored into a shared `RevolvedFeature` base, the same way
-`SketchFeature` is shared by `Pad`/`Pocket`. `Mirror` stands apart: it takes a
-plane rather than a sketch, so it carries no `sketch()` accessor and no
-common base with the other four.
+`SketchFeature` is shared by `Pad`/`Pocket`.
+
+`Mirror`, `Rib`, and `Slot` (`docs/conventions.md` sections 1.2.3/1.2.5/6.16)
+are neither depth- nor angle-driven, so none of them derives from
+`SketchFeature` or `RevolvedFeature`. `Mirror` takes a plane rather than a
+sketch and carries no `sketch()`/`profile()` accessor at all. `Rib` and
+`Slot` each take two sketches (a profile and a path/center-curve) and are
+otherwise identical -- a Rib adds material along the path, a Slot removes
+it -- but both can only read the profile back (`Sketch`); there is no
+verified way to read the path sketch for either. All three still reduce to
+nothing more than `com_object`/`Name`/`__repr__`, so rather than writing that
+boilerplate a third and fourth time it is factored into a shared
+`_NamedFeature` base that all of them inherit.
 
 None of these features has a dedicated typed sub-collection in the verified
 API surface, so `PartDesign` finds them all by scanning `MainBody.Shapes` and
@@ -74,6 +85,12 @@ GROOVE_KIND: str = "Groove"
 
 MIRROR_KIND: str = "Mirror"
 """The `type(com_object).__name__` value for a CATIA Mirror feature."""
+
+RIB_KIND: str = "Rib"
+"""The `type(com_object).__name__` value for a CATIA Rib feature."""
+
+SLOT_KIND: str = "Slot"
+"""The `type(com_object).__name__` value for a CATIA Slot feature."""
 
 FULL_REVOLUTION: float = 360.0
 """The verified default `FirstAngle.Value` (degrees) a new Shaft/Groove is created with."""
@@ -474,20 +491,21 @@ class Groove(RevolvedFeature):
     """
 
 
-class Mirror:
-    """Wraps a raw CATIA `Mirror` COM object.
+class _NamedFeature:
+    """Shared `com_object`/`name`/`__repr__` handling for a plain feature wrapper.
 
-    Unlike every other feature in this module, a mirror is not built from a
-    `Sketch`: `AddNewMirror` takes a plane (verified against
-    `OriginElements.PlaneYZ`, `docs/conventions.md` section 1.2.3), so this
-    wrapper carries no `sketch()` accessor.
+    `Mirror`, `Rib`, and `Slot` carry no depth or angle magnitude the way
+    `SketchFeature`/`RevolvedFeature` do, so each reduces to nothing more than
+    a raw COM object and its `Name`. Rather than copy that same
+    `__init__`/`com_object`/`name`/`com_error`-handling a third and fourth
+    time, it lives here once and all three inherit it.
     """
 
     def __init__(self, com_object: Any) -> None:
         """Initializes the wrapper.
 
         Args:
-            com_object: The raw CATIA `Mirror` COM object to wrap.
+            com_object: The raw CATIA COM object to wrap.
         """
         self._com_object = com_object
 
@@ -528,24 +546,97 @@ class Mirror:
             name = self.name
         except Auto3dxError:
             name = "<unavailable>"
-        return f"Mirror(name={name!r})"
+        return f"{type(self).__name__}(name={name!r})"
+
+
+class Mirror(_NamedFeature):
+    """Wraps a raw CATIA `Mirror` COM object.
+
+    Unlike every other feature in this module, a mirror is not built from a
+    `Sketch`: `AddNewMirror` takes a plane (verified against
+    `OriginElements.PlaneYZ`, `docs/conventions.md` section 1.2.3), so this
+    wrapper carries no `sketch()`/`profile()` accessor.
+    """
+
+
+class Rib(_NamedFeature):
+    """Wraps a raw CATIA `Rib` COM object.
+
+    A rib sweeps a profile `Sketch` along a path (center curve) `Sketch` to
+    add material. Verified against a live session (`docs/conventions.md`
+    section 1.2.5, probe 24): `AddNewRib(profile, path)` both created the
+    feature and survived `Part.Update()`, with a rectangle profile on the YZ
+    plane and a line path on the XY plane. Only the profile sketch can be
+    read back (`Rib.Sketch`); there is no verified way to read the path
+    sketch, so `Rib` carries no accessor for it.
+    """
+
+    def profile(self) -> Sketch:
+        """Returns the rib's profile sketch.
+
+        Returns:
+            A `Sketch` wrapping the feature's `Sketch` property -- the
+            profile passed to `AddNewRib`. The path (center curve) sketch is
+            not readable back and so has no accessor here.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return Sketch(self._com_object.Sketch)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+
+class Slot(_NamedFeature):
+    """Wraps a raw CATIA `Slot` COM object.
+
+    The cutting twin of `Rib`: a slot sweeps a profile `Sketch` along a path
+    (center curve) `Sketch` to remove material instead of adding it.
+    Verified against a live session (`docs/conventions.md` section 1.2.5,
+    probe 25): `AddNewSlot(profile, path)` both created the feature and
+    survived `Part.Update()`, with the same rectangle-profile-on-YZ /
+    line-path-on-XY combination verified for `Rib`. Only the profile sketch
+    can be read back (`Slot.Sketch`); there is no verified way to read the
+    path sketch, so `Slot` carries no accessor for it, exactly like `Rib`.
+    """
+
+    def profile(self) -> Sketch:
+        """Returns the slot's profile sketch.
+
+        Returns:
+            A `Sketch` wrapping the feature's `Sketch` property -- the
+            profile passed to `AddNewSlot`. The path (center curve) sketch is
+            not readable back and so has no accessor here.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return Sketch(self._com_object.Sketch)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
 
 
 class PartDesign:
     """Wraps Part Design features on a Part's `MainBody`.
 
-    Pads, pockets, shafts, grooves, and mirrors are all read from
-    `part_com_object.MainBody.Shapes`, filtered by `type(item).__name__`
-    (`PAD_KIND`/`POCKET_KIND`/`SHAFT_KIND`/`GROOVE_KIND`/`MIRROR_KIND`), and
-    created through the matching `part_com_object.ShapeFactory.AddNew*`
-    method. All five families share identical policy (existence/ambiguity
-    checks by enumeration, partial-creation reporting on a failed rename,
-    deletion via selection); that shared behaviour is factored into the
-    private `_list`/`_get`/`_create_feature`/`_ensure_by_sketch`/`_remove`
-    helpers below, parameterised by kind. Pad/Pocket additionally compare and
-    (in `ensure_*`) synchronise a `depth`/`height` magnitude, which
-    Shaft/Groove/Mirror do not have; `_create`/`_ensure` layer that
+    Pads, pockets, shafts, grooves, mirrors, ribs, and slots are all read
+    from `part_com_object.MainBody.Shapes`, filtered by
+    `type(item).__name__` (`PAD_KIND`/`POCKET_KIND`/`SHAFT_KIND`/
+    `GROOVE_KIND`/`MIRROR_KIND`/`RIB_KIND`/`SLOT_KIND`), and created through
+    the matching `part_com_object.ShapeFactory.AddNew*` method. All seven
+    families share identical policy (existence/ambiguity checks by
+    enumeration, partial-creation reporting on a failed rename, deletion via
+    selection); that shared behaviour is factored into the private
+    `_list`/`_get`/`_create_feature`/`_ensure_by_sketch`/`_remove` helpers
+    below, parameterised by kind. Pad/Pocket additionally compare and (in
+    `ensure_*`) synchronise a `depth`/`height` magnitude, which
+    Shaft/Groove/Mirror/Rib/Slot do not have; `_create`/`_ensure` layer that
     length-specific validation on top of the shared core for Pad/Pocket only.
+    Rib/Slot reuse `_ensure_by_sketch` like Pad/Pocket/Shaft/Groove, but pass
+    a `sketch_of` accessor because their sketch getter is named `profile()`
+    rather than `sketch()`.
     """
 
     def __init__(self, part_com_object: Any, selection: Any = None) -> None:
@@ -832,6 +923,7 @@ class PartDesign:
         create: Any,
         noun: str,
         sync_existing: Any = None,
+        sketch_of: Any = None,
     ) -> Any:
         """Reuses an existing sketch-based feature by name, or creates one.
 
@@ -846,18 +938,25 @@ class PartDesign:
             name: The feature's name.
             sketch: The `Sketch` the feature must be built from.
             get_method: `self.get_pad`, `self.get_pocket`, `self.get_shaft`,
-                or `self.get_groove`.
+                `self.get_groove`, `self.get_rib`, or `self.get_slot`.
             create: A zero-argument callable that creates and returns the new
                 feature when none exists yet.
-            noun: `"pad"`, `"pocket"`, `"shaft"`, or `"groove"`, used only in
-                error messages.
+            noun: `"pad"`, `"pocket"`, `"shaft"`, `"groove"`, `"rib"`, or
+                `"slot"`, used only in error messages.
             sync_existing: An optional callable invoked with the existing
                 feature when one is found on the same sketch, for kinds that
                 need to reconcile a magnitude (Pad/Pocket depth). `None`
                 (the default) leaves an existing match untouched, which is
-                the required policy for Shaft/Groove: their angles are only
-                ever changed by an explicit `set_first_angle`/`set_second_angle`
-                call, never implicitly by `ensure_*`.
+                the required policy for Shaft/Groove/Rib/Slot: their
+                angles/paths are only ever changed by an explicit call (or,
+                for a Rib/Slot path, not comparable at all), never implicitly
+                by `ensure_*`.
+            sketch_of: An optional callable taking the existing feature and
+                returning the `Sketch` to compare against `sketch`. Defaults
+                to `lambda feature: feature.sketch()`, which is right for
+                Pad/Pocket/Shaft/Groove; `Rib`/`Slot` pass
+                `lambda feature: feature.profile()` instead, since their
+                accessor is named `profile()` rather than `sketch()`.
 
         Returns:
             The existing (possibly synchronised) or newly created feature.
@@ -867,19 +966,26 @@ class PartDesign:
                 exists on a different sketch.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
+        def _default_sketch_of(feature: Any) -> Sketch:
+            return feature.sketch()
+
+        if sketch_of is None:
+            sketch_of = _default_sketch_of
+
         try:
             existing = get_method(name)
         except FeatureNotFoundError:
             return create()
 
         try:
-            same_sketch = existing.sketch().com_object == sketch.com_object
+            existing_sketch = sketch_of(existing)
+            same_sketch = existing_sketch.com_object == sketch.com_object
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
         if not same_sketch:
             raise FeatureConflictError(
                 f"{noun.capitalize()} {name!r} already exists on a different "
-                f"sketch ({existing.sketch().name!r} instead of {sketch.name!r})."
+                f"sketch ({existing_sketch.name!r} instead of {sketch.name!r})."
             )
 
         if sync_existing is not None:
@@ -1511,3 +1617,244 @@ class PartDesign:
                 failed.
         """
         self._remove(name, self.get_mirror, "mirror")
+
+    @property
+    def ribs(self) -> "list[Rib]":
+        """Lists every rib on the Part's `MainBody`.
+
+        Returns:
+            A `Rib` wrapper for each item in `MainBody.Shapes` whose wrapper
+            type is `RIB_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(RIB_KIND, Rib)
+
+    def get_rib(self, name: str) -> Rib:
+        """Looks up a rib by name.
+
+        Args:
+            name: The rib's name.
+
+        Returns:
+            The matching `Rib`.
+
+        Raises:
+            FeatureNotFoundError: If no rib named `name` exists.
+            AmbiguousNameError: If two or more ribs named `name` exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(RIB_KIND, Rib, "rib", name)
+
+    def create_rib(self, name: str, profile: Sketch, path: Sketch) -> Rib:
+        """Creates a new rib sweeping `profile` along `path`.
+
+        Verified against a live session (`docs/conventions.md` section
+        1.2.5, probe 24): both raw sketch COM objects are passed directly --
+        `AddNewRib(profile.com_object, path.com_object)` -- with a rectangle
+        profile on the YZ plane and a line path on the XY plane.
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle `PartUpdateError`;
+        if the update fails, the rib is left in the model and the caller must
+        remove it (`remove_rib`) rather than retrying blindly.
+
+        Args:
+            name: The new rib's name. Must be non-empty, without surrounding
+                whitespace, and must not contain `"\\"`.
+            profile: The `Sketch` cross-section to sweep.
+            path: The `Sketch` center curve to sweep `profile` along.
+
+        Returns:
+            The newly created `Rib`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            FeatureConflictError: If a rib named `name` already exists.
+            AmbiguousNameError: If two or more ribs named `name` already
+                exist.
+            PartialCreationError: If the rib was created but the follow-up
+                rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, an unusable profile/path combination).
+        """
+        validate_parameter_name(name)
+        return self._create_feature(
+            name, RIB_KIND, "AddNewRib", (profile.com_object, path.com_object), Rib, "rib"
+        )
+
+    def ensure_rib(self, name: str, profile: Sketch, path: Sketch) -> Rib:
+        """Creates a rib, or reuses it if one with the same name and profile exists.
+
+        The conflict check compares only the profile sketch, by COM identity
+        (`==`), exactly like `ensure_pad`. The path (center curve) sketch is
+        **not** compared: there is no verified way to read a rib's path
+        sketch back from COM, so this method cannot detect a rib named
+        `name` that has the same profile but a different path, and will hand
+        back that existing rib unchanged. Callers that need that guarantee
+        must track the path themselves.
+
+        Args:
+            name: The rib's name.
+            profile: The `Sketch` the rib must be built from.
+            path: The `Sketch` center curve. Only used when a new rib has to
+                be created; never compared against an existing rib's path.
+
+        Returns:
+            The existing or newly created `Rib`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            AmbiguousNameError: If two or more ribs named `name` already
+                exist.
+            FeatureConflictError: If a rib named `name` already exists on a
+                different profile sketch.
+            PartialCreationError: If a new rib had to be created and its
+                follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        return self._ensure_by_sketch(
+            name,
+            profile,
+            self.get_rib,
+            lambda: self.create_rib(name, profile, path),
+            "rib",
+            sketch_of=lambda feature: feature.profile(),
+        )
+
+    def remove_rib(self, name: str) -> None:
+        """Removes a rib from the model.
+
+        Args:
+            name: The rib's name.
+
+        Raises:
+            FeatureNotFoundError: If no rib named `name` exists.
+            Auto3dxError: If no editor selection is available, or the deletion
+                failed.
+        """
+        self._remove(name, self.get_rib, "rib")
+
+    @property
+    def slots(self) -> "list[Slot]":
+        """Lists every slot on the Part's `MainBody`.
+
+        Returns:
+            A `Slot` wrapper for each item in `MainBody.Shapes` whose wrapper
+            type is `SLOT_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(SLOT_KIND, Slot)
+
+    def get_slot(self, name: str) -> Slot:
+        """Looks up a slot by name.
+
+        Args:
+            name: The slot's name.
+
+        Returns:
+            The matching `Slot`.
+
+        Raises:
+            FeatureNotFoundError: If no slot named `name` exists.
+            AmbiguousNameError: If two or more slots named `name` exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(SLOT_KIND, Slot, "slot", name)
+
+    def create_slot(self, name: str, profile: Sketch, path: Sketch) -> Slot:
+        """Creates a new slot cutting along `path` with cross-section `profile`.
+
+        Verified against a live session (`docs/conventions.md` section
+        1.2.5, probe 25): both raw sketch COM objects are passed directly --
+        `AddNewSlot(profile.com_object, path.com_object)` -- with the same
+        rectangle-profile-on-YZ / line-path-on-XY combination verified for
+        `create_rib`.
+
+        A successful call here does not mean the feature is valid
+        (`docs/conventions.md` section 1.2.2.1): this method never calls
+        `Part.Update()`. The caller must call it and handle `PartUpdateError`;
+        if the update fails, the slot is left in the model and the caller
+        must remove it (`remove_slot`) rather than retrying blindly.
+
+        Args:
+            name: The new slot's name. Must be non-empty, without
+                surrounding whitespace, and must not contain `"\\"`.
+            profile: The `Sketch` cross-section to cut.
+            path: The `Sketch` center curve to sweep `profile` along.
+
+        Returns:
+            The newly created `Slot`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            FeatureConflictError: If a slot named `name` already exists.
+            AmbiguousNameError: If two or more slots named `name` already
+                exist.
+            PartialCreationError: If the slot was created but the follow-up
+                rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly (for
+                example, an unusable profile/path combination).
+        """
+        validate_parameter_name(name)
+        return self._create_feature(
+            name, SLOT_KIND, "AddNewSlot", (profile.com_object, path.com_object), Slot, "slot"
+        )
+
+    def ensure_slot(self, name: str, profile: Sketch, path: Sketch) -> Slot:
+        """Creates a slot, or reuses it if one with the same name and profile exists.
+
+        The conflict check compares only the profile sketch, by COM identity
+        (`==`), exactly like `ensure_rib`. The path (center curve) sketch is
+        **not** compared: there is no verified way to read a slot's path
+        sketch back from COM, so this method cannot detect a slot named
+        `name` that has the same profile but a different path, and will hand
+        back that existing slot unchanged. Callers that need that guarantee
+        must track the path themselves.
+
+        Args:
+            name: The slot's name.
+            profile: The `Sketch` the slot must be built from.
+            path: The `Sketch` center curve. Only used when a new slot has to
+                be created; never compared against an existing slot's path.
+
+        Returns:
+            The existing or newly created `Slot`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            AmbiguousNameError: If two or more slots named `name` already
+                exist.
+            FeatureConflictError: If a slot named `name` already exists on a
+                different profile sketch.
+            PartialCreationError: If a new slot had to be created and its
+                follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        return self._ensure_by_sketch(
+            name,
+            profile,
+            self.get_slot,
+            lambda: self.create_slot(name, profile, path),
+            "slot",
+            sketch_of=lambda feature: feature.profile(),
+        )
+
+    def remove_slot(self, name: str) -> None:
+        """Removes a slot from the model.
+
+        Args:
+            name: The slot's name.
+
+        Raises:
+            FeatureNotFoundError: If no slot named `name` exists.
+            Auto3dxError: If no editor selection is available, or the deletion
+                failed.
+        """
+        self._remove(name, self.get_slot, "slot")

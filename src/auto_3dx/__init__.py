@@ -32,11 +32,13 @@ from auto_3dx.geometry.constraint import Constraint, ConstraintCollection
 from auto_3dx.geometry.part_design import (
     Groove,
     Mirror,
+    Rib,
     Pad,
     PartDesign,
     Pocket,
     RevolvedFeature,
     Shaft,
+    Slot,
     SketchFeature,
 )
 from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
@@ -60,7 +62,9 @@ __all__ = [
     "PartDesign",
     "Pocket",
     "RevolvedFeature",
+    "Rib",
     "Shaft",
+    "Slot",
     "SketchFeature",
     "Sketch",
     "SketchCollection",

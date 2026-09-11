@@ -167,6 +167,54 @@ parameters.list()             -> Parameters.Item(1..Count)             전체
 parameters.user_parameters()  -> RootParameterSet.DirectParameters     사람이 만든 것만
 ```
 
+### 1.1.2 Length 외 파라미터 타입과 단위 (실측, probes 23·24)
+
+```text
+CreateReal(iName, iValue: double)   -> RealParam    Value 쓰기 가능
+CreateInteger(iName, iValue: long)  -> IntParam     Value 쓰기 가능
+CreateString(iName, iValue: BSTR)   -> StrParam     Value 쓰기 가능
+CreateBoolean(iName, iValue: bool)  -> BoolParam    Value 쓰기 가능
+CreateDimension(iName, iMagnitude, iValue: double)  -> magnitude에 따라 다름
+잘못된 magnitude                    -> com_error
+```
+
+**`CreateDimension`의 wrapper 타입은 magnitude마다 다르다.** 파생 타입이 붙는 것은
+`Length`와 `Angle` 둘뿐이고 나머지는 전부 generic `Dimension`이다.
+
+```text
+"Length" -> kind=Length     "Angle"  -> kind=Angle
+"Mass"   -> kind=Dimension  "Volume" -> kind=Dimension  "Time" -> kind=Dimension
+```
+
+따라서 **`type(obj).__name__`으로는 Mass와 Time을 구분할 수 없다.** 정체는
+`Dimension.Unit`에서 읽는다 (실측).
+
+```text
+Length : Unit.Magnitude='Length' Unit.Symbol='mm'  Unit.Name='Millimeter'
+Angle  : Unit.Magnitude='Angle'  Unit.Symbol='deg' Unit.Name='Degree'
+Mass   : Unit.Magnitude='Mass'   Unit.Symbol='kg'  Unit.Name='Kilogram'
+Volume : Unit.Magnitude='Volume' Unit.Symbol='m3'  Unit.Name='Cubic meter'
+```
+
+`RealParam` / `IntParam` / `StrParam` / `BoolParam`에는 `Unit`이 없다(무단위).
+네 타입 모두 `ValuateFromString`을 갖지만 검증하지 않았다.
+
+**단위 카탈로그** (`Parameters.Units`, 실측):
+
+```text
+Units.Count = 1887,  서로 다른 magnitude = 339
+Unit 항목   = (Name, Magnitude, Symbol)   예: ('Millimeter', 'Length', 'mm')
+Length 67개 : mm m cm km in ft micron yard ...
+Angle  12개 : deg rad grad DegMinSec turn mrad ...
+Mass   26개 : kg g mg T lb oz slug ...
+Time   19개 : s ms h mn day a week ...
+Volume 56개 : m3 mm3 cm3 in3 ft3 L gal ...
+```
+
+**중요: `Value`는 언제나 파라미터 자신의 내부 단위로 읽고 쓴다.** `Length.Value = 150.0`은
+어떤 경우에도 150mm다. 단위 변환은 검증하지 않았으므로 **라이브러리는 단위를 변환하지
+않는다.** 단위 인자는 파라미터의 실제 단위와 일치하는지 확인하는 용도로만 쓴다.
+
 ### 1.2 Sketch와 Pad (실측, `scripts/probes/12_sketch_and_pad.py`, `13_sketch_identity.py`)
 
 type library가 고정한 signature:
@@ -492,6 +540,57 @@ feature + 방향 참조 필요   AddNewMirror(iMirroringElement)
 면·모서리 참조는 `Part.CreateReferenceFromObject` / BRep 이름이 필요한데, BRep 이름은
 모델이 바뀌면 깨지므로 별도 설계가 필요하다. **참조 레이어가 생기기 전까지 이 기능들은
 구현하지 않는다.**
+
+### 1.2.5 Rib / Stiffener / Pattern (실측, probe 24)
+
+```text
+AddNewRib(iSketch, iCenterCurve)  -> Rib       생성 + Update 성공 -> 검증됨
+AddNewSlot(iSketch, iCenterCurve) -> Slot      생성 + Update 성공 -> 검증됨
+AddNewStiffener(iSketch)          -> Stiffener 생성은 되나 Update 실패 (2회) -> 미검증
+AddNewRectPattern(...)                         부분 검증 (아래)
+```
+
+Rib과 Slot은 프로파일 스케치와 경로(center curve) 스케치 **두 개**를 받는다. Slot은 Rib의
+절삭 버전이다. 실측 조합:
+
+```text
+프로파일 : YZ 평면에 사각형
+경로     : XY 평면에 직선
+```
+
+둘 다 `Sketch`로 **프로파일만** 되읽을 수 있다. 경로 스케치를 되읽는 방법은 없다.
+
+Stiffener는 프로파일을 두 번 바꿔 시도했지만 두 번 다 `Part.Update()`가 실패했다.
+1.2.2.1 기준에 따라 **미검증이며 구현하지 않는다.**
+
+**Pattern은 방향 인자가 까다롭다** (probe 25 실측).
+
+```text
+AddNewRectPattern(pad, 2, 1, 60, 60, 1, 1, dir, dir, False, False, 0)
+  dir = raw Line2D            -> 생성됨, Update 실패
+  dir = Reference(Line2D)     -> 생성됨, Update 실패
+  dir = Reference(PlaneXY)    -> 생성됨, Update 성공
+  dir = raw PlaneYZ           -> 생성됨, Update 실패 (probe 18)
+```
+
+즉 방향은 **원점 평면으로 만든 `Reference`** 여야 한다. 세 평면(XY/YZ/ZX) 모두 생성과
+update가 성공한다 (probe 26).
+
+패턴 자신의 파라미터는 전부 읽히고, 넘긴 값이 그대로 들어간다.
+
+```text
+NumberInDir1 = 2     Spacing1 = 60.0     RotationAngle = 0.0
+NumberInDir2 = 1     Spacing2 = 60.0     RowInDir1/2 = 1
+RectPattern 읽기 가능: FirstDirectionRepartition (LinearRepartition),
+                       FirstOrientation, ItemToCopy, FirstRectangularPatternParameters
+```
+
+따라서 개수와 간격은 formula로 구동할 수 있다.
+
+**그런데 어느 평면이 어느 축 방향을 만드는지는 확인하지 않았다.** `FirstDirectionReference`
+같은 되읽기 속성이 없어서 COM만으로는 알 수 없고, 화면을 눈으로 확인해야 한다. 사용자가
+"X 방향으로 60mm 간격 2개"를 요청했을 때 무엇이 나오는지 모르는 상태이므로 **구현하지
+않는다.** 평면-축 대응만 한 번 눈으로 확인하면 바로 구현 가능하다.
 
 ### 1.3 `ensure_*` 정책 (형상)
 
@@ -1128,6 +1227,103 @@ def distance(self, first: Any, second: Any, value: float | None = None,
 `SketchEditor`는 제약을 만들 때 `Part.Update()`를 호출하지 않는다.
 
 추가 예외: `ConstraintNotFoundError(Auto3dxError)`.
+
+### 6.15 단위 카탈로그와 Length 외 파라미터 타입
+
+`parameters/units.py` (신규):
+
+```python
+@dataclasses.dataclass(frozen=True)
+class UnitInfo:
+    name: str        # 'Millimeter'
+    magnitude: str   # 'Length'
+    symbol: str      # 'mm'
+
+class UnitCatalogue:
+    """Parameters.Units를 한 번만 열거해 캐시한다 (1887개)."""
+    def __init__(self, parameters_com_object: Any) -> None: ...
+    def magnitudes(self) -> "list[str]": ...            # 정렬된 339개
+    def units(self, magnitude: str) -> "list[UnitInfo]": ...
+    def symbols(self, magnitude: str) -> "list[str]": ...
+    def supports(self, magnitude: str, symbol: str) -> bool: ...
+```
+
+`ParameterCollection`에 `units -> UnitCatalogue` 속성을 추가한다(최초 접근 시 캐시).
+
+`parameters/parameter.py`:
+
+```python
+REAL_KIND = "RealParam"; INTEGER_KIND = "IntParam"
+STRING_KIND = "StrParam"; BOOLEAN_KIND = "BoolParam"
+ANGLE_KIND = "Angle"; DIMENSION_KIND = "Dimension"
+DIMENSIONAL_KINDS = frozenset({LENGTH_KIND, ANGLE_KIND, DIMENSION_KIND})
+
+class Parameter:
+    @property magnitude -> str | None    # Unit.Magnitude. 무단위면 None
+    @property unit -> str | None         # Unit.Symbol. 무단위면 None
+```
+
+**`unit`의 기존 동작을 깨지 않는다.** `Unit.Symbol`을 먼저 시도하고, 실패하면 예전처럼
+`kind == LENGTH_KIND`일 때 `MILLIMETRE`, 그 외 `None`을 돌려준다. 기존 테스트의 fake에는
+`Unit`이 없으므로 이 fallback이 필요하다.
+
+`Parameter.set(value, unit=None)`은 kind로 분기한다.
+
+```text
+DIMENSIONAL_KINDS -> 숫자(bool 거부). unit이 주어지면 parameter의 실제 unit과
+                     일치해야 한다. 다르면 UnsupportedUnitError.
+                     단위 변환은 하지 않는다 (미검증).
+                     unit=None 이면 검사 없이 그대로 쓴다.
+REAL_KIND         -> int/float(bool 거부) -> float. unit을 주면 UnsupportedUnitError.
+INTEGER_KIND      -> int(bool 거부). unit 금지.
+STRING_KIND       -> str. unit 금지.
+BOOLEAN_KIND      -> bool. unit 금지.
+그 외              -> ParameterTypeError
+```
+
+기존 호출 `set(150)`과 `set(150, unit="mm")`는 mm Length에서 동일하게 동작해야 한다.
+
+`ParameterCollection`에 생성 메서드를 추가한다. 전부 기존 `create_length`와 같은 안전
+장치(이름 검증, 사전 존재 검사, `Part.Update()` 미호출)를 따른다.
+
+```python
+.create_real(name, value)     / .ensure_real(name, value)
+.create_integer(name, value)  / .ensure_integer(name, value)
+.create_string(name, value)   / .ensure_string(name, value)
+.create_boolean(name, value)  / .ensure_boolean(name, value)
+.create_dimension(name, magnitude, value)   / .ensure_dimension(...)
+```
+
+`create_dimension`은 `magnitude`가 `UnitCatalogue.magnitudes()`에 있는지 먼저 확인하고,
+없으면 `UnsupportedMagnitudeError`를 낸다(COM 호출 전에). 기존 `create_length`는
+`create_dimension(name, "Length", value)`로 구현해도 되지만 **공개 signature는 그대로 둔다.**
+
+`ensure_*`는 이름이 있으면 kind가 맞는지 확인하고(다르면 `ParameterTypeError`) 값을 쓴다.
+
+추가 예외: `UnsupportedMagnitudeError(Auto3dxError)`.
+
+### 6.16 Rib
+
+```python
+RIB_KIND: str = "Rib"
+
+class Rib:
+    com_object, name
+    def profile(self) -> Sketch: ...       # Rib.Sketch
+    def __repr__(self) -> str: ...
+
+# PartDesign
+.ribs -> list[Rib]   .get_rib(name)
+.create_rib(name, profile: Sketch, path: Sketch) -> Rib
+.ensure_rib(name, profile: Sketch, path: Sketch) -> Rib
+.remove_rib(name)
+```
+
+`ensure_rib`의 충돌 판정은 `ensure_pad`와 같이 **프로파일 스케치의 COM 동일성(`==`)** 으로
+한다. 경로 스케치를 되읽는 방법은 검증되지 않았으므로 비교하지 않으며, 그 한계를 docstring에
+적는다.
+
+Stiffener, Slot, Pattern은 미검증이므로 구현하지 않는다.
 
 ### 6.12 `auto_3dx/formulas/`
 
