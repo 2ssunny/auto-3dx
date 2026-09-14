@@ -14,8 +14,14 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._com import automation_error, format_hresult, hresult_of
 from auto_3dx._generation import ModelGeneration
-from auto_3dx.errors import Auto3dxError, NoActiveEditorError, PartUpdateError
+from auto_3dx.errors import (
+    Auto3dxError,
+    AutomationError,
+    NoActiveEditorError,
+    PartUpdateError,
+)
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
@@ -23,24 +29,6 @@ from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.geometry.topology import Topology
 from auto_3dx.measurement.inertia import SolidMeasurement
 from auto_3dx.parameters.collection import ParameterCollection
-
-
-def _format_com_error(error: pywintypes.com_error) -> str:
-    """Render a COM error's HRESULT as a hex suffix for an error message.
-
-    Args:
-        error: The caught ``pywintypes.com_error``.
-
-    Returns:
-        A string like ``" (HRESULT: 0x80020009)"``, or an empty string when the
-        error carries no HRESULT.
-    """
-    if not error.args:
-        return ""
-    hresult = error.args[0]
-    if not isinstance(hresult, int):
-        return ""
-    return f" (HRESULT: {hresult & 0xFFFFFFFF:#010x})"
 
 
 class Part:
@@ -93,9 +81,7 @@ class Part:
         try:
             return self._com_object.Name
         except pywintypes.com_error as error:
-            raise Auto3dxError(
-                f"Could not read the Part name.{_format_com_error(error)}"
-            ) from error
+            raise automation_error(error, "reading Part.Name") from error
 
     @property
     def parameters(self) -> ParameterCollection:
@@ -113,10 +99,7 @@ class Part:
             try:
                 parameters_com_object = self._com_object.Parameters
             except pywintypes.com_error as error:
-                raise Auto3dxError(
-                    "Could not read the Part's Parameters."
-                    f"{_format_com_error(error)}"
-                ) from error
+                raise automation_error(error, "reading Part.Parameters") from error
             self._parameters = ParameterCollection(parameters_com_object)
         return self._parameters
 
@@ -195,7 +178,8 @@ class Part:
 
         Measuring is how a caller checks that geometry did what was asked, since
         ``Update()`` succeeding only means a feature rebuilt (``docs/status.md``
-        2.6). Pass the thing to measure, typically ``part.com_object.MainBody``.
+        2.6). ``part.measurement.measure()`` measures the Part's main body; pass a
+        raw item to measure something else.
 
         Raises:
             NoActiveEditorError: If this Part was constructed without an editor,
@@ -210,8 +194,19 @@ class Part:
                 "or Catia.part_named() instead."
             )
         if self._measurement is None:
-            self._measurement = SolidMeasurement(self._editor)
+            self._measurement = SolidMeasurement(self._editor, self._main_body)
         return self._measurement
+
+    def _main_body(self) -> Any:
+        """Returns the raw ``MainBody``, the default thing to measure.
+
+        Read at measurement time, so a body replaced after the measurement
+        object was built is still the one measured.
+
+        Returns:
+            The raw CATIA ``Body`` COM object.
+        """
+        return self._com_object.MainBody
 
     def is_up_to_date(self, target: Any = None) -> bool:
         """Reports whether CATIA considers a Part object up to date.
@@ -249,21 +244,19 @@ class Part:
         try:
             result = self._com_object.IsUpToDate(target_com_object)
         except pywintypes.com_error as error:
-            raise Auto3dxError(
-                f"Part.IsUpToDate() failed.{_format_com_error(error)}"
-            ) from error
+            raise automation_error(error, "calling Part.IsUpToDate()") from error
         except (AttributeError, TypeError) as error:
             # A release without this member, or one that rejects the argument
             # shape, must not surface as a bare Python error from a COM call --
             # `Shapes.Remove` taught us that a missing member is a real
             # possibility here. Broader exceptions stay unmapped so genuine
             # bugs in this library are not disguised as CATIA failures.
-            raise Auto3dxError(
+            raise AutomationError(
                 "Part.IsUpToDate() is unusable in this release: "
                 f"{type(error).__name__}: {error}"
             ) from error
         if not isinstance(result, bool):
-            raise Auto3dxError(
+            raise AutomationError(
                 "Part.IsUpToDate() returned a non-boolean value: "
                 f"{type(result).__name__}."
             )
@@ -291,8 +284,9 @@ class Part:
             try:
                 self._com_object.Update()
             except pywintypes.com_error as error:
+                hresult = hresult_of(error)
                 raise PartUpdateError(
-                    f"Part.Update() failed.{_format_com_error(error)}"
+                    f"Part.Update() failed (HRESULT={format_hresult(hresult)}).", hresult
                 ) from error
             except (AttributeError, TypeError) as error:
                 # A dispatch member missing or rejecting its arguments is a real

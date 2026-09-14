@@ -24,7 +24,7 @@ def test_active_part_passes_its_editor_to_measurement(
     part = Catia(application).active_part()
 
     assert isinstance(part.measurement, SolidMeasurement)
-    assert part.measurement.editor_com_object is fake_editor
+    assert part.measurement.com_object is fake_editor
 
 
 def test_part_measurement_is_cached(
@@ -70,6 +70,6 @@ def test_each_listed_part_keeps_its_own_measurement_editor(
 
     parts = catia.parts()
 
-    assert parts[0].measurement.editor_com_object is first_editor
-    assert parts[1].measurement.editor_com_object is second_editor
-    assert catia.part_named("Second Part").measurement.editor_com_object is second_editor
+    assert parts[0].measurement.com_object is first_editor
+    assert parts[1].measurement.com_object is second_editor
+    assert catia.part_named("Second Part").measurement.com_object is second_editor

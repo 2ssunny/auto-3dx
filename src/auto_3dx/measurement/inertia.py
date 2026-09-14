@@ -49,11 +49,14 @@ could not answer "how big is this along X" even when it worked.
 """
 
 import dataclasses
+import warnings
+from collections.abc import Callable
 from typing import Any
 
 import pywintypes
 
-from auto_3dx.errors import Auto3dxError
+from auto_3dx._com import automation_error
+from auto_3dx.errors import AutomationError, ValidationError
 
 INERTIA_SERVICE_NAME: str = "InertiaService"
 """The `iService` string `Editor.GetService` accepts for volume/area/mass/COG.
@@ -99,26 +102,6 @@ class MassProperties:
     cog_mm: "tuple[float, float, float]"
 
 
-def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
-    """Converts an unmapped `pywintypes.com_error` into an `Auto3dxError`.
-
-    Duplicated rather than imported from `parameters.parameter` (the same
-    choice made by `geometry.sketch`/`geometry.constraint`/`formulas.formula`):
-    each package keeps its own copy so `measurement` does not have to reach
-    into an unrelated package just for this.
-
-    Args:
-        error: The COM error to convert.
-
-    Returns:
-        An `Auto3dxError` whose message includes the failure's HRESULT in
-        hexadecimal form.
-    """
-    hresult = error.args[0] if error.args else None
-    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
-    return Auto3dxError(f"Unexpected COM failure (HRESULT={hresult_hex}).")
-
-
 class SolidMeasurement:
     """Measures solids through an `Editor`'s Inertia service.
 
@@ -136,20 +119,44 @@ class SolidMeasurement:
     take anything but the item to measure.
     """
 
-    def __init__(self, editor_com_object: Any) -> None:
+    def __init__(
+        self,
+        editor_com_object: Any,
+        default_target: Callable[[], Any] | None = None,
+    ) -> None:
         """Stores the raw Editor COM object without contacting it yet.
 
         Args:
             editor_com_object: The raw CATIA `Editor` COM object whose
                 `GetService` exposes measurement -- typically
                 `Catia.active_editor()`.
+            default_target: Returns the raw item `measure()` uses when called
+                with no argument. `Part.measurement` supplies the Part's main
+                body, so ordinary use never has to reach for a raw COM object
+                (`docs/api-design.md` section 9). It is called at measurement
+                time rather than here, so each call reads the body afresh.
         """
         self._editor_com_object = editor_com_object
+        self._default_target = default_target
         self._inertia_service: Any = None
 
     @property
+    def com_object(self) -> Any:
+        """Any: The raw underlying `Editor` COM object, the SDK's escape hatch."""
+        return self._editor_com_object
+
+    @property
     def editor_com_object(self) -> Any:
-        """Any: The raw underlying `Editor` COM object (escape hatch for testing)."""
+        """Any: Deprecated alias of `com_object`, kept until 1.0.
+
+        Every other wrapper exposes its Automation object as `com_object`, and
+        `docs/api-design.md` section 9 makes that the one escape hatch.
+        """
+        warnings.warn(
+            "SolidMeasurement.editor_com_object is deprecated; use com_object.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self._editor_com_object
 
     def _inertia_service_com_object(self) -> Any:
@@ -165,15 +172,37 @@ class SolidMeasurement:
             try:
                 service = self._editor_com_object.GetService(INERTIA_SERVICE_NAME)
             except pywintypes.com_error as error:
-                raise _wrap_com_error(error) from error
+                raise automation_error(error, "requesting the inertia service") from error
             if service is None:
-                raise Auto3dxError(
+                raise AutomationError(
                     f"Editor.GetService({INERTIA_SERVICE_NAME!r}) returned no service."
                 )
             self._inertia_service = service
         return self._inertia_service
 
-    def measure(self, item: Any) -> MassProperties:
+    def _read_default_target(self) -> Any:
+        """Reads the item `measure()` uses when it is given none.
+
+        Returns:
+            The raw item the default target produces.
+
+        Raises:
+            ValidationError: If there is no default target. Raised before any
+                COM call.
+            Auto3dxError: If reading the default target fails in COM.
+        """
+        if self._default_target is None:
+            raise ValidationError(
+                "No item was given and this SolidMeasurement has no default "
+                "target. Pass the item to measure, or use part.measurement, "
+                "which measures the Part's main body by default."
+            )
+        try:
+            return self._default_target()
+        except pywintypes.com_error as error:
+            raise automation_error(error, "reading the default measurement target") from error
+
+    def measure(self, item: Any = None) -> MassProperties:
         """Measures volume, area, mass, and centre of gravity for one solid.
 
         Verified with both a raw `MainBody` and a
@@ -182,7 +211,9 @@ class SolidMeasurement:
 
         Args:
             item: The raw CATIA item to measure (a `Body`/`MainBody`, or a
-                `Reference` built from one).
+                `Reference` built from one). Omit it to measure the default
+                target, which is the Part's main body when this object came
+                from `part.measurement`.
 
         Returns:
             A `MassProperties` with every value already converted out of
@@ -193,6 +224,8 @@ class SolidMeasurement:
             Auto3dxError: The underlying COM call failed unexpectedly (for
                 example, `item` is not something the service can measure).
         """
+        if item is None:
+            item = self._read_default_target()
         service = self._inertia_service_com_object()
         try:
             inertia = service.GetInertiaElement(item)
@@ -206,9 +239,9 @@ class SolidMeasurement:
                 float(value) for value in inertia.GetCOGPosition()
             )
         except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+            raise automation_error(error, "measuring mass properties") from error
         except (AttributeError, TypeError, ValueError) as error:
-            raise Auto3dxError(
+            raise AutomationError(
                 "InertiaService returned invalid mass-property data."
             ) from error
         return MassProperties(

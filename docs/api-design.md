@@ -196,8 +196,9 @@ raises `StaleSnapshotError` on mismatch. The model is untouched when this is rai
 
 ## 6. Update policy
 
-Status: Implemented. `update()` advancing the generation is Enforced. Planned: a test that
-fails if any module other than `Part` calls `Update()`.
+Status: Enforced. `tests/unit/test_update_policy.py` parses the package source and fails if
+anything other than `Part.update()` calls `Update()`, or if anything calls `Save()` or
+`PLMPropagate()`. `update()` advancing the generation is pinned by the generation tests.
 
 **`part.update()` is the only method that rebuilds the model.** No constructor, setter, `ensure`
 or removal calls `Part.Update()`.
@@ -258,7 +259,8 @@ is public until the properties it depends on are live-verified and the choice is
 
 ## 8. Error architecture
 
-Status: Planned. Today all 24 errors derive directly from `Auto3dxError`.
+Status: the hierarchy is Enforced by `tests/unit/test_errors.py`. Planned: every module
+translating COM failures through `auto_3dx._com`, which today only `Part` does.
 
 Errors are grouped by **what the caller can do about them**:
 
@@ -306,7 +308,12 @@ Rules:
   One exception: `AttributeError` and `TypeError` raised by a COM dispatch call itself are
   mapped, because a member missing from a release is a real possibility (`Shapes.Remove` does
   not exist in B428).
-- COM error translation lives in one module. [Planned: today it is copied into six modules.]
+- COM error translation lives in one module, `auto_3dx._com`: `automation_error(error, action)`
+  returns an `AutomationError` with the HRESULT as `hresult`. [Planned: five modules still keep
+  their own copy, which returns a bare `Auto3dxError`.]
+- Known naming debt: `ParameterTypeError` is also raised for non-parameter arguments such as an
+  edge, a radius or a pattern spacing. It is a `ValidationError`, so catching the category is
+  correct; renaming it is deferred until a caller needs to tell those cases apart.
 - Messages are English sentences ending in a full stop, and say what the caller can do.
 
 ---
@@ -327,7 +334,7 @@ Classification of raw COM crossing the public boundary:
 | `wrapper.com_object` | out | intentional escape hatch |
 | `SketchEditor.line()` / `circle()` / ... return `Line2D`, `Circle2D` | out | transitional: the constraint methods consume them; wrap when constraints take wrappers |
 | `sketch.set_center_line(line)` takes a raw `Line2D` | in | transitional, same reason |
-| `part.measurement.measure(part.com_object.MainBody)` | in | defect: normal use should not need raw COM. [Planned: default to the main body] |
+| `part.measurement.measure()` | in | resolved: defaults to the main body, and an explicit raw item is still accepted |
 | `EditorInfo.com_object` | out | intentional |
 
 A normal workflow must never require the caller to reach for `com_object`. When one does, that
@@ -389,7 +396,8 @@ returned all zeros silently on an unchanged model, so it is not exposed.
 
 ## 13. Package root exports
 
-Status: Planned. Today the root exports 65 names.
+Status: Enforced by `tests/unit/test_public_exports.py`, which also proves every class that
+left the root is still importable from its own package.
 
 `from auto_3dx import ...` offers only what an ordinary script needs to name directly:
 
@@ -458,11 +466,12 @@ Status: Enforced by review.
 | One generation per CATIA Part across wrappers (needs live COM identity check) | 5 | Planned |
 | `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Done |
 | Topology snapshots restore the user's selection | 7 | Planned |
-| Error categories and `AutomationError` | 8 | Planned |
-| One COM error translation module | 8 | Planned |
+| Error categories and `AutomationError` | 8 | Done |
+| One COM error translation module: `_com.py` exists | 8 | Done |
+| Every module translating COM failures through `_com.py` | 8 | Planned |
 | `Part.update()` maps only COM failures | 8 | Done |
-| `measurement.measure()` defaults to the main body | 9 | Planned |
-| Small package root | 13 | Planned |
-| Test that only `Part.update()` rebuilds | 6 | Planned |
+| `measurement.measure()` defaults to the main body | 9 | Done |
+| Small package root | 13 | Done |
+| Test that only `Part.update()` rebuilds, and nothing saves | 6 | Done |
 | `part.inspect` | 11 | Planned |
 | File export | 12 | Not probed |
