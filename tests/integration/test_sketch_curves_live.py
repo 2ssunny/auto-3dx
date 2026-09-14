@@ -65,17 +65,17 @@ def test_curved_sketch_geometry_round_trip(part: Any) -> None:
             editor.set_construction(open_arc)
             editor.set_construction(spline)
 
-        assert type(closed_circle).__name__ == "Circle2D"
-        assert closed_circle.Radius == pytest.approx(5.0)
-        assert type(open_arc).__name__ == "Circle2D"
-        assert open_arc.Radius == pytest.approx(5.0)
-        assert open_arc.StartPoint is not None
-        assert open_arc.EndPoint is not None
+        assert closed_circle.kind == "Circle2D"
+        assert closed_circle.com_object.Radius == pytest.approx(5.0)
+        assert open_arc.kind == "Circle2D"
+        assert open_arc.com_object.Radius == pytest.approx(5.0)
+        assert open_arc.com_object.StartPoint is not None
+        assert open_arc.com_object.EndPoint is not None
 
-        assert type(spline).__name__ == "Spline2D"
-        assert spline.GetNumberOfControlPoints() == pytest.approx(3.0)
-        assert type(spline.StartPoint).__name__ == "ControlPoint2D"
-        assert type(spline.EndPoint).__name__ == "ControlPoint2D"
+        assert spline.kind == "Spline2D"
+        assert spline.com_object.GetNumberOfControlPoints() == pytest.approx(3.0)
+        assert type(spline.com_object.StartPoint).__name__ == "ControlPoint2D"
+        assert type(spline.com_object.EndPoint).__name__ == "ControlPoint2D"
 
         part.update()
         assert sketch_name in part.sketches

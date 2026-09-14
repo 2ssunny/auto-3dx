@@ -344,13 +344,20 @@ Classification of raw COM crossing the public boundary:
 | Where | Direction | Classification |
 |---|---|---|
 | `wrapper.com_object` | out | intentional escape hatch |
-| `SketchEditor.line()` / `circle()` / ... return `Line2D`, `Circle2D` | out | transitional: the constraint methods consume them; wrap when constraints take wrappers |
-| `sketch.set_center_line(line)` takes a raw `Line2D` | in | transitional, same reason |
+| `SketchEditor.line()` / `circle()` / ... | out | resolved: they return `SketchElement`, whose `com_object` is the raw 2D object |
+| `set_center_line`, `set_construction`, constraint methods | in | resolved: accept a `SketchElement`; a raw 2D object is still accepted for compatibility |
 | `part.measurement.measure()` | in | resolved: defaults to the main body, and an explicit raw item is still accepted |
 | `EditorInfo.com_object` | out | intentional |
 
 A normal workflow must never require the caller to reach for `com_object`. When one does, that
 is a gap in the SDK.
+
+A wrapper can carry facts a raw object cannot. A `SketchElement` records the sketch it was
+drawn in, so passing an element from one sketch into another sketch's constraint or centre line
+is refused with `ValidationError` before any COM call. Sketches are compared with COM `==`, which
+is live-verified for sketches, not Python `is`. A raw object carries no owner and is not checked.
+`SketchElement` deliberately exposes no geometry reads such as radius or coordinates: their live
+evidence varies by property, so those stay behind `com_object` until each is verified.
 
 ---
 

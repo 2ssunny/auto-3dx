@@ -173,6 +173,129 @@ def _axis_data_matches(actual: tuple[float, ...], expected: tuple[float, ...]) -
         ) from error
 
 
+class SketchElement:
+    """Wraps one 2D element drawn in a sketch (a point, line, circle, or spline).
+
+    Holds only identity and kind -- deliberately no read accessors for
+    geometry properties such as radius, coordinates, or start/end points.
+    Some of those properties are live-verified and some are not (see the
+    per-method notes on `SketchEditor.circle`/`arc`/`spline` below); adding
+    any of them here would ship the unverified ones alongside the verified
+    ones with no way for a caller to tell which is which. A caller that
+    needs a property reads it directly off `com_object`, the SDK's one
+    escape hatch (`docs/api-design.md` section 9): for example
+    `circle.com_object.Radius`.
+
+    Every consumer that used to take a raw 2D COM object
+    (`SketchEditor.set_construction`, the constraint methods, and
+    `Sketch.set_center_line`) also accepts a `SketchElement` now, so a
+    caller never has to unwrap one just to pass it back in.
+    """
+
+    def __init__(self, com_object: Any, sketch: Any = None) -> None:
+        """Initializes the wrapper.
+
+        Args:
+            com_object: The raw `Point2D`/`Line2D`/`Circle2D`/`Spline2D` COM
+                object this element wraps. This is what `SketchElement.
+                com_object` returns, and what `kind` is derived from.
+            sketch: The raw CATIA `Sketch` COM object this element was drawn
+                in. Recorded so a consumer acting on a different sketch can
+                refuse it before any COM call. `None` when no owner is
+                recorded (the element came from a `SketchEditor` built
+                without a sketch), which skips that check entirely --
+                the compatibility path for existing callers.
+        """
+        self._com_object = com_object
+        self._sketch = sketch
+
+    @property
+    def com_object(self) -> Any:
+        """Returns the raw underlying COM object.
+
+        This is an escape hatch for callers that need direct COM access --
+        for example reading `.Radius` on a circle, or calling
+        `.GetCoordinates(...)` on a point -- since this wrapper deliberately
+        offers no such accessors itself.
+
+        Returns:
+            The wrapped raw COM object.
+        """
+        return self._com_object
+
+    @property
+    def kind(self) -> str:
+        """Returns the wrapped object's COM type name.
+
+        Returns:
+            `type(self.com_object).__name__`, e.g. `"Line2D"`.
+        """
+        return type(self._com_object).__name__
+
+    @property
+    def sketch(self) -> Any:
+        """Returns the raw sketch COM object this element was drawn in.
+
+        Returns:
+            The raw `Sketch` COM object, or `None` if no owner is recorded.
+        """
+        return self._sketch
+
+    def __repr__(self) -> str:
+        """Returns a debugging representation.
+
+        Returns:
+            A string such as ``SketchElement(kind='Line2D')``.
+        """
+        return f"SketchElement(kind={self.kind!r})"
+
+
+def _resolve_element(element: Any, owner_sketch: Any) -> Any:
+    """Unwraps a `SketchElement` to its raw COM object for a COM call.
+
+    Every consumer of 2D geometry (`SketchEditor.set_construction`, the
+    constraint methods through `_mono`/`_bi`, and `Sketch.set_center_line`)
+    accepts either a `SketchElement` or a raw COM object, so a caller that
+    already holds a raw object -- from before this wrapper existed, or from
+    an editor built without a sketch -- keeps working unchanged
+    (`docs/api-design.md` section 9). This is the one place that acceptance
+    rule is written.
+
+    When `element` is a `SketchElement` with a recorded owner and
+    `owner_sketch` is not `None`, the two sketches are compared with `==`,
+    never `is`: two wrappers for the same CATIA sketch are distinct Python
+    dispatch objects that still compare COM-equal (live-verified for
+    sketches), and `is` would wrongly refuse a same-sketch element. If
+    either side has no recorded owner, the check is skipped -- that is the
+    compatibility path for raw COM objects and for an editor built without
+    a sketch.
+
+    Args:
+        element: A `SketchElement`, or a raw 2D geometry COM object.
+        owner_sketch: The raw `Sketch` COM object the consumer itself acts
+            on, or `None` if the consumer has no recorded owner.
+
+    Returns:
+        The raw COM object `element` wraps, or `element` itself when it was
+        already a raw COM object.
+
+    Raises:
+        ValidationError: If `element` is a `SketchElement` recorded as drawn
+            in a sketch different from `owner_sketch`. Always raised before
+            any COM call, so the model is untouched.
+    """
+    if not isinstance(element, SketchElement):
+        return element
+    element_sketch = element.sketch
+    if element_sketch is not None and owner_sketch is not None:
+        if not (element_sketch == owner_sketch):
+            raise ValidationError(
+                "This element was drawn in a different sketch; use an "
+                "element drawn in this sketch."
+            )
+    return element.com_object
+
+
 class SketchEditor:
     """Wraps a `Factory2D` obtained from `Sketch.OpenEdition()`.
 
@@ -181,7 +304,9 @@ class SketchEditor:
     `rectangle`) is a thin, validated pass-through to the verified `Factory2D`
     COM methods (`CreatePoint`, `CreateLine`, `CreateClosedCircle`,
     `CreateCircle`, `CreateControlPoint`, `CreateSpline`; see
-    `scripts/probes/27_sketch_geometry.py` for the curved-geometry ones).
+    `scripts/probes/27_sketch_geometry.py` for the curved-geometry ones),
+    wrapping each result in a `SketchElement` that records this editor's
+    sketch as its owner.
     `set_construction()` marks any of the resulting elements as construction
     geometry, which keeps them out of a padded/pocketed profile.
 
@@ -190,11 +315,13 @@ class SketchEditor:
     `concentric`) lives here too, and only here: verified
     (`docs/conventions.md` 1.2.4/6.14), `Constraints.AddMonoEltCst`/
     `AddBiEltCst` only succeed while the sketch is open for editing, which is
-    exactly the lifetime of this object. Their arguments are the raw
-    `Line2D`/`Circle2D` COM objects returned by `line()`/`circle()` -- a
-    `Reference` built with `CreateReferenceFromObject` is verified to be
-    rejected here, unlike Part Design's face/edge references. None of these
-    methods calls `Part.Update()`.
+    exactly the lifetime of this object. Their arguments accept either a
+    `SketchElement` returned by `line()`/`circle()`/etc. or the raw
+    `Line2D`/`Circle2D` COM object itself (see `_resolve_element`); either
+    way, the raw object is what actually reaches COM -- a `Reference` built
+    with `CreateReferenceFromObject` is verified to be rejected here, unlike
+    Part Design's face/edge references. None of these methods calls
+    `Part.Update()`.
     """
 
     def __init__(
@@ -202,6 +329,7 @@ class SketchEditor:
         com_object: Any,
         constraints: Any,
         generation: ModelGeneration | None = None,
+        sketch: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -219,10 +347,18 @@ class SketchEditor:
                 closes, not by this object directly. A wrapper built
                 directly from a raw COM object gets its own generation,
                 which nothing else shares.
+            sketch: The raw CATIA `Sketch` COM object this editor draws into,
+                recorded on every `SketchElement` this editor hands out so a
+                consumer can refuse one drawn in a different sketch. Optional
+                and defaults to `None` (no owner recorded) so this
+                constructor stays backward compatible with a caller that
+                built a `SketchEditor` before this parameter existed;
+                `Sketch.edit()` always supplies it.
         """
         self._com_object = com_object
         self._constraints = constraints
         self._generation = generation if generation is not None else ModelGeneration()
+        self._sketch = sketch
         self._active = True
 
     def _require_active(self) -> None:
@@ -249,7 +385,7 @@ class SketchEditor:
         """
         return self._com_object
 
-    def point(self, x: float, y: float) -> Any:
+    def point(self, x: float, y: float) -> SketchElement:
         """Creates a 2D point in the sketch.
 
         Args:
@@ -257,10 +393,11 @@ class SketchEditor:
             y: The point's Y coordinate, in millimetres.
 
         Returns:
-            The raw `Point2D` COM object. It has no `X`/`Y` properties
-            (verified, `scripts/probes/27_sketch_geometry.py`): read its
-            coordinates back with ``point.GetCoordinates([0.0, 0.0])``, which
-            returns an `(x, y)` tuple -- the same seed-array-as-output
+            A `SketchElement` wrapping the raw `Point2D` COM object. It has
+            no `X`/`Y` properties (verified,
+            `scripts/probes/27_sketch_geometry.py`): read its coordinates
+            back with ``element.com_object.GetCoordinates([0.0, 0.0])``,
+            which returns an `(x, y)` tuple -- the same seed-array-as-output
             convention already used by `Sketch.GetAbsoluteAxisData` above.
 
         Raises:
@@ -271,11 +408,12 @@ class SketchEditor:
         x_value = validate_length_value(x)
         y_value = validate_length_value(y)
         try:
-            return self._com_object.CreatePoint(x_value, y_value)
+            raw = self._com_object.CreatePoint(x_value, y_value)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        return SketchElement(raw, self._sketch)
 
-    def line(self, x1: float, y1: float, x2: float, y2: float) -> Any:
+    def line(self, x1: float, y1: float, x2: float, y2: float) -> SketchElement:
         """Creates a 2D line segment in the sketch.
 
         Args:
@@ -285,7 +423,7 @@ class SketchEditor:
             y2: The end point's Y coordinate, in millimetres.
 
         Returns:
-            The raw `Line2D` COM object.
+            A `SketchElement` wrapping the raw `Line2D` COM object.
 
         Raises:
             ParameterTypeError: If any coordinate is not an `int`/`float` (or is a `bool`).
@@ -297,11 +435,12 @@ class SketchEditor:
         x2_value = validate_length_value(x2)
         y2_value = validate_length_value(y2)
         try:
-            return self._com_object.CreateLine(x1_value, y1_value, x2_value, y2_value)
+            raw = self._com_object.CreateLine(x1_value, y1_value, x2_value, y2_value)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        return SketchElement(raw, self._sketch)
 
-    def circle(self, center_x: float, center_y: float, radius: float) -> Any:
+    def circle(self, center_x: float, center_y: float, radius: float) -> SketchElement:
         """Creates a closed 2D circle in the sketch.
 
         A closed, unconstrained circle like this one is verified to pad
@@ -314,12 +453,13 @@ class SketchEditor:
             radius: The circle radius, in millimetres.
 
         Returns:
-            The raw `Circle2D` COM object. `.Radius`, `.GeometricType`,
-            `.StartPoint`, and `.EndPoint` all read back fine; `.CenterPoint`
-            is listed as readable in the type library but FAILS with a COM
+            A `SketchElement` wrapping the raw `Circle2D` COM object.
+            `.Radius`, `.GeometricType`, `.StartPoint`, and `.EndPoint` all
+            read back fine off `element.com_object`; `.CenterPoint` is
+            listed as readable in the type library but FAILS with a COM
             error when actually accessed (verified live), so this library
             offers no helper for it -- do not add one without re-verifying
-            first. `.Construction` is a writable bool on the returned object
+            first. `.Construction` is a writable bool on `element.com_object`
             (see `set_construction()`).
 
         Raises:
@@ -332,11 +472,12 @@ class SketchEditor:
         center_y_value = validate_length_value(center_y)
         radius_value = validate_length_value(radius)
         try:
-            return self._com_object.CreateClosedCircle(
+            raw = self._com_object.CreateClosedCircle(
                 center_x_value, center_y_value, radius_value
             )
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        return SketchElement(raw, self._sketch)
 
     def arc(
         self,
@@ -345,7 +486,7 @@ class SketchEditor:
         radius: float,
         start_param: float,
         end_param: float,
-    ) -> Any:
+    ) -> SketchElement:
         """Creates an open 2D arc (circle segment) in the sketch.
 
         Verified (`scripts/probes/27_sketch_geometry.py`): `Factory2D.
@@ -370,10 +511,10 @@ class SketchEditor:
             end_param: The arc's end parameter, same caveat as `start_param`.
 
         Returns:
-            The raw `Circle2D` COM object (open, not closed -- unlike
-            `circle()`'s result). `.StartPoint`/`.EndPoint` read back as
-            `Point2D` objects; see `point()` for how to read their
-            coordinates.
+            A `SketchElement` wrapping the raw `Circle2D` COM object (open,
+            not closed -- unlike `circle()`'s result). `.StartPoint`/
+            `.EndPoint` read back off `element.com_object` as `Point2D`
+            objects; see `point()` for how to read their coordinates.
 
         Raises:
             ParameterTypeError: If any argument is not an `int`/`float` (or
@@ -391,7 +532,7 @@ class SketchEditor:
         start_param_value = validate_length_value(start_param)
         end_param_value = validate_length_value(end_param)
         try:
-            return self._com_object.CreateCircle(
+            raw = self._com_object.CreateCircle(
                 center_x_value,
                 center_y_value,
                 radius_value,
@@ -400,8 +541,9 @@ class SketchEditor:
             )
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        return SketchElement(raw, self._sketch)
 
-    def spline(self, points: "list[tuple[float, float]]") -> Any:
+    def spline(self, points: "list[tuple[float, float]]") -> SketchElement:
         """Creates a 2D spline through a sequence of control points.
 
         Verified (`scripts/probes/27_sketch_geometry.py`): `Factory2D.
@@ -422,9 +564,10 @@ class SketchEditor:
                 by CATIA itself is not established here.
 
         Returns:
-            The raw `Spline2D` COM object. `.GetNumberOfControlPoints()`
-            returns a `float`, not an `int` (verified live); `.StartPoint`
-            and `.EndPoint` return `ControlPoint2D` objects.
+            A `SketchElement` wrapping the raw `Spline2D` COM object.
+            `element.com_object.GetNumberOfControlPoints()` returns a
+            `float`, not an `int` (verified live); `.StartPoint` and
+            `.EndPoint` return `ControlPoint2D` objects.
 
         Raises:
             ParameterTypeError: If `points` is not a list of two-item tuples,
@@ -454,9 +597,10 @@ class SketchEditor:
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
         try:
-            return self._com_object.CreateSpline(poles)
+            raw = self._com_object.CreateSpline(poles)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        return SketchElement(raw, self._sketch)
 
     def set_construction(self, element: Any, construction: bool = True) -> None:
         """Marks (or unmarks) a 2D geometry element as construction geometry.
@@ -471,13 +615,16 @@ class SketchEditor:
         spline, and the pad succeeded.
 
         Args:
-            element: The raw 2D geometry COM object, as returned by
-                `line()`, `circle()`, `arc()`, `point()`, or `spline()`.
+            element: A `SketchElement` or the raw 2D geometry COM object, as
+                returned by `line()`, `circle()`, `arc()`, `point()`, or
+                `spline()`.
             construction: `True` to mark `element` as construction geometry,
                 `False` to mark it as real geometry. Defaults to `True`.
 
         Raises:
             ParameterTypeError: If `construction` is not a `bool`.
+            ValidationError: If `element` is a `SketchElement` drawn in a
+                different sketch than this editor's.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         self._require_active()
@@ -488,8 +635,9 @@ class SketchEditor:
             raise ParameterTypeError(
                 f"construction must be a bool, got {type(construction).__name__}."
             )
+        raw_element = _resolve_element(element, self._sketch)
         try:
-            element.Construction = construction
+            raw_element.Construction = construction
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -499,7 +647,7 @@ class SketchEditor:
         height: float,
         origin_x: float = 0.0,
         origin_y: float = 0.0,
-    ) -> "list[Any]":
+    ) -> "list[SketchElement]":
         """Creates a closed rectangular profile from four lines.
 
         The rectangle spans from `(origin_x, origin_y)` to
@@ -516,8 +664,9 @@ class SketchEditor:
                 Defaults to `0.0`.
 
         Returns:
-            The four raw `Line2D` COM objects forming the closed loop, in
-            counter-clockwise order starting from `(origin_x, origin_y)`.
+            Four `SketchElement`s wrapping the raw `Line2D` COM objects
+            forming the closed loop, in counter-clockwise order starting
+            from `(origin_x, origin_y)`.
 
         Raises:
             ParameterTypeError: If any argument is not an `int`/`float` (or is
@@ -542,19 +691,22 @@ class SketchEditor:
 
         Args:
             constraint_type: One of the `CONSTRAINT_*` codes.
-            element: The raw 2D element COM object (as returned by `line()`
-                or `circle()`).
+            element: A `SketchElement` or the raw 2D element COM object (as
+                returned by `line()` or `circle()`).
 
         Returns:
             A `Constraint` wrapping the newly created constraint.
 
         Raises:
+            ValidationError: If `element` is a `SketchElement` drawn in a
+                different sketch than this editor's.
             Auto3dxError: If the underlying COM call fails -- most likely
                 because this sketch's `edit()` block has already exited.
         """
         self._require_active()
+        raw_element = _resolve_element(element, self._sketch)
         try:
-            raw = self._constraints.AddMonoEltCst(constraint_type, element)
+            raw = self._constraints.AddMonoEltCst(constraint_type, raw_element)
         except pywintypes.com_error as error:
             raise _wrap_constraint_com_error(error) from error
         return Constraint(raw, self._generation)
@@ -564,19 +716,23 @@ class SketchEditor:
 
         Args:
             constraint_type: One of the `CONSTRAINT_*` codes.
-            first: The raw first 2D element COM object.
-            second: The raw second 2D element COM object.
+            first: A `SketchElement` or the raw first 2D element COM object.
+            second: A `SketchElement` or the raw second 2D element COM object.
 
         Returns:
             A `Constraint` wrapping the newly created constraint.
 
         Raises:
+            ValidationError: If `first` or `second` is a `SketchElement`
+                drawn in a different sketch than this editor's.
             Auto3dxError: If the underlying COM call fails -- most likely
                 because this sketch's `edit()` block has already exited.
         """
         self._require_active()
+        raw_first = _resolve_element(first, self._sketch)
+        raw_second = _resolve_element(second, self._sketch)
         try:
-            raw = self._constraints.AddBiEltCst(constraint_type, first, second)
+            raw = self._constraints.AddBiEltCst(constraint_type, raw_first, raw_second)
         except pywintypes.com_error as error:
             raise _wrap_constraint_com_error(error) from error
         return Constraint(raw, self._generation)
@@ -696,9 +852,9 @@ class SketchEditor:
         circles.
 
         Args:
-            first: The raw first `Circle2D` COM object.
-            second: The raw second `Circle2D` COM object, distinct from
-                `first`.
+            first: A `SketchElement` or the raw first `Circle2D` COM object.
+            second: A `SketchElement` or the raw second `Circle2D` COM
+                object, distinct from `first`.
 
         Returns:
             A `Constraint` wrapping the newly created constraint (type
@@ -708,14 +864,21 @@ class SketchEditor:
         Raises:
             ParameterTypeError: If `first` and `second` refer to the same
                 circle.
+            ValidationError: If `first` or `second` is a `SketchElement`
+                drawn in a different sketch than this editor's.
             Auto3dxError: If the underlying COM call fails -- most likely
                 because this sketch's `edit()` block has already exited.
         """
-        if first is second or first == second:
+        # Resolved up front (not left to `_bi`) so the distinctness check
+        # below compares the raw circles, not two SketchElement wrappers
+        # that could differ even while wrapping the same COM object.
+        raw_first = _resolve_element(first, self._sketch)
+        raw_second = _resolve_element(second, self._sketch)
+        if raw_first is raw_second or raw_first == raw_second:
             raise ParameterTypeError(
                 "Concentricity requires two distinct circle objects."
             )
-        return self._bi(CONSTRAINT_CONCENTRICITY, first, second)
+        return self._bi(CONSTRAINT_CONCENTRICITY, raw_first, raw_second)
 
     def length(
         self, line: Any, value: float | None = None, unit: str = MILLIMETRE
@@ -911,15 +1074,24 @@ class Sketch:
         configuration.
 
         Args:
-            line: The raw 2D line COM object (as returned by
-                `SketchEditor.line`) to use as the revolve axis.
+            line: A `SketchElement` or the raw 2D line COM object (as
+                returned by `SketchEditor.line`) to use as the revolve axis.
 
         Raises:
+            ValidationError: If `line` is a `SketchElement` drawn in a
+                different sketch than this one. Raised before any COM call
+                (`_resolve_element` runs outside the `mutation()` block
+                below), so the generation does not advance.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
+        # Resolved (and so refused, if it is from another sketch) BEFORE the
+        # mutation() block: a refusal here must not advance the generation
+        # (`docs/api-design.md` section 5.2 -- a validation failure is not a
+        # mutation), unlike the COM call itself just below.
+        raw_line = _resolve_element(line, self._com_object)
         with self._generation.mutation():
             try:
-                self._com_object.CenterLine = line
+                self._com_object.CenterLine = raw_line
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
 
@@ -1028,9 +1200,12 @@ class Sketch:
         calls `CloseEdition()`, so a failed block never leaves the sketch
         permanently locked out of `edit()`.
 
-        Also reads `Constraints` up front and passes it into the
-        `SketchEditor`, since constraint creation (`docs/conventions.md`
-        1.2.4/6.14) is verified to work only inside this block.
+        Also reads `Constraints` up front and passes it, along with this
+        sketch's own raw COM object, into the `SketchEditor`, since
+        constraint creation (`docs/conventions.md` 1.2.4/6.14) is verified to
+        work only inside this block. The raw COM object becomes the owner
+        recorded on every `SketchElement` the editor hands out, so a later
+        consumer can refuse one drawn in a different sketch.
 
         The whole edition session is one model mutation (`docs/api-design.md`
         section 5.2): geometry, construction flags and constraints are all
@@ -1065,7 +1240,7 @@ class Sketch:
         except pywintypes.com_error as error:
             self._editing = False
             raise _wrap_com_error(error) from error
-        editor = SketchEditor(factory, constraints, self._generation)
+        editor = SketchEditor(factory, constraints, self._generation, self._com_object)
         try:
             yield editor
         finally:

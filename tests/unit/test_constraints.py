@@ -85,10 +85,10 @@ def test_horizontal_calls_add_mono_elt_cst_with_the_raw_line(
         editor.horizontal(line)
 
     fake_constraints: FakeConstraints = sketch.com_object.Constraints
-    assert fake_constraints.mono_calls == [(CONSTRAINT_HORIZONTAL, line)]
+    assert fake_constraints.mono_calls == [(CONSTRAINT_HORIZONTAL, line.com_object)]
     # Identity, not just equality: no Reference wrapper was built around it.
     recorded_arg = fake_constraints.mono_calls[0][1]
-    assert recorded_arg is line
+    assert recorded_arg is line.com_object
     assert type(recorded_arg).__name__ != "Reference"
 
 
@@ -104,8 +104,8 @@ def test_vertical_calls_add_mono_elt_cst_with_the_raw_line(
         editor.vertical(line)
 
     fake_constraints: FakeConstraints = sketch.com_object.Constraints
-    assert fake_constraints.mono_calls == [(CONSTRAINT_VERTICAL, line)]
-    assert fake_constraints.mono_calls[0][1] is line
+    assert fake_constraints.mono_calls == [(CONSTRAINT_VERTICAL, line.com_object)]
+    assert fake_constraints.mono_calls[0][1] is line.com_object
 
 
 # --- creation: bi-element constraints ----------------------------------------
@@ -135,10 +135,12 @@ def test_bi_element_constraints_call_add_bi_elt_cst_with_both_raw_elements(
         getattr(editor, method_name)(first, second)
 
     fake_constraints: FakeConstraints = sketch.com_object.Constraints
-    assert fake_constraints.bi_calls == [(expected_code, first, second)]
+    assert fake_constraints.bi_calls == [
+        (expected_code, first.com_object, second.com_object)
+    ]
     _, recorded_first, recorded_second = fake_constraints.bi_calls[0]
-    assert recorded_first is first
-    assert recorded_second is second
+    assert recorded_first is first.com_object
+    assert recorded_second is second.com_object
 
 
 # --- the requested code and the resulting Type can differ -------------------

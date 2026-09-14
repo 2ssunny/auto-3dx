@@ -1,6 +1,7 @@
 """Geometry layer: sketches and Part Design features on top of `core.Part`.
 
-Exposes `Sketch`/`SketchCollection` (2D profiles on origin planes),
+Exposes `Sketch`/`SketchCollection`/`SketchElement` (2D profiles on origin
+planes, and the point/line/circle/spline elements drawn in one),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
 `Rib`/`Slot`/`RectangularPattern`/`ConstRadEdgeFillet`/`Chamfer`/`Shell`/
 `Thickness`/`Hole`/`PartDesign` (extruded, pocketed, revolved, mirrored,
@@ -90,6 +91,7 @@ from auto_3dx.geometry.sketch import (
     Sketch,
     SketchCollection,
     SketchEditor,
+    SketchElement,
 )
 
 __all__ = [
@@ -101,6 +103,7 @@ __all__ = [
     "Sketch",
     "SketchCollection",
     "SketchEditor",
+    "SketchElement",
     "Topology",
     "LENGTH_TOLERANCE",
     "PAD_KIND",

@@ -142,8 +142,8 @@ def test_arc_calls_create_circle_with_the_exact_arguments_in_order(
 
     factory: CurvedFactory2D = sketch.com_object.factory2d
     assert factory.arc_calls == [(1.0, 2.0, 10.0, 0.0, 3.14159)]
-    assert type(result).__name__ == "Circle2D"
-    assert result.Radius == 10.0
+    assert result.kind == "Circle2D"
+    assert result.com_object.Radius == 10.0
 
 
 def test_arc_coerces_int_arguments_to_float(part_factory: Callable[..., Any]) -> None:
@@ -220,11 +220,11 @@ def test_spline_calls_create_spline_with_the_exact_control_point_objects(
     passed_poles = factory.spline_calls[0]
     assert len(passed_poles) == 3
     assert all(type(pole).__name__ == "ControlPoint2D" for pole in passed_poles)
-    assert type(result).__name__ == "Spline2D"
-    assert result.poles == passed_poles
+    assert result.kind == "Spline2D"
+    assert result.com_object.poles == passed_poles
     # Identity, not just equality/count: no new objects were built in between.
     for pole in passed_poles:
-        assert pole in result.poles
+        assert pole in result.com_object.poles
 
 
 def test_spline_rejects_a_non_numeric_coordinate_before_any_com_call(
@@ -285,10 +285,10 @@ def test_set_construction_marks_an_element_construction_by_default(
 
     with sketch.edit() as editor:
         circle = editor.circle(0.0, 0.0, 10.0)
-        assert circle.Construction is False
+        assert circle.com_object.Construction is False
         editor.set_construction(circle)
 
-    assert circle.Construction is True
+    assert circle.com_object.Construction is True
 
 
 def test_set_construction_can_unset_an_element(part_factory: Callable[..., Any]) -> None:
@@ -301,7 +301,7 @@ def test_set_construction_can_unset_an_element(part_factory: Callable[..., Any])
         editor.set_construction(circle, True)
         editor.set_construction(circle, False)
 
-    assert circle.Construction is False
+    assert circle.com_object.Construction is False
 
 
 def test_set_construction_works_on_every_new_curved_geometry_kind(
@@ -318,9 +318,9 @@ def test_set_construction_works_on_every_new_curved_geometry_kind(
         for element in (arc, point, spline):
             editor.set_construction(element)
 
-    assert arc.Construction is True
-    assert point.Construction is True
-    assert spline.Construction is True
+    assert arc.com_object.Construction is True
+    assert point.com_object.Construction is True
+    assert spline.com_object.Construction is True
 
 
 @pytest.mark.parametrize("bad_value", [1, 0, "true", None, 1.0])
@@ -337,7 +337,7 @@ def test_set_construction_rejects_a_non_bool(
             editor.set_construction(circle, bad_value)
 
     # Refused before the write: the flag must be untouched.
-    assert circle.Construction is False
+    assert circle.com_object.Construction is False
 
 
 # ---------------------------------------------------------------------------
@@ -363,10 +363,12 @@ def test_concentric_calls_add_bi_elt_cst_with_both_raw_circles(
         editor.concentric(first, second)
 
     fake_constraints = sketch.com_object.Constraints
-    assert fake_constraints.bi_calls == [(CONSTRAINT_CONCENTRICITY, first, second)]
+    assert fake_constraints.bi_calls == [
+        (CONSTRAINT_CONCENTRICITY, first.com_object, second.com_object)
+    ]
     _, recorded_first, recorded_second = fake_constraints.bi_calls[0]
-    assert recorded_first is first
-    assert recorded_second is second
+    assert recorded_first is first.com_object
+    assert recorded_second is second.com_object
     assert type(recorded_first).__name__ != "Reference"
 
 
@@ -410,7 +412,7 @@ def test_radius_constraint_still_uses_type_code_14(part_factory: Callable[..., A
         editor.radius(circle, 12.0)
 
     fake_constraints = sketch.com_object.Constraints
-    assert fake_constraints.mono_calls == [(CONSTRAINT_RADIUS, circle)]
+    assert fake_constraints.mono_calls == [(CONSTRAINT_RADIUS, circle.com_object)]
 
 
 # ---------------------------------------------------------------------------

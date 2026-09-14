@@ -44,6 +44,7 @@ HOMES = {
         "Sketch",
         "SketchCollection",
         "SketchEditor",
+        "SketchElement",
         "Constraint",
         "ConstraintCollection",
         "PartDesign",
