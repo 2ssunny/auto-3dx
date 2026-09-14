@@ -27,6 +27,7 @@ from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
 from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.geometry.topology import Topology
+from auto_3dx.inspect import Inspector
 from auto_3dx.measurement.inertia import SolidMeasurement
 from auto_3dx.parameters.collection import ParameterCollection
 
@@ -65,6 +66,7 @@ class Part:
         self._planes: PlaneCollection | None = None
         self._formulas: FormulaCollection | None = None
         self._measurement: SolidMeasurement | None = None
+        self._inspector: Inspector | None = None
 
     @property
     def com_object(self) -> Any:
@@ -204,6 +206,18 @@ class Part:
         if self._measurement is None:
             self._measurement = SolidMeasurement(self._editor, self._main_body)
         return self._measurement
+
+    @property
+    def inspect(self) -> Inspector:
+        """Inspector: Reads what this Part already contains, without changing it.
+
+        Built on first access and cached afterwards. Inspection never advances the
+        model generation, never rebuilds, and leaves the selection and the In-Work
+        Object as it found them (``docs/api-design.md`` section 11).
+        """
+        if self._inspector is None:
+            self._inspector = Inspector(self)
+        return self._inspector
 
     def _main_body(self) -> Any:
         """Returns the raw ``MainBody``, the default thing to measure.

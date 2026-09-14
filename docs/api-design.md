@@ -50,7 +50,7 @@ Catia                                    one attached session
     ├── part_design   PartDesign            solid features (Pad, Pocket, Hole, ...)
     ├── topology      Topology              edges() and faces() snapshots
     ├── measurement   SolidMeasurement      volume, area, mass, centre of gravity
-    ├── inspect       Inspector             structured read-only model summary [Planned]
+    ├── inspect       Inspector             structured read-only model summary
     ├── is_up_to_date()                     CATIA rebuild status
     └── update()                            the only call that rebuilds the model
 ```
@@ -368,7 +368,8 @@ Status: Implemented.
 
 ## 11. Inspection
 
-Status: Planned.
+Status: Implemented for the fields below, and pinned by `tests/unit/test_inspection.py`.
+Planned: the fields that wait for live evidence from probe 38.
 
 Reading an existing model reliably matters as much as creating geometry, because an agent must
 be able to find out what is there before it changes anything.
@@ -378,6 +379,24 @@ be able to find out what is there before it changes anything.
 - Results are frozen dataclasses. Text rendering is a layer on top, never the primary output.
 - Each field is backed by a live-verified read. A field CATIA cannot report reliably is absent,
   not guessed.
+
+```python
+summary = part.inspect.summary()       # PartSummary, a frozen dataclass
+summary.name                           # the Part name
+summary.up_to_date                     # CATIA rebuild status
+summary.features                       # FeatureInfo(name, kind, supported), tree order
+summary.sketches                       # sketch names, tree order
+summary.parameters                     # ParameterInfo for user parameters only
+print(summary.render())                # human-readable text built from the data
+```
+
+`features` lists every item in the main body, including kinds created in the CATIA user
+interface that the SDK does not wrap; `supported` says whether `part.part_design` can handle
+that kind. Nothing in the model is hidden because the SDK cannot create it.
+
+Absent until probe 38 runs live: other bodies, geometrical sets and their contents, and edge
+and face counts. The topology search behind the counts currently clears the user's
+selection, which inspection must not do.
 
 ---
 
@@ -485,5 +504,6 @@ Status: Enforced by review.
 | `measurement.measure()` defaults to the main body | 9 | Done |
 | Small package root | 13 | Done |
 | Test that only `Part.update()` rebuilds, and nothing saves | 6 | Done |
-| `part.inspect` | 11 | Planned |
+| `part.inspect`: name, rebuild status, features, sketches, user parameters | 11 | Done |
+| `part.inspect`: bodies, geometrical sets, topology counts (needs probe 38) | 11 | Planned |
 | File export | 12 | Not probed |
