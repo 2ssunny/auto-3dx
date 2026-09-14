@@ -79,6 +79,7 @@ from auto_3dx.geometry.part_design import (
     Slot,
     Thickness,
 )
+from auto_3dx.geometry.topology import Topology
 from auto_3dx.geometry.sketch import (
     AXIS_TOLERANCE,
     SUPPORT_XY,
@@ -99,6 +100,7 @@ __all__ = [
     "Sketch",
     "SketchCollection",
     "SketchEditor",
+    "Topology",
     "LENGTH_TOLERANCE",
     "PAD_KIND",
     "POCKET_KIND",

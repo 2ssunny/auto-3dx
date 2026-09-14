@@ -436,7 +436,8 @@ def test_part_design_snapshot_faces_delegates_to_take_face_snapshot() -> None:
     selection = _Selection([_Reference("f1")])
     design = PartDesign(_Part(), selection=selection)
 
-    snapshot = design.snapshot_faces()
+    with pytest.warns(DeprecationWarning, match="part.topology"):
+        snapshot = design.snapshot_faces()
 
     assert selection.queries == [FACE_SEARCH_QUERY]
     assert len(snapshot) == 1
@@ -446,7 +447,7 @@ def test_part_design_snapshot_faces_without_selection_raises() -> None:
     """No editor selection wired in means faces cannot be searched at all."""
     design = PartDesign(_Part(), selection=None)
 
-    with pytest.raises(Auto3dxError):
+    with pytest.warns(DeprecationWarning), pytest.raises(Auto3dxError):
         design.snapshot_faces()
 
 

@@ -48,7 +48,7 @@ Catia                                    one attached session
     ├── planes        PlaneCollection       offset and angled reference planes
     ├── sketches      SketchCollection      Sketch -> edit() -> SketchEditor
     ├── part_design   PartDesign            solid features (Pad, Pocket, Hole, ...)
-    ├── topology      Topology              edges() and faces() snapshots     [Planned]
+    ├── topology      Topology              edges() and faces() snapshots
     ├── measurement   SolidMeasurement      volume, area, mass, centre of gravity
     ├── inspect       Inspector             structured read-only model summary [Planned]
     ├── is_up_to_date()                     CATIA rebuild status
@@ -135,8 +135,9 @@ Rules that apply everywhere:
 
 ## 5. Mutation semantics and model generation
 
-Status: Planned. Today the generation lives only in `PartDesign` and misses several mutation
-paths (see the migration table).
+Status: Implemented for `PartDesign`, `Topology` and `Part.update()`, and Enforced by
+`tests/unit/test_model_generation.py`. Planned: sketches, planes, parameters, formulas and
+constraints, which still mutate the model without advancing it (see the migration table).
 
 Topology references are transient. A BRep name cannot be stored and re-resolved, and a rebuild
 can change every edge and face name and index. Reusing an old reference after a change succeeds
@@ -147,8 +148,10 @@ SDK therefore tracks a **model generation** and refuses stale references before 
 
 - Each `Part` owns exactly one generation counter. Every collection and wrapper obtained through
   that `Part` shares it.
-- `Catia` hands out the same generation for the same CATIA Part, compared by COM identity, so
-  two `Part` wrappers of one model cannot disagree about it.
+- Planned, pending live evidence: `Catia` handing out one generation per CATIA Part, compared
+  by COM identity, so two `Part` wrappers of one model cannot disagree about it. COM identity
+  was verified for sketches but not yet for Parts. Until it is, each `Part` wrapper owns its
+  generation: obtain the Part once and keep using that object.
 - The counter is private. Callers observe it only through staleness errors and the `generation`
   attribute on snapshots.
 
@@ -193,8 +196,8 @@ raises `StaleSnapshotError` on mismatch. The model is untouched when this is rai
 
 ## 6. Update policy
 
-Status: Implemented. Planned: a test that fails if any module other than `Part` calls
-`Update()`.
+Status: Implemented. `update()` advancing the generation is Enforced. Planned: a test that
+fails if any module other than `Part` calls `Update()`.
 
 **`part.update()` is the only method that rebuilds the model.** No constructor, setter, `ensure`
 or removal calls `Part.Update()`.
@@ -228,7 +231,8 @@ unsaved-change detector: a standalone parameter change does not make it return `
 
 ## 7. Topology references
 
-Status: Implemented under `part_design`. Planned: move to `part.topology`.
+Status: Implemented. `part.part_design.snapshot_edges()` and `snapshot_faces()` remain as
+deprecated aliases that warn and share the same generation; they will be removed before 1.0.
 
 ```python
 edges = part.topology.edges()          # EdgeSnapshot of the whole solid
@@ -449,12 +453,14 @@ Status: Enforced by review.
 
 | Item | Section | State |
 |---|---|---|
-| Shared model generation on `Part`, advanced by every mutation and by `update()` | 5 | Planned |
-| `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Planned |
+| Shared model generation on `Part`: `PartDesign`, `Topology`, `update()` | 5 | Done |
+| Shared model generation: sketches, planes, parameters, formulas, constraints | 5 | Planned |
+| One generation per CATIA Part across wrappers (needs live COM identity check) | 5 | Planned |
+| `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Done |
 | Topology snapshots restore the user's selection | 7 | Planned |
 | Error categories and `AutomationError` | 8 | Planned |
 | One COM error translation module | 8 | Planned |
-| `Part.update()` maps only COM failures | 8 | Planned |
+| `Part.update()` maps only COM failures | 8 | Done |
 | `measurement.measure()` defaults to the main body | 9 | Planned |
 | Small package root | 13 | Planned |
 | Test that only `Part.update()` rebuilds | 6 | Planned |

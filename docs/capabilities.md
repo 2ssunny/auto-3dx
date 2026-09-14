@@ -159,7 +159,7 @@ angled = part.planes.create_angle(
 | **Mirror 생성 / ensure / 삭제** | 동작 | 원점 평면을 받는다. BRep 참조 불필요 |
 | **Rib / Slot 생성 / ensure / 삭제** | 동작 | 프로파일 + 경로 스케치 2개. Slot은 절삭 |
 | **사각 패턴 생성 / 실패 후 삭제** | 동작 | `create_rectangular_pattern()` / `remove_rectangular_pattern(pattern)`. signed axis만 받고 같은 축 조합은 COM 호출 전 거부. 방향 매핑은 probe 26·30, 공개 adapter는 live integration으로 검증 |
-| **모서리 필렛 생성 / 조회 / 삭제** | 동작 | `create_edge_fillet`. `snapshot_edges()`의 `Edge`만 받는다 (3.4.2) |
+| **모서리 필렛 생성 / 조회 / 삭제** | 동작 | `create_edge_fillet`. `part.topology.edges()`의 `Edge`만 받는다 (3.4.2) |
 | **챔퍼 생성 / 조회 / 삭제** | 동작 | `create_chamfer`. mode는 내부 고정값 1, 인자로 노출 안 함 (3.4.2) |
 | 목록 / 이름 조회 | 동작 | `pads`~`slots`에 `edge_fillets`, `chamfers` 추가 |
 | formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` / `first_angle_parameter()` |
@@ -238,7 +238,7 @@ part.update()
 새 참조 레이어(`geometry.edges`)가 생겼다.
 
 ```python
-snapshot = part.part_design.snapshot_edges()   # 솔리드 전체 모서리, EdgeSnapshot
+snapshot = part.topology.edges()   # 솔리드 전체 모서리, EdgeSnapshot
 fillet = part.part_design.create_edge_fillet("F1", snapshot[0], radius=3)
 part.update()
 
@@ -251,18 +251,18 @@ part.update()
 
 세 가지 제약을 반드시 알아야 한다.
 
-- **`snapshot_edges()`는 솔리드 전체를 검색한다.** 한 feature의 모서리만 골라 검색
+- **`part.topology.edges()`는 솔리드 전체를 검색한다.** 한 feature의 모서리만 골라 검색
   범위를 좁히는 방법이 없다(네 가지 경로를 시험했고 전부 막혔다). 필요한 모서리는
   호출자가 `EdgeSnapshot`을 순회하며 스스로 걸러야 한다.
 - **모서리를 안정적으로 다시 지목할 방법이 없다.** `Edge.descriptor`는 BRep 이름 문자열을
   주지만 저장했다가 나중에 다시 그 모서리로 되돌리는 경로가 전부 막혔고, 재빌드가 일어나면
-  모서리 개수와 순서(그리고 `Edge.index`)가 전부 바뀐다. 그래서 `snapshot_edges()`를 다시
+  모서리 개수와 순서(그리고 `Edge.index`)가 전부 바뀐다. 그래서 `part.topology.edges()`를 다시
   부르는 것 외에는 답이 없다.
 - **모델이 바뀌면 이전 snapshot은 거부된다.** 같은 snapshot으로 필렛을 두 번 만들면
   성공할 때도 실패할 때도 있고, 호출자는 어느 쪽인지 미리 알 수 없다. 그래서
   `PartDesign`이 모델을 바꾸는 순간(즉 이 클래스의 다른 `create_*`/`remove_*`가 호출되는
   순간) 기존 snapshot을 stale로 표시하고, 그 뒤로 쓰면 COM에 닿기 전에
-  `StaleSnapshotError`를 낸다. 새 작업 전에는 항상 새 `snapshot_edges()`를 부른다.
+  `StaleSnapshotError`를 낸다. 새 작업 전에는 항상 새 `part.topology.edges()`를 부른다.
 
 그 외:
 
@@ -500,7 +500,10 @@ pattern.com_object
 ### PartDesign / 모서리 필렛 / 챔퍼
 
 ```python
-part.part_design.snapshot_edges()  -> EdgeSnapshot   # 솔리드 전체, 모델이 바뀌면 stale
+part.topology.edges()  -> EdgeSnapshot   # 솔리드 전체, 모델이 바뀌면 stale
+part.topology.faces()  -> FaceSnapshot   # 같은 규칙
+# part.part_design.snapshot_edges() / snapshot_faces()는 deprecated alias다.
+# 경고를 내고 같은 generation을 공유하며, 1.0 전에 제거한다.
                 .edge_fillets / .chamfers
                 .get_edge_fillet(name) / .get_chamfer(name)
                 .create_edge_fillet(name, edge, radius, unit="mm",
@@ -640,7 +643,7 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 ## 7. 확장 순서 제안
 
-완료: 모서리 선택 레이어(`snapshot_edges`/`EdgeSnapshot`), Chamfer 인자 확정
+완료: 모서리 선택 레이어(`part.topology.edges()`/`EdgeSnapshot`), Chamfer 인자 확정
 (mode=1 고정), 사용자 정의 offset/각도 평면(스케치 + Pad까지 검증). 이제 남은 순서는
 다음과 같다.
 
@@ -649,7 +652,7 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
    factory에도 통하는지 아직 시험하지 않았다. 통한다면 이 네 개가 다음 후보다.
 2. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
    검증해야 한다. 지금 기준으로는 미검증이며 구현하지 않는다.
-3. **모서리 재선택 selector** — 지금은 재빌드마다 `snapshot_edges()`를 새로 불러야
+3. **모서리 재선택 selector** — 지금은 재빌드마다 `part.topology.edges()`를 새로 불러야
    한다. BRep 이름 재해석, 재빌드 후 이름/순서 보존, 측정 기반 선택, feature 단위
    검색 범위 한정 네 가지 경로를 모두 시험했고 전부 막혔다(`geometry.edges`). 새로운
    돌파구가 없으면 이 항목은 열린 채로 남는다.

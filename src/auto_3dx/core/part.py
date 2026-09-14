@@ -2,19 +2,25 @@
 
 :class:`Part` exposes only the verified surface of the CATIA ``Part`` object:
 its name, its parameters, its sketches, its planes, its Part Design features,
-its measurements, ``IsUpToDate()``, and ``Update()``. Unverified members are
-intentionally not wrapped here.
+its topology, its measurements, ``IsUpToDate()``, and ``Update()``. Unverified
+members are intentionally not wrapped here.
+
+A ``Part`` is the unit of state (``docs/api-design.md`` section 2). It owns one model
+generation and hands it to every collection it builds, so a mutation made through any
+of them makes every outstanding topology snapshot stale.
 """
 
 from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import Auto3dxError, NoActiveEditorError, PartUpdateError
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
 from auto_3dx.geometry.sketch import SketchCollection
+from auto_3dx.geometry.topology import Topology
 from auto_3dx.measurement.inertia import SolidMeasurement
 from auto_3dx.parameters.collection import ParameterCollection
 
@@ -63,6 +69,8 @@ class Part:
         self._com_object = com_object
         self._selection = selection
         self._editor = editor
+        self._generation = ModelGeneration()
+        self._topology: Topology | None = None
         self._parameters: ParameterCollection | None = None
         self._sketches: SketchCollection | None = None
         self._part_design: PartDesign | None = None
@@ -131,8 +139,22 @@ class Part:
         Built on first access and cached afterwards.
         """
         if self._part_design is None:
-            self._part_design = PartDesign(self._com_object, self._selection)
+            self._part_design = PartDesign(
+                self._com_object, self._selection, self._generation
+            )
         return self._part_design
+
+    @property
+    def topology(self) -> Topology:
+        """Topology: Edge and face snapshots of the Part's solid.
+
+        Built on first access and cached afterwards. Its snapshots are stamped with
+        this Part's model generation, so they are refused once anything reachable
+        from this Part changes the model (``docs/api-design.md`` section 7).
+        """
+        if self._topology is None:
+            self._topology = Topology(self._selection, self._generation)
+        return self._topology
 
     @property
     def planes(self) -> PlaneCollection:
@@ -250,20 +272,35 @@ class Part:
     def update(self) -> None:
         """Recompute the Part by calling ``Part.Update()``.
 
+        This is the only method in the SDK that rebuilds the model
+        (``docs/api-design.md`` section 6). It advances the model generation whether
+        it succeeds or fails: the rebuild is when CATIA recomputes topology, and a
+        failed rebuild leaves the model in a state the caller must repair.
+
+        After ``PartUpdateError``, the feature that caused it is still in the model,
+        and every later update fails until it is removed. Remove it before doing
+        anything else.
+
         Does not call Save, and does not touch ``Part.Relations`` or any other
         unverified API.
 
         Raises:
-            PartUpdateError: ``Part.Update()`` failed.
+            PartUpdateError: ``Part.Update()`` failed, or is unusable in this release.
         """
-        try:
-            self._com_object.Update()
-        except pywintypes.com_error as error:
-            raise PartUpdateError(
-                f"Part.Update() failed.{_format_com_error(error)}"
-            ) from error
-        except Exception as error:
-            raise PartUpdateError("Part.Update() failed.") from error
+        with self._generation.mutation():
+            try:
+                self._com_object.Update()
+            except pywintypes.com_error as error:
+                raise PartUpdateError(
+                    f"Part.Update() failed.{_format_com_error(error)}"
+                ) from error
+            except (AttributeError, TypeError) as error:
+                # A dispatch member missing or rejecting its arguments is a real
+                # possibility in some releases. Anything broader is left unmapped so
+                # a bug in this library is not reported as a CATIA failure.
+                raise PartUpdateError(
+                    f"Part.Update() is unusable in this release: {type(error).__name__}."
+                ) from error
 
     def __repr__(self) -> str:
         """str: Debug representation showing the wrapped Part's name."""

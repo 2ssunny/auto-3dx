@@ -413,7 +413,8 @@ def test_part_design_snapshot_edges_delegates_to_take_edge_snapshot() -> None:
     selection = _Selection([_Reference("e1")])
     design = PartDesign(_Part(), selection=selection)
 
-    snapshot = design.snapshot_edges()
+    with pytest.warns(DeprecationWarning, match="part.topology"):
+        snapshot = design.snapshot_edges()
 
     assert selection.queries == [EDGE_SEARCH_QUERY]
     assert len(snapshot) == 1
@@ -423,7 +424,7 @@ def test_part_design_snapshot_edges_without_selection_raises() -> None:
     """No editor selection wired in means edges cannot be searched at all."""
     design = PartDesign(_Part(), selection=None)
 
-    with pytest.raises(Auto3dxError):
+    with pytest.warns(DeprecationWarning), pytest.raises(Auto3dxError):
         design.snapshot_edges()
 
 

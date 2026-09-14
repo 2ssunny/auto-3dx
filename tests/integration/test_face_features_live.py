@@ -109,7 +109,7 @@ def _run_face_feature(
     try:
         _build_pad(part, sketch_name, pad_name)
 
-        snapshot = part.part_design.snapshot_faces()
+        snapshot = part.topology.faces()
         assert len(snapshot) > 0
         assert snapshot[0].descriptor
         assert snapshot[0].index == 1
@@ -176,8 +176,8 @@ def test_hole_round_trip(part: Any) -> None:
 
 def test_face_snapshot_is_repeatable_while_unchanged(part: Any) -> None:
     """Two face searches in a row agree exactly, as the edge search does."""
-    first = part.part_design.snapshot_faces()
-    second = part.part_design.snapshot_faces()
+    first = part.topology.faces()
+    second = part.topology.faces()
 
     assert len(first) == len(second)
     assert [face.index for face in first] == [face.index for face in second]

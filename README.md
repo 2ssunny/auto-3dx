@@ -394,12 +394,12 @@ except PartUpdateError:
 
 면·모서리를 지목할 수 없어 막혀 있던 약 80개 face/edge feature 중 첫 두 개가
 `create_edge_fillet`/`create_chamfer`로 구현되었습니다. 모서리는 이름이나
-좌표가 아니라 `part.part_design.snapshot_edges()`가 돌려주는 `EdgeSnapshot`
+좌표가 아니라 `part.topology.edges()`가 돌려주는 `EdgeSnapshot`
 에서 얻습니다. 이 snapshot은 스케치가 아니라 **솔리드 전체**의 모서리를
 검색한 결과이고, 한 feature의 모서리만 골라 검색 범위를 좁히는 방법은 없습니다.
 
 ```python
-snapshot = part.part_design.snapshot_edges()
+snapshot = part.topology.edges()
 
 fillet = design.create_edge_fillet("F1", snapshot[0], radius=3, unit="mm")
 part.update()
@@ -431,7 +431,7 @@ part.update()
   try:
       design.create_edge_fillet("F2", snapshot[1], radius=2, unit="mm")
   except StaleSnapshotError:
-      snapshot = part.part_design.snapshot_edges()  # 새로 떠야 한다
+      snapshot = part.topology.edges()  # 새로 떠야 한다
   ```
 - **`ensure_edge_fillet`/`ensure_chamfer`는 없습니다.** `ensure_pad`처럼 기존
   feature의 소스를 비교하려면 안정적으로 다시 읽을 수 있는 핸들이 필요한데
@@ -508,7 +508,7 @@ Automation 경로의 PLM Physical Product/3D Shape 생성은 설치 환경에서
 면·모서리 참조가 필요한 feature 중 `Chamfer`와 `EdgeFillet`(모서리 참조)만
 제공합니다. `Selection.Search('Topology.Edge,all')` + `SelectedElement.Reference`
 로 모서리 `Reference`를 얻는 경로 하나가 뚫렸을 뿐이고, 그 모서리를 재빌드
-너머로 다시 지목하는 방법은 없습니다(`snapshot_edges()`를 다시 불러야 합니다).
+너머로 다시 지목하는 방법은 없습니다(`part.topology.edges()`를 다시 불러야 합니다).
 Hole, Draft, Shell, Thickness처럼 **면** reference가 필요한 API는 아직
 제공하지 않습니다. 같은 Search 경로가 면에도 통하는지 아직 시험하지
 않았습니다.

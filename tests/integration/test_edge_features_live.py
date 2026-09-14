@@ -104,7 +104,7 @@ def test_edge_fillets_and_chamfer_round_trip(part: Any) -> None:
         part.part_design.create_pad(pad_name, sketch, PAD_HEIGHT)
         part.update()
 
-        snapshot = part.part_design.snapshot_edges()
+        snapshot = part.topology.edges()
         assert len(snapshot) > 0
         # The descriptor is the BRep string; it is opaque and cannot be stored
         # and resolved later, but it must at least be readable for logging.
@@ -132,7 +132,7 @@ def test_edge_fillets_and_chamfer_round_trip(part: Any) -> None:
 
         # A fillet changes the topology, so the edge count moves. That is why a
         # snapshot describes one model state and an index is not an identity.
-        refreshed = part.part_design.snapshot_edges()
+        refreshed = part.topology.edges()
         assert len(refreshed) != edges_before
 
         second = part.part_design.create_edge_fillet(
@@ -141,7 +141,7 @@ def test_edge_fillets_and_chamfer_round_trip(part: Any) -> None:
         part.update()
         assert second.name == second_fillet
 
-        refreshed = part.part_design.snapshot_edges()
+        refreshed = part.topology.edges()
 
         chamfer = part.part_design.create_chamfer(
             chamfer_name,
@@ -166,8 +166,8 @@ def test_edge_fillets_and_chamfer_round_trip(part: Any) -> None:
 
 def test_snapshot_is_repeatable_while_the_model_is_unchanged(part: Any) -> None:
     """Two searches in a row agree exactly, which is what makes an index usable."""
-    first = part.part_design.snapshot_edges()
-    second = part.part_design.snapshot_edges()
+    first = part.topology.edges()
+    second = part.topology.edges()
 
     assert len(first) == len(second)
     assert [edge.index for edge in first] == [edge.index for edge in second]

@@ -58,11 +58,13 @@ there is no verified way to read a shell/thickness/hole's source face back,
 so there is no `ensure_shell`/`ensure_thickness`/`ensure_hole` either.
 """
 
+import warnings
 import math
 from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
@@ -339,13 +341,19 @@ class SketchFeature:
     `AddNewPad`/`AddNewPocket` when the feature was created.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(
+        self, com_object: Any, generation: ModelGeneration | None = None
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA `Pad` or `Pocket` COM object to wrap.
+            generation: The owning Part's model generation, advanced by every
+                write this wrapper makes. A wrapper built directly from a raw
+                COM object gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -405,10 +413,11 @@ class SketchFeature:
         """
         validate_length_unit(unit)
         coerced = validate_length_value(depth)
-        try:
-            self._com_object.FirstLimit.Dimension.Value = coerced
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        with self._generation.mutation():
+            try:
+                self._com_object.FirstLimit.Dimension.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def sketch(self) -> Sketch:
         """Returns the sketch this feature was built from.
@@ -518,13 +527,19 @@ class RevolvedFeature:
     COM call produces.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(
+        self, com_object: Any, generation: ModelGeneration | None = None
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA `Shaft` or `Groove` COM object to wrap.
+            generation: The owning Part's model generation, advanced by every
+                write this wrapper makes. A wrapper built directly from a raw
+                COM object gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -599,10 +614,11 @@ class RevolvedFeature:
         """
         validate_angle_unit(unit)
         coerced = validate_angle_value(angle)
-        try:
-            self._com_object.FirstAngle.Value = coerced
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        with self._generation.mutation():
+            try:
+                self._com_object.FirstAngle.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def set_second_angle(self, angle: float, unit: str = DEGREE) -> None:
         """Sets the feature's second revolve angle.
@@ -618,10 +634,11 @@ class RevolvedFeature:
         """
         validate_angle_unit(unit)
         coerced = validate_angle_value(angle)
-        try:
-            self._com_object.SecondAngle.Value = coerced
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        with self._generation.mutation():
+            try:
+                self._com_object.SecondAngle.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def sketch(self) -> Sketch:
         """Returns the sketch this feature was built from.
@@ -702,13 +719,19 @@ class _NamedFeature:
     time, it lives here once and all three inherit it.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(
+        self, com_object: Any, generation: ModelGeneration | None = None
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA COM object to wrap.
+            generation: The owning Part's model generation, advanced by every
+                write this wrapper makes. A wrapper built directly from a raw
+                COM object gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -894,13 +917,19 @@ class RectangularPattern:
     :meth:`PartDesign.remove_rectangular_pattern`.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(
+        self, com_object: Any, generation: ModelGeneration | None = None
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA `RectPattern` COM object to wrap.
+            generation: The owning Part's model generation, advanced by every
+                write this wrapper makes. A wrapper built directly from a raw
+                COM object gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -963,7 +992,12 @@ class PartDesign:
     explains why in full).
     """
 
-    def __init__(self, part_com_object: Any, selection: Any = None) -> None:
+    def __init__(
+        self,
+        part_com_object: Any,
+        selection: Any = None,
+        generation: ModelGeneration | None = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -975,30 +1009,27 @@ class PartDesign:
                 Required only by the `remove_*` methods, because `Shapes` has
                 no `Remove` method and deletion has to go through the
                 editor's selection. Reading and creating work without it.
+            generation: The owning Part's model generation. A standalone
+                instance gets its own, which no other wrapper shares; obtain
+                `PartDesign` from a `Part` instead.
         """
         self._part_com_object = part_com_object
         self._selection = selection
-        # Bumped by every method that changes the model, so an edge snapshot
-        # taken before a change can be recognised as stale. Reusing one is the
-        # single sharpest edge in this API: it sometimes works and sometimes
-        # fails, at creation or at update, depending on whether that particular
-        # edge survived the change (`geometry.edges`, fact 1).
-        self._generation = 0
+        # Shared with the owning Part and everything else reachable from it
+        # (`docs/api-design.md` section 5). Every mutation here advances it, and
+        # every edge or face handle is checked against it before reaching CATIA.
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def snapshot_generation(self) -> int:
-        """int: How many model changes this wrapper has made.
+        """int: The owning Part's current model generation.
 
-        An `EdgeSnapshot` is stamped with this value when it is taken, and is
+        A topology snapshot is stamped with this value when it is taken, and is
         refused once the two no longer agree. Exposed so a caller can tell
         whether a snapshot it is holding is still current without having to
         catch `StaleSnapshotError`.
         """
-        return self._generation
-
-    def _record_model_change(self) -> None:
-        """Marks every outstanding edge snapshot as describing an older model."""
-        self._generation += 1
+        return self._generation.value
 
     def _require_current_edge(self, edge: Edge, noun: str) -> None:
         """Refuses an `Edge` whose snapshot predates the latest model change.
@@ -1011,15 +1042,7 @@ class PartDesign:
             StaleSnapshotError: If the edge came from a snapshot taken
                 before this `PartDesign` last changed the model.
         """
-        if edge.generation != self._generation:
-            raise StaleSnapshotError(
-                f"This edge came from a snapshot of an older model "
-                f"(generation {edge.generation}, now {self._generation}), so it "
-                f"cannot be used to create a {noun}. CATIA would accept it "
-                "sometimes and fail unpredictably at creation or at update. "
-                "Call snapshot_edges() again and pick the edge from the new "
-                "snapshot."
-            )
+        self._generation.require_current(edge.generation, "edge", "part.topology.edges()")
 
     def _require_current_face(self, face: Face, noun: str) -> None:
         """Refuses a `Face` whose snapshot predates the latest model change.
@@ -1040,15 +1063,7 @@ class PartDesign:
             StaleSnapshotError: If the face came from a snapshot taken
                 before this `PartDesign` last changed the model.
         """
-        if face.generation != self._generation:
-            raise StaleSnapshotError(
-                f"This face came from a snapshot of an older model "
-                f"(generation {face.generation}, now {self._generation}), so it "
-                f"cannot be used to create a {noun}. CATIA would accept it "
-                "sometimes and fail unpredictably at creation or at update. "
-                "Call snapshot_faces() again and pick the face from the new "
-                "snapshot."
-            )
+        self._generation.require_current(face.generation, "face", "part.topology.faces()")
 
     def _shapes(self) -> Any:
         """Returns the raw `MainBody.Shapes` collection.
@@ -1079,7 +1094,10 @@ class PartDesign:
         Raises:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        return [wrapper_cls(item) for item in _scan_shapes(self._shapes(), kind)]
+        return [
+            wrapper_cls(item, self._generation)
+            for item in _scan_shapes(self._shapes(), kind)
+        ]
 
     def _get(self, kind: str, wrapper_cls: type, noun: str, name: str) -> Any:
         """Looks up a feature of one kind by name.
@@ -1219,33 +1237,32 @@ class PartDesign:
         else:
             raise FeatureConflictError(f"A {noun} named {name!r} already exists.")
 
-        try:
-            factory = getattr(self._part_com_object.ShapeFactory, factory_method)
-            com_object = factory(*factory_args)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        feature = wrapper_cls(com_object)
-        # The model has changed the moment AddNew* returns, so any outstanding
-        # edge snapshot is already stale -- including on the rename failure
-        # below, which leaves the feature in the tree.
-        self._record_model_change()
-        # AddNew* already mutated the model; if the rename below fails, a
-        # default-named feature is left behind rather than rolled back
-        # (deleting a pad/pocket cascade-deletes its sketch, which makes
-        # automatic rollback more dangerous than reporting).
-        try:
-            feature.com_object.Name = name
-        except pywintypes.com_error as error:
+        # The generation advances once this block is attempted, even when it
+        # raises: AddNew* can create the feature and then fail the rename, which
+        # leaves it in the tree (`docs/api-design.md` section 5.3).
+        with self._generation.mutation():
             try:
-                actual_name = feature.name
-            except Auto3dxError:
-                actual_name = "unknown"
-            raise PartialCreationError(
-                f"Created a {noun} but failed to rename it to {name!r}; it "
-                f"currently exists in the model as {actual_name!r}. Do not "
-                f"retry blindly: retrying would create another {noun} instead "
-                "of fixing this one."
-            ) from error
+                factory = getattr(self._part_com_object.ShapeFactory, factory_method)
+                com_object = factory(*factory_args)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            feature = wrapper_cls(com_object, self._generation)
+            # A failed rename leaves a default-named feature behind rather than
+            # rolling back: deleting a pad or pocket cascade-deletes its sketch,
+            # which makes automatic rollback more dangerous than reporting.
+            try:
+                feature.com_object.Name = name
+            except pywintypes.com_error as error:
+                try:
+                    actual_name = feature.name
+                except Auto3dxError:
+                    actual_name = "unknown"
+                raise PartialCreationError(
+                    f"Created a {noun} but failed to rename it to {name!r}; it "
+                    f"currently exists in the model as {actual_name!r}. Do not "
+                    f"retry blindly: retrying would create another {noun} instead "
+                    "of fixing this one."
+                ) from error
         return feature
 
     def _ensure(
@@ -1421,8 +1438,8 @@ class PartDesign:
                 deletion failed.
         """
         target = get_method(name)
-        delete_via_selection(self._selection, target.com_object, f"{noun} {name!r}")
-        self._record_model_change()
+        with self._generation.mutation():
+            delete_via_selection(self._selection, target.com_object, f"{noun} {name!r}")
 
     @property
     def pads(self) -> "list[Pad]":
@@ -2346,7 +2363,13 @@ class PartDesign:
             Auto3dxError: If no editor selection is available, or the
                 underlying COM call fails unexpectedly.
         """
-        return take_edge_snapshot(self._selection, self._generation)
+        warnings.warn(
+            "PartDesign.snapshot_edges() is deprecated; use part.topology.edges(), "
+            "which shares the same model generation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return take_edge_snapshot(self._selection, self._generation.value)
 
     @property
     def edge_fillets(self) -> "list[ConstRadEdgeFillet]":
@@ -2636,7 +2659,13 @@ class PartDesign:
             Auto3dxError: If no editor selection is available, or the
                 underlying COM call fails unexpectedly.
         """
-        return take_face_snapshot(self._selection, self._generation)
+        warnings.warn(
+            "PartDesign.snapshot_faces() is deprecated; use part.topology.faces(), "
+            "which shares the same model generation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return take_face_snapshot(self._selection, self._generation.value)
 
     @property
     def shells(self) -> "list[Shell]":
@@ -3048,24 +3077,25 @@ class PartDesign:
         reference_2, mapped_reverse_2 = self._pattern_direction_reference(
             direction_2, 2
         )
-        try:
-            com_object = self._part_com_object.ShapeFactory.AddNewRectPattern(
-                pad.com_object,
-                number_in_direction_1,
-                number_in_direction_2,
-                spacing_1,
-                spacing_2,
-                _PATTERN_COPY_POSITION,
-                _PATTERN_COPY_POSITION,
-                reference_1,
-                reference_2,
-                mapped_reverse_1,
-                mapped_reverse_2,
-                _PATTERN_ROTATION_ANGLE,
-            )
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        return RectangularPattern(com_object)
+        with self._generation.mutation():
+            try:
+                com_object = self._part_com_object.ShapeFactory.AddNewRectPattern(
+                    pad.com_object,
+                    number_in_direction_1,
+                    number_in_direction_2,
+                    spacing_1,
+                    spacing_2,
+                    _PATTERN_COPY_POSITION,
+                    _PATTERN_COPY_POSITION,
+                    reference_1,
+                    reference_2,
+                    mapped_reverse_1,
+                    mapped_reverse_2,
+                    _PATTERN_ROTATION_ANGLE,
+                )
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        return RectangularPattern(com_object, self._generation)
 
     def remove_rectangular_pattern(self, pattern: RectangularPattern) -> None:
         """Removes a rectangular pattern through the owning editor's Selection.
@@ -3088,8 +3118,9 @@ class PartDesign:
                 "pattern must be a RectangularPattern returned by "
                 f"create_rectangular_pattern(), not {type(pattern).__name__}."
             )
-        delete_via_selection(
-            self._selection,
-            pattern.com_object,
-            "rectangular pattern",
-        )
+        with self._generation.mutation():
+            delete_via_selection(
+                self._selection,
+                pattern.com_object,
+                "rectangular pattern",
+            )
