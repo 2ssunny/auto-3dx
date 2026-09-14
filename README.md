@@ -267,8 +267,16 @@ editor.rectangle(width, height, origin_x=0.0, origin_y=0.0)
 editor.set_construction(element, True)
 ```
 
+geometry 메서드는 `SketchElement`를 반환합니다. `kind`는 CATIA 타입 이름(`"Line2D"`
+등)이고, 반지름이나 좌표 같은 raw 속성이 필요하면 `element.com_object`로 읽습니다.
+속성마다 live 검증 상태가 달라서 `SketchElement` 자체에는 geometry 읽기를 두지
+않았습니다. `SketchElement`는 자기가 그려진 스케치를 기억하므로, 다른 스케치에서
+그린 요소를 제약이나 `set_center_line`에 넘기면 CATIA에 닿기 전에
+`ValidationError`가 납니다. 이전처럼 raw 2D COM 객체를 넘겨도 동작하지만 그 경우에는
+스케치 검사를 하지 않습니다.
+
 Sketch 편집 제약은 반드시 같은 `with sketch.edit()` 블록 안에서, geometry
-메서드가 반환한 raw 2D COM 객체를 사용해 지정해야 합니다.
+메서드가 반환한 `SketchElement`를 사용해 지정해야 합니다.
 
 ```python
 with sketch.edit() as editor:

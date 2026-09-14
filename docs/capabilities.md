@@ -480,13 +480,16 @@ sketch.name / .rename(name) / .support() / .axis_data() / .element_names()
       .constraints -> ConstraintCollection
 
 with sketch.edit() as editor:
-    editor.point(x, y)
-    editor.line(x1, y1, x2, y2)
-    editor.circle(cx, cy, radius)
-    editor.arc(cx, cy, radius, start_param, end_param)
-    editor.spline([(x1, y1), (x2, y2), (x3, y3)])
+    editor.point(x, y)                                  -> SketchElement
+    editor.line(x1, y1, x2, y2)                         -> SketchElement
+    editor.circle(cx, cy, radius)                       -> SketchElement
+    editor.arc(cx, cy, radius, start_param, end_param)  -> SketchElement
+    editor.spline([(x1, y1), (x2, y2), (x3, y3)])       -> SketchElement
     editor.set_construction(element, True)
-    editor.rectangle(width, height, origin_x=0.0, origin_y=0.0)
+    editor.rectangle(width, height, origin_x=0.0, origin_y=0.0)  -> list[SketchElement]
+    # SketchElement: .com_object(raw 2D 객체) / .kind("Line2D" 등)
+    # geometry 읽기(반지름, 좌표)는 제공하지 않는다. 필요하면 com_object로 읽는다.
+    # 다른 스케치에서 그린 요소를 넘기면 COM 전에 ValidationError. raw 객체도 받는다.
     # 제약 — edit() 안에서만 유효하다
     editor.horizontal(line) / .vertical(line)
     editor.perpendicular(a, b) / .parallel(a, b)
