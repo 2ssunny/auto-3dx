@@ -429,7 +429,7 @@ class SketchFeature:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return Sketch(self._com_object.Sketch)
+            return Sketch(self._com_object.Sketch, self._generation)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -450,7 +450,7 @@ class SketchFeature:
             dimension = self._com_object.FirstLimit.Dimension
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return Parameter(dimension)
+        return Parameter(dimension, self._generation)
 
     def __repr__(self) -> str:
         """Returns a debugging representation.
@@ -650,7 +650,7 @@ class RevolvedFeature:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return Sketch(self._com_object.Sketch)
+            return Sketch(self._com_object.Sketch, self._generation)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -670,7 +670,7 @@ class RevolvedFeature:
             angle = self._com_object.FirstAngle
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return Parameter(angle)
+        return Parameter(angle, self._generation)
 
     def __repr__(self) -> str:
         """Returns a debugging representation.
@@ -807,7 +807,7 @@ class Rib(_NamedFeature):
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return Sketch(self._com_object.Sketch)
+            return Sketch(self._com_object.Sketch, self._generation)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -837,7 +837,7 @@ class Slot(_NamedFeature):
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return Sketch(self._com_object.Sketch)
+            return Sketch(self._com_object.Sketch, self._generation)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 

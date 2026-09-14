@@ -38,6 +38,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
@@ -203,7 +204,12 @@ class SketchEditor:
     methods calls `Part.Update()`.
     """
 
-    def __init__(self, com_object: Any, constraints: Any) -> None:
+    def __init__(
+        self,
+        com_object: Any,
+        constraints: Any,
+        generation: ModelGeneration | None = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -213,9 +219,17 @@ class SketchEditor:
             constraints: The raw `Constraints` COM collection
                 (`Sketch.Constraints`) used by the constraint-creation
                 methods below.
+            generation: The owning sketch's model generation, shared with
+                every `Constraint` this editor creates. Geometry creation and
+                construction flags made through this editor are covered by
+                the single advance `Sketch.edit()` makes when the session
+                closes, not by this object directly. A wrapper built
+                directly from a raw COM object gets its own generation,
+                which nothing else shares.
         """
         self._com_object = com_object
         self._constraints = constraints
+        self._generation = generation if generation is not None else ModelGeneration()
         self._active = True
 
     def _require_active(self) -> None:
@@ -550,7 +564,7 @@ class SketchEditor:
             raw = self._constraints.AddMonoEltCst(constraint_type, element)
         except pywintypes.com_error as error:
             raise _wrap_constraint_com_error(error) from error
-        return Constraint(raw)
+        return Constraint(raw, self._generation)
 
     def _bi(self, constraint_type: int, first: Any, second: Any) -> Constraint:
         """Creates a two-element constraint via `Constraints.AddBiEltCst`.
@@ -572,7 +586,7 @@ class SketchEditor:
             raw = self._constraints.AddBiEltCst(constraint_type, first, second)
         except pywintypes.com_error as error:
             raise _wrap_constraint_com_error(error) from error
-        return Constraint(raw)
+        return Constraint(raw, self._generation)
 
     def horizontal(self, line: Any) -> Constraint:
         """Constrains a line to be horizontal.
@@ -826,13 +840,20 @@ class Sketch:
     in `_AXIS_DATA_BY_SUPPORT`.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA `Sketch` COM object to wrap.
+            generation: The owning Part's model generation, advanced by every
+                write this wrapper makes (rename, `set_center_line`, and
+                closing an `edit()` session) and shared with every
+                `ConstraintCollection`/`Constraint`/`SketchEditor` this
+                sketch hands out. A wrapper built directly from a raw COM
+                object gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
         self._editing = False
         self._constraints: ConstraintCollection | None = None
 
@@ -878,10 +899,14 @@ class Sketch:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         validate_parameter_name(name)
-        try:
-            self._com_object.Name = name
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        # The generation advances once this block is attempted, even if the
+        # write raises: a caller cannot know whether CATIA applied the name
+        # before failing (`docs/api-design.md` section 5.3).
+        with self._generation.mutation():
+            try:
+                self._com_object.Name = name
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def set_center_line(self, line: Any) -> None:
         """Sets the sketch's revolve axis.
@@ -899,10 +924,11 @@ class Sketch:
         Raises:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        try:
-            self._com_object.CenterLine = line
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        with self._generation.mutation():
+            try:
+                self._com_object.CenterLine = line
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def axis_data(self) -> "tuple[float, ...]":
         """Reads the sketch's absolute axis data.
@@ -990,7 +1016,7 @@ class Sketch:
             A `ConstraintCollection` over this sketch's `Constraints`.
         """
         if self._constraints is None:
-            self._constraints = ConstraintCollection(self._com_object)
+            self._constraints = ConstraintCollection(self._com_object, self._generation)
         return self._constraints
 
     @contextlib.contextmanager
@@ -1012,6 +1038,15 @@ class Sketch:
         Also reads `Constraints` up front and passes it into the
         `SketchEditor`, since constraint creation (`docs/conventions.md`
         1.2.4/6.14) is verified to work only inside this block.
+
+        The whole edition session is one model mutation (`docs/api-design.md`
+        section 5.2): geometry, construction flags and constraints are all
+        created inside it, so the generation advances exactly once, when
+        `CloseEdition()` is attempted -- not once per `SketchEditor` call.
+        That single advance happens in the same `finally` that always calls
+        `CloseEdition()`, whether the caller's block succeeded or raised, for
+        the same reason `PartDesign` advances on attempt rather than on
+        success: a call that raised may still have changed the model.
 
         Yields:
             A `SketchEditor` wrapping the `Factory2D` from `OpenEdition()` and
@@ -1037,13 +1072,17 @@ class Sketch:
         except pywintypes.com_error as error:
             self._editing = False
             raise _wrap_com_error(error) from error
-        editor = SketchEditor(factory, constraints)
+        editor = SketchEditor(factory, constraints, self._generation)
         try:
             yield editor
         finally:
             editor._deactivate()
             try:
-                self._com_object.CloseEdition()
+                # One advance for the whole session, attempted here rather
+                # than on each geometry/constraint call the caller made
+                # above (`docs/api-design.md` section 5.3).
+                with self._generation.mutation():
+                    self._com_object.CloseEdition()
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
             finally:
@@ -1068,9 +1107,18 @@ class SketchCollection:
     Sketches are read from `part_com_object.MainBody.Sketches`, and planes are
     read from `part_com_object.OriginElements`, so this wrapper is constructed
     from the Part's raw COM object rather than the `Sketches` collection alone.
+
+    Shares one model generation with every `Sketch` it returns
+    (`docs/api-design.md` section 5): `create` and `remove` advance it, and
+    a stale topology snapshot is refused before it reaches CATIA.
     """
 
-    def __init__(self, part_com_object: Any, selection: Any = None) -> None:
+    def __init__(
+        self,
+        part_com_object: Any,
+        selection: Any = None,
+        generation: ModelGeneration | None = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -1081,9 +1129,16 @@ class SketchCollection:
                 Required only by `remove`, because `Sketches` has no `Remove`
                 method and deletion has to go through the editor's selection.
                 Reading and creating work without it.
+            generation: The owning Part's model generation. A standalone
+                instance gets its own, which no other wrapper shares; obtain
+                `SketchCollection` from a `Part` instead. Shared with every
+                `Sketch` this collection returns.
         """
         self._part_com_object = part_com_object
         self._selection = selection
+        # Shared with the owning Part and everything else reachable from it
+        # (`docs/api-design.md` section 5). Every mutation here advances it.
+        self._generation = generation if generation is not None else ModelGeneration()
 
     def _sketches(self) -> Any:
         """Returns the raw `MainBody.Sketches` collection.
@@ -1199,7 +1254,7 @@ class SketchCollection:
                 com_object = sketches.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            result.append(Sketch(com_object))
+            result.append(Sketch(com_object, self._generation))
         return result
 
     # Return annotation is quoted: by this point `list` is already shadowed in
@@ -1305,24 +1360,30 @@ class SketchCollection:
         if self._matching(name):
             raise SketchAlreadyExistsError(f"A sketch named {name!r} already exists.")
         plane = self._resolve_support(support)
-        try:
-            com_object = self._sketches().Add(plane)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        sketch = Sketch(com_object)
-        try:
-            sketch.rename(name)
-        except Auto3dxError as error:
+        # The generation advances once this block is attempted, even if it
+        # raises: `Sketches.Add` can create the sketch and then fail the
+        # rename, which leaves it in the tree (`docs/api-design.md` 5.3).
+        with self._generation.mutation():
             try:
-                actual_name = sketch.name
-            except Auto3dxError:
-                actual_name = "unknown"
-            raise PartialCreationError(
-                f"Created a sketch but failed to rename it to {name!r}; it "
-                f"currently exists in the model as {actual_name!r}. Do not "
-                "retry blindly: retrying would create another sketch instead "
-                "of fixing this one."
-            ) from error
+                com_object = self._sketches().Add(plane)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            sketch = Sketch(com_object, self._generation)
+            # The rename is applied directly (not via `sketch.rename()`) so
+            # this stays a single mutation instead of a nested one.
+            try:
+                sketch.com_object.Name = name
+            except pywintypes.com_error as error:
+                try:
+                    actual_name = sketch.name
+                except Auto3dxError:
+                    actual_name = "unknown"
+                raise PartialCreationError(
+                    f"Created a sketch but failed to rename it to {name!r}; it "
+                    f"currently exists in the model as {actual_name!r}. Do not "
+                    "retry blindly: retrying would create another sketch instead "
+                    "of fixing this one."
+                ) from error
         return sketch
 
     def ensure(self, name: str, support: str = SUPPORT_XY) -> Sketch:
@@ -1401,9 +1462,10 @@ class SketchCollection:
                 failed.
         """
         target = self.get(name)
-        delete_via_selection(
-            self._selection, target.com_object, f"sketch {name!r}"
-        )
+        with self._generation.mutation():
+            delete_via_selection(
+                self._selection, target.com_object, f"sketch {name!r}"
+            )
 
     def __len__(self) -> int:
         """Returns the number of sketches in the collection.

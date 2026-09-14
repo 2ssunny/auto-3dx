@@ -100,7 +100,9 @@ class Part:
                 parameters_com_object = self._com_object.Parameters
             except pywintypes.com_error as error:
                 raise automation_error(error, "reading Part.Parameters") from error
-            self._parameters = ParameterCollection(parameters_com_object)
+            self._parameters = ParameterCollection(
+                parameters_com_object, generation=self._generation
+            )
         return self._parameters
 
     @property
@@ -112,7 +114,9 @@ class Part:
         support planes) and ``MainBody`` (for the sketches themselves).
         """
         if self._sketches is None:
-            self._sketches = SketchCollection(self._com_object, self._selection)
+            self._sketches = SketchCollection(
+                self._com_object, self._selection, generation=self._generation
+            )
         return self._sketches
 
     @property
@@ -153,7 +157,9 @@ class Part:
         strings still work unchanged.
         """
         if self._planes is None:
-            self._planes = PlaneCollection(self._com_object, self._selection)
+            self._planes = PlaneCollection(
+                self._com_object, self._selection, self._generation
+            )
         return self._planes
 
     @property
@@ -165,7 +171,9 @@ class Part:
         and `Parameters` (for `GetNameToUseInRelation`).
         """
         if self._formulas is None:
-            self._formulas = FormulaCollection(self._com_object)
+            self._formulas = FormulaCollection(
+                self._com_object, generation=self._generation
+            )
         return self._formulas
 
     @property

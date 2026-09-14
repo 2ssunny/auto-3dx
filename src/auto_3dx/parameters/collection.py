@@ -5,6 +5,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
@@ -85,14 +86,24 @@ class ParameterCollection:
     treated as an error.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA `Parameters` collection to wrap.
+            generation: The owning Part's model generation, shared with every
+                `Parameter` this collection returns. A standalone instance gets
+                its own, which no other wrapper shares; obtain
+                `ParameterCollection` from a `Part` instead.
         """
         self._com_object = com_object
         self._units: UnitCatalogue | None = None
+        # Shared with the owning Part and every Parameter this collection
+        # returns (`docs/api-design.md` section 5). Every creation and value
+        # write advances it, including an `ensure_*` that only writes to an
+        # existing parameter -- the SDK cannot tell whether a parameter drives
+        # a formula that drives a feature dimension, so it assumes it might.
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -151,7 +162,7 @@ class ParameterCollection:
                 com_object = self._com_object.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            parameters.append(Parameter(com_object))
+            parameters.append(Parameter(com_object, self._generation))
         return parameters
 
     # Return annotation is quoted: by this point `list` is already shadowed
@@ -198,7 +209,7 @@ class ParameterCollection:
                 com_object = direct.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            parameters.append(Parameter(com_object))
+            parameters.append(Parameter(com_object, self._generation))
         return parameters
 
     def user_names(self) -> "list[str]":
@@ -229,7 +240,7 @@ class ParameterCollection:
             com_object = self._com_object.Item(name)
         except pywintypes.com_error as error:
             raise ParameterNotFoundError(f"No parameter named {name!r} was found.") from error
-        return Parameter(com_object)
+        return Parameter(com_object, self._generation)
 
     def set(self, name: str, value: float, unit: str = MILLIMETRE) -> None:
         """Sets a parameter's value by name.
@@ -320,11 +331,17 @@ class ParameterCollection:
                 "so creation is refused; use the matching ensure_*() method "
                 "instead."
             )
-        try:
-            com_object = factory()
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        return Parameter(com_object)
+        # The generation advances once this block is attempted, even if it
+        # raises, because a `CreateXxx` call that raised may still have changed
+        # the model (`docs/api-design.md` section 5.3). The existence check
+        # above stays outside: a request rejected before this point never
+        # reached CATIA.
+        with self._generation.mutation():
+            try:
+                com_object = factory()
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        return Parameter(com_object, self._generation)
 
     def _ensure(
         self,
@@ -351,6 +368,14 @@ class ParameterCollection:
                 `name`.
             ParameterTypeError: If `check_existing` rejects the existing match.
             Auto3dxError: If the underlying COM call fails unexpectedly.
+
+        Note:
+            This method advances the generation exactly once, but never
+            directly: `create` (a `create_*` method) advances it through
+            `_create`, and `apply_existing` (`Parameter.set`) advances it
+            through `Parameter.set`'s own mutation block. Exactly one of the
+            two branches below runs, so the generation advances exactly once
+            per call, never zero times and never twice.
         """
         matches = self._matching_parameters(name)
         if len(matches) > 1:
@@ -771,10 +796,13 @@ class ParameterCollection:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         target = self.get(name)
-        try:
-            self._com_object.Remove(target.name)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        # The lookup above stays outside the mutation block: a missing name is
+        # rejected before any COM call, so the generation must not advance for it.
+        with self._generation.mutation():
+            try:
+                self._com_object.Remove(target.name)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def __len__(self) -> int:
         """Returns the number of parameters in the collection.

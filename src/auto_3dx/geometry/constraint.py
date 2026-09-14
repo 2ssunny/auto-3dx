@@ -35,6 +35,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
@@ -130,13 +131,17 @@ class Constraint:
     so `_dimension()` treats that failure as "no dimension", not as an error.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA `Constraint` COM object to wrap.
+            generation: The owning Part's model generation, advanced by
+                `set_value`. A wrapper built directly from a raw COM object
+                gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -264,10 +269,14 @@ class Constraint:
                 "This constraint has no Dimension; set_value() only works on "
                 "dimensional constraints (length, radius, distance)."
             )
-        try:
-            dimension.Value = coerced
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        # The generation advances once this block is attempted, even if the
+        # write raises (`docs/api-design.md` section 5.3): a dimension change
+        # rebuilds the solid's topology (probe 31).
+        with self._generation.mutation():
+            try:
+                dimension.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def dimension_parameter(self) -> Parameter:
         """Returns the `Dimension` parameter backing this constraint's value.
@@ -320,16 +329,26 @@ class ConstraintCollection:
 
     `Constraints.Remove(i)` is unverified and deliberately not exposed here
     (`docs/conventions.md` 1.2.4).
+
+    Shares one model generation with every `Constraint` it returns
+    (`docs/api-design.md` section 5): `Constraint.set_value` advances it.
     """
 
-    def __init__(self, sketch_com_object: Any) -> None:
+    def __init__(
+        self, sketch_com_object: Any, generation: ModelGeneration | None = None
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
             sketch_com_object: The raw CATIA `Sketch` COM object.
                 `Constraints` is read from it.
+            generation: The owning Part's model generation. A standalone
+                instance gets its own, which no other wrapper shares; obtain
+                this collection through `Sketch.constraints` instead. Shared
+                with every `Constraint` this collection returns.
         """
         self._sketch_com_object = sketch_com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     def _constraints(self) -> Any:
         """Returns the raw `Sketch.Constraints` collection.
@@ -412,7 +431,7 @@ class ConstraintCollection:
                 com_object = constraints.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            result.append(Constraint(com_object))
+            result.append(Constraint(com_object, self._generation))
         return result
 
     # Return annotation is quoted: by this point `list` is already shadowed

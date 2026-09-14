@@ -135,9 +135,11 @@ Rules that apply everywhere:
 
 ## 5. Mutation semantics and model generation
 
-Status: Implemented for `PartDesign`, `Topology` and `Part.update()`, and Enforced by
-`tests/unit/test_model_generation.py`. Planned: sketches, planes, parameters, formulas and
-constraints, which still mutate the model without advancing it (see the migration table).
+Status: Enforced. Every collection and wrapper reachable from a `Part` shares its generation
+(`tests/unit/test_part_generation_wiring.py`), and each mutation path is pinned by the
+generation tests for its module: `test_model_generation.py`, `test_sketch_generation.py`,
+`test_plane_generation.py` and `test_value_generation.py`. Planned: sharing one generation
+across two `Part` wrappers of the same model (5.1).
 
 Topology references are transient. A BRep name cannot be stored and re-resolved, and a rebuild
 can change every edge and face name and index. Reusing an old reference after a change succeeds
@@ -179,6 +181,11 @@ whether a parameter feeds a formula that feeds a dimension, so it assumes it doe
 The generation advances **as soon as the mutating COM call has been attempted**, before the SDK
 returns or raises. A call that raised may still have changed the model: `AddNew*` can create a
 feature and then fail its rename. Advancing on attempt, not on success, keeps that case safe.
+
+A few calls advance the generation more than once for one logical change. Setting a value
+while creating a sketch dimension, for example, advances it for the value write and again
+when the edit session closes. Over-advancing only makes a snapshot stale sooner; it can never
+let a stale reference through, so it is accepted rather than engineered away.
 
 ### 5.4 What it cannot see
 
@@ -462,7 +469,7 @@ Status: Enforced by review.
 | Item | Section | State |
 |---|---|---|
 | Shared model generation on `Part`: `PartDesign`, `Topology`, `update()` | 5 | Done |
-| Shared model generation: sketches, planes, parameters, formulas, constraints | 5 | Planned |
+| Shared model generation: sketches, planes, parameters, formulas, constraints | 5 | Done |
 | One generation per CATIA Part across wrappers (needs live COM identity check) | 5 | Planned |
 | `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Done |
 | Topology snapshots restore the user's selection | 7 | Planned |

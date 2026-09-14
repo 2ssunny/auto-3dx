@@ -14,6 +14,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
@@ -34,7 +35,11 @@ class FormulaCollection:
     absence risks creating a duplicate formula.
     """
 
-    def __init__(self, part_com_object: Any) -> None:
+    def __init__(
+        self,
+        part_com_object: Any,
+        generation: ModelGeneration | None = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -42,8 +47,17 @@ class FormulaCollection:
                 supplies the formulas themselves, and `Part.Parameters`
                 supplies `GetNameToUseInRelation`, needed to build formula
                 bodies that reference other parameters.
+            generation: The owning Part's model generation, shared with every
+                `Formula` this collection returns. A standalone instance gets
+                its own, which no other wrapper shares; obtain
+                `FormulaCollection` from a `Part` instead.
         """
         self._part_com_object = part_com_object
+        # Shared with the owning Part and every Formula this collection
+        # returns (`docs/api-design.md` section 5). Creating, removing, or
+        # modifying a formula advances it: a formula can drive a feature
+        # dimension.
+        self._generation = generation if generation is not None else ModelGeneration()
 
     def _relations(self) -> Any:
         """Returns the raw `Part.Relations` collection.
@@ -96,7 +110,7 @@ class FormulaCollection:
                 com_object = relations.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            formulas.append(Formula(com_object))
+            formulas.append(Formula(com_object, self._generation))
         return formulas
 
     # Return annotation is quoted: by this point `list` is already shadowed
@@ -209,13 +223,18 @@ class FormulaCollection:
         else:
             raise FormulaAlreadyExistsError(f"A formula named {name!r} already exists.")
 
-        try:
-            com_object = self._relations().CreateFormula(
-                name, comment, target.com_object, validated_body
-            )
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        return Formula(com_object)
+        # The generation advances once this block is attempted, even if it
+        # raises: a `CreateFormula` call that raised may still have changed the
+        # model (`docs/api-design.md` section 5.3). The existence check above
+        # stays outside: a request rejected before this point never reached CATIA.
+        with self._generation.mutation():
+            try:
+                com_object = self._relations().CreateFormula(
+                    name, comment, target.com_object, validated_body
+                )
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        return Formula(com_object, self._generation)
 
     def ensure(
         self,
@@ -247,6 +266,12 @@ class FormulaCollection:
             ParameterTypeError: If `body` is not a `str`, or is empty.
             AmbiguousNameError: If two or more formulas named `name` already exist.
             Auto3dxError: If the underlying COM call fails unexpectedly.
+
+        Note:
+            This never advances the generation directly: `create` advances it
+            through its own mutation block, and `existing.modify` (`Formula.modify`)
+            advances it through `Formula`'s own mutation block. Reusing an
+            unchanged body advances it zero times, matching a plain read.
         """
         validate_parameter_name(name)
         validated_body = _validate_formula_body(body)
@@ -289,7 +314,7 @@ class FormulaCollection:
                 item = relations.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            if Formula(item).name == name:
+            if Formula(item, self._generation).name == name:
                 matching_indices.append(index)
 
         if not matching_indices:
@@ -300,10 +325,14 @@ class FormulaCollection:
                 "name-based lookup cannot safely pick one."
             )
 
-        try:
-            relations.Remove(matching_indices[0])
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        # The enumeration above stays outside the mutation block: a missing or
+        # ambiguous name is rejected before any COM call, so the generation
+        # must not advance for it.
+        with self._generation.mutation():
+            try:
+                relations.Remove(matching_indices[0])
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def __len__(self) -> int:
         """Returns the number of formulas in the collection.

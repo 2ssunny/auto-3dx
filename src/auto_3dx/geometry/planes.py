@@ -46,6 +46,20 @@ plain `VT_I4` integer, and the mapping between the two is not documented
 `.Orientation` back -- this module does not expose that read-back at all,
 for exactly that reason.
 
+**Model generation (`docs/api-design.md` section 5).** Creating or removing a
+plane changes the model exactly as a Part Design feature does -- a sketch
+built on a plane drives solid features downstream. `PlaneCollection` shares
+one `ModelGeneration` with the rest of the owning `Part`, threaded through
+`__init__` the same way `geometry.part_design.PartDesign` does, and hands it
+to every `Plane`/`OffsetPlane`/`AnglePlane` it constructs. Each public
+operation (`create_offset`, `create_angle`, `remove`,
+`remove_geometrical_set`) is one mutation for staleness purposes: the
+generation advances exactly once per call, wrapping every internal COM call
+that operation makes -- not once per `AddNew*`/`AppendHybridShape` -- and only
+once the operation has actually reached CATIA, so a request rejected by
+validation first (a bad name, a non-finite offset, an unsupported support)
+leaves the generation untouched.
+
 **Why there is no `ensure_offset`/`ensure_angle`.** This project's `ensure_*`
 rule (`docs/conventions.md` 1.3) is that a name match alone never justifies
 reusing geometry; only a value read back and compared does. For an offset
@@ -71,6 +85,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     Auto3dxError,
     ParameterTypeError,
@@ -242,13 +257,18 @@ class Plane:
     their kind.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA hybrid plane shape COM object to wrap.
+            generation: The owning Part's model generation. A wrapper built
+                directly from a raw COM object gets its own, which nothing
+                else shares; obtain a `Plane` through `PlaneCollection`
+                instead so it shares the Part's generation.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -365,7 +385,12 @@ class PlaneCollection:
     every plane, plus the angle plane's axis points and line.
     """
 
-    def __init__(self, part_com_object: Any, selection: Any = None) -> None:
+    def __init__(
+        self,
+        part_com_object: Any,
+        selection: Any = None,
+        generation: ModelGeneration | None = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -379,10 +404,17 @@ class PlaneCollection:
                 a `HybridBody` exposes a verified `Remove` method and deletion
                 has to go through the editor's selection, exactly as it does
                 for sketches and solid features. Creating works without it.
+            generation: The owning Part's model generation. A standalone
+                instance gets its own, which no other wrapper shares; obtain
+                `PlaneCollection` from a `Part` instead.
         """
         self._part_com_object = part_com_object
         self._selection = selection
         self._hybrid_body: Any = None
+        # Shared with the owning Part and everything else reachable from it
+        # (`docs/api-design.md` section 5). create_offset/create_angle/remove/
+        # remove_geometrical_set each advance it exactly once per call.
+        self._generation = generation if generation is not None else ModelGeneration()
 
     def _main_body(self) -> Any:
         """Returns the raw `Part.MainBody` COM object.
@@ -565,13 +597,19 @@ class PlaneCollection:
         orientation_value = _validate_orientation(orientation)
         base_plane = _resolve_support_plane(self._part_com_object, support)
         factory = self._factory()
-        self._geometrical_set()
-        try:
-            raw = factory.AddNewPlaneOffset(base_plane, offset_value, orientation_value)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        self._append(raw, name)
-        return OffsetPlane(raw)
+
+        # One mutation for the whole operation (`docs/api-design.md` section
+        # 5.3): the generation advances exactly once here, covering the
+        # geometrical set's possible first-time creation, the plane itself,
+        # and its rename/append, even if any of those raises part way through.
+        with self._generation.mutation():
+            self._geometrical_set()
+            try:
+                raw = factory.AddNewPlaneOffset(base_plane, offset_value, orientation_value)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            self._append(raw, name)
+        return OffsetPlane(raw, self._generation)
 
     def create_angle(
         self,
@@ -638,32 +676,40 @@ class PlaneCollection:
         orientation_value = _validate_orientation(orientation)
         base_plane = _resolve_support_plane(self._part_com_object, support)
         factory = self._factory()
-        self._geometrical_set()
 
-        try:
-            start_point = factory.AddNewPointCoord(*start_coords)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        self._append(start_point, f"{name}_AxisStart")
+        # One mutation for the whole operation, exactly like create_offset:
+        # this is four COM creations plus four renames/appends, but they are
+        # one logical change to the model, so the generation advances exactly
+        # once here, however far through this sequence a failure happens.
+        with self._generation.mutation():
+            self._geometrical_set()
 
-        try:
-            end_point = factory.AddNewPointCoord(*end_coords)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        self._append(end_point, f"{name}_AxisEnd")
+            try:
+                start_point = factory.AddNewPointCoord(*start_coords)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            self._append(start_point, f"{name}_AxisStart")
 
-        try:
-            axis_line = factory.AddNewLinePtPt(start_point, end_point)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        self._append(axis_line, f"{name}_Axis")
+            try:
+                end_point = factory.AddNewPointCoord(*end_coords)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            self._append(end_point, f"{name}_AxisEnd")
 
-        try:
-            raw = factory.AddNewPlaneAngle(base_plane, axis_line, angle_value, orientation_value)
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
-        self._append(raw, name)
-        return AnglePlane(raw)
+            try:
+                axis_line = factory.AddNewLinePtPt(start_point, end_point)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            self._append(axis_line, f"{name}_Axis")
+
+            try:
+                raw = factory.AddNewPlaneAngle(
+                    base_plane, axis_line, angle_value, orientation_value
+                )
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            self._append(raw, name)
+        return AnglePlane(raw, self._generation)
 
     def remove(self, plane: Plane) -> None:
         """Deletes one plane from the model.
@@ -695,8 +741,13 @@ class PlaneCollection:
             raise ParameterTypeError(
                 f"plane must be a Plane, not {type(plane).__name__}."
             )
-        delete_via_selection(self._selection, plane.com_object, f"plane {plane.name!r}")
-        self._reclaim_main_body()
+        # One mutation for the whole operation: the delete and the follow-up
+        # in-work-object reclaim are one logical change, so the generation
+        # advances exactly once, even if the missing-selection check inside
+        # delete_via_selection is what actually raises.
+        with self._generation.mutation():
+            delete_via_selection(self._selection, plane.com_object, f"plane {plane.name!r}")
+            self._reclaim_main_body()
 
     def remove_geometrical_set(self) -> None:
         """Deletes the geometrical set holding every plane this collection made.
@@ -714,12 +765,17 @@ class PlaneCollection:
                 deletion failed.
         """
         if self._hybrid_body is None:
+            # Nothing was ever created, so there is nothing to touch in CATIA
+            # and no reason to advance the generation (`docs/api-design.md`
+            # section 5.2: only a change made through the SDK advances it).
             return
-        delete_via_selection(
-            self._selection, self._hybrid_body, f"geometrical set {GEOMETRICAL_SET_NAME!r}"
-        )
-        # The cache must go too, or the next create would append to a set that
-        # no longer exists in the model.
-        self._hybrid_body = None
-        self._reclaim_main_body()
+        # One mutation for the whole operation, same reasoning as remove().
+        with self._generation.mutation():
+            delete_via_selection(
+                self._selection, self._hybrid_body, f"geometrical set {GEOMETRICAL_SET_NAME!r}"
+            )
+            # The cache must go too, or the next create would append to a set
+            # that no longer exists in the model.
+            self._hybrid_body = None
+            self._reclaim_main_body()
 

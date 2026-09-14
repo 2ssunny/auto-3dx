@@ -11,6 +11,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     Auto3dxError,
     ParameterNameError,
@@ -105,13 +106,17 @@ class Parameter:
     unverified and raises `ParameterTypeError`.
     """
 
-    def __init__(self, com_object: Any) -> None:
+    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
         """Initializes the wrapper.
 
         Args:
             com_object: The raw CATIA parameter COM object to wrap.
+            generation: The owning Part's model generation, advanced by every
+                write this wrapper makes. A wrapper built directly from a raw
+                COM object gets its own, which nothing else shares.
         """
         self._com_object = com_object
+        self._generation = generation if generation is not None else ModelGeneration()
 
     @property
     def com_object(self) -> Any:
@@ -290,10 +295,15 @@ class Parameter:
         else:
             raise ParameterTypeError(f"Parameter kind {kind!r} is not supported for set().")
 
-        try:
-            self._com_object.Value = coerced
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        # The generation advances once this write is attempted, even if it raises
+        # (`docs/api-design.md` section 5.3). It advances even when this parameter
+        # drives nothing: the SDK cannot tell whether it feeds a formula that
+        # feeds a feature dimension, so it assumes it might.
+        with self._generation.mutation():
+            try:
+                self._com_object.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def _check_unit_matches(self, unit: str | None) -> None:
         """Checks `unit` (if given) against this dimensional parameter's actual unit.
