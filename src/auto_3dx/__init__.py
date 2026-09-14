@@ -1,130 +1,43 @@
-"""Public API for automating a running 3DEXPERIENCE CATIA session."""
+"""Public API for automating a running 3DEXPERIENCE CATIA session.
 
-from auto_3dx.core.application import Catia, EditorInfo
+The package root offers only what an ordinary script needs to name directly
+(`docs/api-design.md` section 13): the session entry point, the `Part` type, and the
+error categories a caller catches. Everything else is reached through attributes,
+
+    catia = Catia.attach()
+    part = catia.active_part()
+    sketch = part.sketches.create("Profile", support="XY")
+
+and imported for type hints from its own package: `auto_3dx.geometry`,
+`auto_3dx.parameters`, `auto_3dx.formulas`, `auto_3dx.measurement`,
+`auto_3dx.core` and `auto_3dx.errors`.
+
+A small root keeps every implementation class from looking like a stable entry
+point, so an internal rename does not become a breaking change.
+"""
+
+from auto_3dx.core.application import Catia
 from auto_3dx.core.part import Part
 from auto_3dx.errors import (
-    AmbiguousNameError,
     Auto3dxError,
-    CatiaConnectionError,
-    Com3dxNotFoundError,
-    ConstraintNotFoundError,
-    FeatureConflictError,
-    FeatureNotFoundError,
-    FormulaAlreadyExistsError,
-    FormulaNotFoundError,
-    NoActiveEditorError,
-    NoActivePartError,
-    ParameterAlreadyExistsError,
-    ParameterNameError,
-    ParameterNotFoundError,
-    ParameterTypeError,
-    PartialCreationError,
+    AutomationError,
+    ConflictError,
+    NotFoundError,
     PartUpdateError,
-    SketchAlreadyExistsError,
-    SketchNotFoundError,
-    SketchSupportMismatchError,
+    SessionError,
     StaleSnapshotError,
-    UnsupportedMagnitudeError,
-    UnsupportedSupportError,
-    UnsupportedUnitError,
+    ValidationError,
 )
-from auto_3dx.formulas.collection import FormulaCollection
-from auto_3dx.formulas.formula import Formula
-from auto_3dx.geometry.constraint import Constraint, ConstraintCollection
-from auto_3dx.geometry.edges import Edge, EdgeSnapshot
-from auto_3dx.geometry.faces import Face, FaceSnapshot
-from auto_3dx.geometry.part_design import (
-    Chamfer,
-    ConstRadEdgeFillet,
-    Groove,
-    Hole,
-    Mirror,
-    Pad,
-    PartDesign,
-    Pocket,
-    RectangularPattern,
-    RevolvedFeature,
-    Rib,
-    Shaft,
-    Shell,
-    SketchFeature,
-    Slot,
-    Thickness,
-)
-from auto_3dx.geometry.planes import AnglePlane, OffsetPlane, Plane, PlaneCollection
-from auto_3dx.geometry.sketch import Sketch, SketchCollection, SketchEditor
-from auto_3dx.measurement import (
-    MassProperties,
-    SolidMeasurement,
-)
-from auto_3dx.parameters.collection import ParameterCollection
-from auto_3dx.parameters.parameter import Parameter, ParameterInfo
-from auto_3dx.parameters.units import UnitCatalogue, UnitInfo
 
 __all__ = [
     "Catia",
-    "EditorInfo",
     "Part",
-    "Parameter",
-    "ParameterCollection",
-    "ParameterInfo",
-    "UnitCatalogue",
-    "UnitInfo",
-    "Constraint",
-    "ConstraintCollection",
-    "Formula",
-    "FormulaCollection",
-    "Groove",
-    "Mirror",
-    "Pad",
-    "PartDesign",
-    "Pocket",
-    "RectangularPattern",
-    "Edge",
-    "EdgeSnapshot",
-    "Face",
-    "FaceSnapshot",
-    "Chamfer",
-    "ConstRadEdgeFillet",
-    "Hole",
-    "Shell",
-    "Thickness",
-    "Plane",
-    "OffsetPlane",
-    "AnglePlane",
-    "PlaneCollection",
-    "StaleSnapshotError",
-    "RevolvedFeature",
-    "Rib",
-    "Shaft",
-    "SketchFeature",
-    "Slot",
-    "Sketch",
-    "SketchCollection",
-    "SketchEditor",
-    "MassProperties",
-    "SolidMeasurement",
-    "AmbiguousNameError",
     "Auto3dxError",
-    "CatiaConnectionError",
-    "Com3dxNotFoundError",
-    "ConstraintNotFoundError",
-    "FeatureConflictError",
-    "FeatureNotFoundError",
-    "FormulaAlreadyExistsError",
-    "FormulaNotFoundError",
-    "NoActiveEditorError",
-    "NoActivePartError",
-    "ParameterAlreadyExistsError",
-    "ParameterNameError",
-    "ParameterNotFoundError",
-    "ParameterTypeError",
-    "PartialCreationError",
+    "SessionError",
+    "ValidationError",
+    "NotFoundError",
+    "ConflictError",
+    "AutomationError",
     "PartUpdateError",
-    "SketchAlreadyExistsError",
-    "SketchNotFoundError",
-    "SketchSupportMismatchError",
-    "UnsupportedMagnitudeError",
-    "UnsupportedSupportError",
-    "UnsupportedUnitError",
+    "StaleSnapshotError",
 ]

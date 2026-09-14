@@ -79,6 +79,7 @@ from auto_3dx.geometry.part_design import (
     Slot,
     Thickness,
 )
+from auto_3dx.geometry.planes import AnglePlane, OffsetPlane, Plane, PlaneCollection
 from auto_3dx.geometry.topology import Topology
 from auto_3dx.geometry.sketch import (
     AXIS_TOLERANCE,
@@ -154,6 +155,10 @@ __all__ = [
     "Thickness",
     "Hole",
     "PartDesign",
+    "Plane",
+    "OffsetPlane",
+    "AnglePlane",
+    "PlaneCollection",
     "CONSTRAINT_HORIZONTAL",
     "CONSTRAINT_VERTICAL",
     "CONSTRAINT_LENGTH",
