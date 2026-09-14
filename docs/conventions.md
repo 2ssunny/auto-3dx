@@ -1032,7 +1032,13 @@ Auto3dxError
 
 ## 6. 확정 공개 API contract
 
-아래 signature는 **그대로** 구현한다. 임의로 이름이나 인자를 바꾸지 않는다.
+> **`docs/api-design.md`가 우선한다.** 아래 모듈별 signature는 각 기능을 만들 당시 확정한 계약의
+> 기록이다. 그 뒤 API 설계 계약에 따라 바뀐 것이 있다. 예를 들어 topology는 `part.topology`로
+> 옮겼고, 예외는 범주로 묶였으며, 루트 export는 줄었고, 측정은 main body를 기본으로 잰다. 두 문서가
+> 다르면 api-design.md를 따르고, 이 절은 그 결정의 이력으로 읽는다.
+
+아래 signature는 해당 기능을 만들 당시 **그대로** 구현하기로 한 것이다. 임의로 이름이나 인자를
+바꾸지 않는다는 원칙은 유지하되, 바꿔야 한다면 api-design.md를 먼저 고친다.
 
 ### 6.1 `auto_3dx/errors.py`
 

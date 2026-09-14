@@ -14,8 +14,8 @@
 - Sketch constraint 지정
 - Pad, Pocket, Shaft, Groove, Mirror, Rib, Slot 생성
 - 사각 패턴 생성 API
-- 모서리 필렛 / 챔퍼 생성 API
-- 솔리드의 부피·면적·질량·무게중심 측정
+- 모서리 필렛 / 챔퍼, 면 참조 기반 Shell / Thickness / Hole 생성 API
+- 솔리드의 부피·면적·질량·무게중심 측정 (기본 대상: main body)
 
 Part 자체의 PLM 생성과 저장은 이 라이브러리의 책임 범위가 아닙니다. 먼저
 3DEXPERIENCE에서 Part를 만들고 열어 둔 뒤 `auto-3dx`를 사용해야 합니다.
@@ -93,6 +93,43 @@ python .\your_script.py
 같은 Python 프로세스에서 이미 다른 설치 릴리스의 `com3dx`가 로드된 경우에는
 안전하게 교체하지 않고 오류를 발생시킵니다. 다른 릴리스를 사용하려면 새
 Python 프로세스에서 시작해야 합니다.
+
+## 예외 처리
+
+모든 예외는 `Auto3dxError`를 상속하고, 그 아래 다섯 범주로 묶여 있습니다.
+"호출자가 그 뒤에 무엇을 할 수 있는가"로 나눈 것이라, 반응이 같다면 범주를,
+다르다면 구체 클래스를 잡습니다.
+
+| 범주 | 뜻 | 호출자가 할 일 |
+|---|---|---|
+| `SessionError` | 세션에 닿지 못함 | 3DEXPERIENCE 실행/설치 경로/편집 대상 확인 |
+| `ValidationError` | COM 호출 전에 거부됨. 모델은 그대로다 | 인자를 고쳐서 재시도 |
+| `NotFoundError` | 그 이름의 객체가 없음 | 이름 확인 |
+| `ConflictError` | 모델의 이름·상태가 요청을 막음 | 기존 객체와의 충돌 해소 |
+| `AutomationError` | CATIA가 COM 호출을 거부하거나 실패함 | `hresult`로 원인 확인, 필요하면 정리 |
+
+`ValidationError`는 COM에 닿기 전에 거부됐다는, 즉 모델이 안 바뀌었다는 보장을
+줍니다. 반대로 `AutomationError`는 COM 호출이 실제로 시도됐다는 뜻이라 모델이
+바뀌었을 수 있고, `hresult` 속성과 원래 `pywintypes.com_error`를 `__cause__`로
+갖습니다. `PartUpdateError`(`Part.Update()` 실패)와 `StaleSnapshotError`(모델이
+바뀐 뒤 옛 snapshot 사용, `ValidationError` 하위)는 흔히 개별로 잡을 만해서
+루트에서도 바로 import할 수 있습니다.
+
+```python
+from auto_3dx import Catia, PartUpdateError, ValidationError
+
+try:
+    ...
+except PartUpdateError:
+    design.remove_pad(pad_name)
+    raise
+except ValidationError:
+    ...  # 모델은 그대로다. 인자만 고치면 된다
+```
+
+나머지 구체 클래스는 각자의 패키지에서 가져옵니다. 예를 들어
+`from auto_3dx.errors import SketchNotFoundError`. 전체 목록과 분류는
+[`docs/capabilities.md`](docs/capabilities.md)에 있습니다.
 
 ## Part 선택
 
@@ -344,6 +381,9 @@ assert part.is_up_to_date()
 | Slot | `slots`, `get_slot`, `create_slot`, `ensure_slot`, `remove_slot` | profile Sketch + path Sketch |
 | Edge Fillet | `edge_fillets`, `get_edge_fillet`, `create_edge_fillet`, `remove_edge_fillet` | `Edge` (`ensure_*` 없음) |
 | Chamfer | `chamfers`, `get_chamfer`, `create_chamfer`, `remove_chamfer` | `Edge` (`ensure_*` 없음) |
+| Shell | `shells`, `get_shell`, `create_shell`, `remove_shell` | `Face` (`ensure_*` 없음) |
+| Thickness | `thicknesses`, `get_thickness`, `create_thickness`, `remove_thickness` | `Face` (`ensure_*` 없음) |
+| Hole | `holes`, `get_hole`, `create_hole`, `remove_hole` | `Face` (`ensure_*` 없음) |
 
 회전 feature는 다음처럼 각도를 조절할 수 있습니다.
 
@@ -421,8 +461,15 @@ part.update()
   `Edge.index`는 그 snapshot을 만든 순간의 모델에서만 의미가 있습니다.
 - **모델이 바뀌면 이전 snapshot은 거부됩니다.** 같은 snapshot으로 필렛을 두 번
   만들면 성공할 때도 실패할 때도 있고, 호출자는 미리 알 수 없습니다. 그래서
-  `PartDesign`이 모델을 바꾸는 순간(다른 `create_*`/`remove_*` 호출) 기존
-  snapshot을 stale로 표시하고, 그 뒤로 쓰면 COM에 닿기도 전에
+  `Part`는 하나의 model generation 카운터를 갖고, 이 Part로부터 얻은 모든
+  collection과 wrapper가 그 카운터를 공유합니다. feature 생성·삭제·이름변경,
+  파라미터·제약 값 쓰기, formula 변경, `sketch.edit()` 세션을 닫는 것,
+  `part.update()`(성공/실패 무관) 등 **COM에 mutation을 시도하는 모든 경로**가
+  카운터를 올립니다. `list`/`get`/측정/snapshot 같은 읽기 전용 호출과, COM 호출
+  전에 거부된 요청은 올리지 않습니다. 파라미터 값은 그 파라미터가 아무것도
+  구동하지 않아도 카운터를 올립니다 — 그 파라미터가 formula를 거쳐 치수를
+  구동하는지 SDK가 알 수 없기 때문입니다. 이 카운터가 스냅샷을 뜬 시점보다
+  올라가 있으면, 그 스냅샷의 `Edge`/`Face`를 쓰는 순간 COM에 닿기 전에
   `StaleSnapshotError`를 냅니다.
 
   ```python
@@ -433,6 +480,9 @@ part.update()
   except StaleSnapshotError:
       snapshot = part.topology.edges()  # 새로 떠야 한다
   ```
+
+  **3DEXPERIENCE UI나 다른 스크립트로 만든 변경은 이 카운터에 보이지 않습니다.**
+  스냅샷은 쓰기 직전에 새로 떠야 합니다.
 - **`ensure_edge_fillet`/`ensure_chamfer`는 없습니다.** `ensure_pad`처럼 기존
   feature의 소스를 비교하려면 안정적으로 다시 읽을 수 있는 핸들이 필요한데
   모서리에는 그런 핸들이 없습니다. 잘못된 모서리를 조용히 재사용하는 것보다
@@ -449,21 +499,60 @@ part.update()
 `remove_edge_fillet(name)`/`remove_chamfer(name)`으로 지운 뒤에 재시도해야
 합니다.
 
+### Shell, Thickness, Hole (면 참조)
+
+모서리와 같은 참조 경로가 면에도 통합니다. `part.topology.faces()`가 돌려주는
+`FaceSnapshot`에서 `Face`를 얻어 `create_shell`/`create_thickness`/`create_hole`에
+넘깁니다.
+
+```python
+faces = part.topology.faces()
+
+shell = design.create_shell("S1", faces[0], internal_thickness=2.0, external_thickness=0.0)
+part.update()
+
+thickness = design.create_thickness("T1", faces[1], offset=3.0)
+part.update()
+
+hole = design.create_hole("H1", faces[2], depth=5.0)
+part.update()
+```
+
+검증된 값은 shell `(internal_thickness=2.0, external_thickness=0.0)`,
+thickness `offset=3.0`, hole `depth=5.0`이며 각각 첫 면 하나에서 생성과
+`Part.Update()`를 확인했습니다. `internal_thickness`/`offset`/`depth`는 양수만
+받고, `external_thickness`만 검증된 경계값이 `0.0`이라 0 이상을 허용합니다.
+
+면 snapshot도 모서리와 같은 model generation을 공유하므로 모델이 바뀌면 stale이
+되어 COM 전에 `StaleSnapshotError`를 냅니다. 다만 모서리에서 확인한 것처럼 같은
+snapshot의 재사용 실패를 반복 실험으로 재현하지는 않았습니다. 면마다 새 검색으로
+한 번씩만 확인했고, 같은 `Reference` 메커니즘이라 같은 규칙을 보수적 기본값으로
+적용했습니다. `ensure_shell`/`ensure_thickness`/`ensure_hole`은 없습니다. 면에는
+기존 feature와 비교할 안정적인 핸들이 없기 때문입니다.
+
 ## 측정
 
 `part.measurement`는 Part가 속한 Editor의 CATIA 측정 서비스에 연결된
-read-only wrapper입니다. 측정 대상은 raw CATIA 객체를 넘깁니다.
+read-only wrapper입니다. 인자 없이 호출하면 Part의 main body를 잽니다.
 
 ```python
-solid = part.com_object.MainBody
-
-properties = part.measurement.measure(solid)
+properties = part.measurement.measure()
 print(properties.volume_mm3)
 print(properties.area_mm2)
 print(properties.mass_kg)
 print(properties.cog_mm)
-
 ```
+
+다른 대상을 재려면 여전히 raw CATIA 객체를 넘길 수 있습니다.
+
+```python
+properties = part.measurement.measure(part.com_object.MainBody)
+```
+
+기본 대상은 측정 시점마다 다시 읽으므로, 측정 객체를 만든 뒤 main body가 바뀌어도
+새 body를 잽니다. 기본 대상도 없고 인자도 없으면 COM 호출 전에 `ValidationError`를
+냅니다. `SolidMeasurement.com_object`가 다른 wrapper와 같은 이름의 escape hatch이고,
+`editor_com_object`는 `DeprecationWarning`을 내는 alias로 1.0 전에 제거합니다.
 
 `MassProperties`의 public 단위는 `mm³`, `mm²`, `kg`, `mm`입니다. CATIA 측정
 서비스가 반환하는 SI 길이·면적·부피를 각각 변환하며 질량은 kg로 유지합니다.
@@ -505,13 +594,13 @@ Automation 경로의 PLM Physical Product/3D Shape 생성은 설치 환경에서
 
 ### BRep 의존 feature
 
-면·모서리 참조가 필요한 feature 중 `Chamfer`와 `EdgeFillet`(모서리 참조)만
-제공합니다. `Selection.Search('Topology.Edge,all')` + `SelectedElement.Reference`
-로 모서리 `Reference`를 얻는 경로 하나가 뚫렸을 뿐이고, 그 모서리를 재빌드
-너머로 다시 지목하는 방법은 없습니다(`part.topology.edges()`를 다시 불러야 합니다).
-Hole, Draft, Shell, Thickness처럼 **면** reference가 필요한 API는 아직
-제공하지 않습니다. 같은 Search 경로가 면에도 통하는지 아직 시험하지
-않았습니다.
+면·모서리 참조가 필요한 feature 중 `EdgeFillet`/`Chamfer`(모서리 참조)와
+`Shell`/`Thickness`/`Hole`(면 참조)을 제공합니다.
+`Selection.Search('Topology.Edge,all')` / `('Topology.Face,all')` +
+`SelectedElement.Reference`로 모서리·면 `Reference`를 얻는 경로가 뚫렸을 뿐이고,
+그 모서리·면을 재빌드 너머로 다시 지목하는 방법은 없습니다(`part.topology.edges()`
+/ `part.topology.faces()`를 다시 불러야 합니다). `Draft`처럼 나머지 면 reference
+feature는 아직 제공하지 않습니다.
 
 Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더라도
 follow-up `Part.Update()`에서 실패한 사례가 있어 검증된 API로 승격하지
@@ -545,10 +634,12 @@ python -m pytest tests/integration -m integration -q
 정리하므로, 저장하지 않은 별도 작업 세션에서 실행하는 것이 좋습니다. 테스트와
 라이브러리 모두 `Save()`와 `PLMPropagate()`를 호출하지 않습니다.
 
-현재 fake-COM 단위 테스트 520개와 B428_Cloud live 통합 테스트 30개가
-통과했고, 1개는 skip됩니다(열려 있는 Part에 수동으로 파라미터를 추가해야
-통과합니다). 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
-달라집니다.
+현재 fake-COM 단위 테스트 811개가 통과합니다. B428_Cloud live 통합 테스트는
+이번 세션의 아키텍처 변경(모델 generation 공유, 예외 범주 재편, 루트 축소,
+측정 기본값) 이전에 마지막으로 실행해 34개 통과, 1개 skip을 확인했습니다(그
+1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과합니다). live 세션이
+그 뒤로 꺼져 있어 이번 변경 이후로는 통합 테스트를 재실행하지 못했습니다.
+통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라 달라집니다.
 
 ## 저장소 문서
 

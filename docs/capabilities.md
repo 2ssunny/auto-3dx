@@ -6,10 +6,11 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 현재 정적 검증: **520 unit 통과**
-- 현재 라이브 검증: 측정·곡선 스케치·직사각 패턴·모서리 필렛/챔퍼·사용자 정의 평면을 포함한
-  **30 integration 통과, 1건 skip**(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야
-  통과한다)
+- 현재 정적 검증: **811 unit 통과**
+- 현재 라이브 검증: 이번 세션의 아키텍처 변경(모델 generation 공유, 예외 범주 재편, 루트
+  축소, 측정 기본값) 이전 마지막 실행 기준 **34 integration 통과, 1건 skip**(그 1건은 열려
+  있는 Part에 수동으로 파라미터를 추가해야 통과한다). live 세션이 그 뒤로 꺼져 있어 이번
+  변경 이후로는 재실행하지 못했다
 
 ---
 
@@ -29,7 +30,7 @@
                    -> 스케치 생성 -> 직선·곡선 프로파일 그리기
                       (원점 평면 또는 offset/각도 평면 위)
                    -> 패드 / 포켓 / 회전 / Rib·Slot / 사각 패턴 생성
-                   -> 모서리 필렛 / 챔퍼 생성
+                   -> 모서리 필렛 / 챔퍼, Shell / Thickness / Hole 생성
                    -> formula로 치수 연동
                    -> 결과 측정
                    -> update
@@ -161,7 +162,10 @@ angled = part.planes.create_angle(
 | **사각 패턴 생성 / 실패 후 삭제** | 동작 | `create_rectangular_pattern()` / `remove_rectangular_pattern(pattern)`. signed axis만 받고 같은 축 조합은 COM 호출 전 거부. 방향 매핑은 probe 26·30, 공개 adapter는 live integration으로 검증 |
 | **모서리 필렛 생성 / 조회 / 삭제** | 동작 | `create_edge_fillet`. `part.topology.edges()`의 `Edge`만 받는다 (3.4.2) |
 | **챔퍼 생성 / 조회 / 삭제** | 동작 | `create_chamfer`. mode는 내부 고정값 1, 인자로 노출 안 함 (3.4.2) |
-| 목록 / 이름 조회 | 동작 | `pads`~`slots`에 `edge_fillets`, `chamfers` 추가 |
+| **Shell 생성 / 조회 / 삭제** | 동작 | `create_shell`. `part.topology.faces()`의 `Face`만 받는다 (3.4.3) |
+| **Thickness 생성 / 조회 / 삭제** | 동작 | `create_thickness`. `Face`만 받는다 (3.4.3) |
+| **Hole 생성 / 조회 / 삭제** | 동작 | `create_hole`. `Face`만 받는다 (3.4.3) |
+| 목록 / 이름 조회 | 동작 | `pads`~`slots`에 `edge_fillets`, `chamfers`, `shells`, `thicknesses`, `holes` 추가 |
 | formula 대상 파라미터 얻기 | 동작 | `depth_parameter()` / `first_angle_parameter()` |
 | **그 외 전부** | **불가** | 아래 참고 |
 
@@ -174,24 +178,22 @@ angled = part.planes.create_angle(
 
 `ShapeFactory`는 `AddNew*` 메서드를 **90개** 노출한다. 그중 구현된 것은 `AddNewPad`,
 `AddNewPocket`, `AddNewShaft`, `AddNewGroove`, `AddNewMirror`, `AddNewRib`, `AddNewSlot`,
-`AddNewRectPattern`, `AddNewEdgeFilletWithConstantRadius`, `AddNewChamfer` **10개**다.
+`AddNewRectPattern`, `AddNewEdgeFilletWithConstantRadius`, `AddNewChamfer`, `AddNewShell`,
+`AddNewThickness`, `AddNewHole` **13개**다.
 
-면·모서리를 지목할 수 없어 막혀 있던 약 80개 중 처음 두 개(EdgeFillet, Chamfer)가 이번에
-뚫렸다. 그 둘을 가능하게 한 것은 `Selection.Search('Topology.Edge,all')` +
-`SelectedElement.Reference`라는 모서리 참조 경로 하나이지 범용 참조 레이어가 아니다.
-Shell/Thickness/Draft/Hole처럼 **면** 참조를 요구하는 factory는 이 경로를 아직 시험하지
-않았으므로 여전히 미구현이다.
+면·모서리를 지목할 수 없어 막혀 있던 약 80개 중 처음 다섯 개(EdgeFillet, Chamfer, Shell,
+Thickness, Hole)가 뚫렸다. `Selection.Search('Topology.Edge,all')` /
+`('Topology.Face,all')` + `SelectedElement.Reference`라는 모서리·면 참조 경로 하나가
+그 다섯을 가능하게 했지 범용 참조 레이어가 아니다. `Draft`처럼 남은 면 참조 factory는
+아직 시험하지 않았다.
 
-나머지가 막힌 이유는 세 가지다.
+나머지가 막힌 이유는 두 가지다.
 
 ```text
-모서리 참조로 해결됨        Chamfer, EdgeFillet
+모서리·면 참조로 해결됨     EdgeFillet, Chamfer, Shell, Thickness, Hole
                             -> Selection.Search + SelectedElement.Reference로 모서리
-                               Reference를 얻어 넘긴다. 단, 그 Reference로 나중에 같은
-                               모서리를 다시 지목할 방법은 없다 (아래 3.4.2).
-면 참조가 아직 필요         Shell, Thickness, Draft, Hole
-                            -> feature를 통째로 넘기는 것은 거부된다 (실측). 모서리와
-                               같은 Search 경로가 면에도 통하는지는 아직 시험하지 않았다.
+                               또는 면 Reference를 얻어 넘긴다. 단, 그 Reference로 나중에
+                               같은 모서리·면을 다시 지목할 방법은 없다 (아래 3.4.2/3.4.3).
 생성은 되는데 update 실패    Stiffener, CircPattern
                             -> 객체는 트리에 생기지만 모델이 재계산에 실패한다.
                                "생성 성공"을 검증으로 쳐주지 않는 이유다.
@@ -200,9 +202,8 @@ Shell/Thickness/Draft/Hole처럼 **면** 참조를 요구하는 factory는 이 �
 미구현 예:
 
 ```text
-AddNewHole        AddNewDraft       AddNewShell       AddNewThickness
-AddNewStiffener   AddNewCircPattern AddNewUserPattern AddNewLoft
-AddNewSplit       AddNewTrim        AddNewSolidCombine ... 외 69개
+AddNewDraft       AddNewStiffener   AddNewCircPattern AddNewUserPattern
+AddNewLoft        AddNewSplit       AddNewTrim        AddNewSolidCombine ... 외 69개
 ```
 
 ### 3.4.1 스케치 제약
@@ -259,10 +260,15 @@ part.update()
   모서리 개수와 순서(그리고 `Edge.index`)가 전부 바뀐다. 그래서 `part.topology.edges()`를 다시
   부르는 것 외에는 답이 없다.
 - **모델이 바뀌면 이전 snapshot은 거부된다.** 같은 snapshot으로 필렛을 두 번 만들면
-  성공할 때도 실패할 때도 있고, 호출자는 어느 쪽인지 미리 알 수 없다. 그래서
-  `PartDesign`이 모델을 바꾸는 순간(즉 이 클래스의 다른 `create_*`/`remove_*`가 호출되는
-  순간) 기존 snapshot을 stale로 표시하고, 그 뒤로 쓰면 COM에 닿기 전에
-  `StaleSnapshotError`를 낸다. 새 작업 전에는 항상 새 `part.topology.edges()`를 부른다.
+  성공할 때도 실패할 때도 있고, 호출자는 어느 쪽인지 미리 알 수 없다. 그래서 `Part`는
+  하나의 model generation 카운터를 갖고, 그 Part로부터 얻은 모든 collection과 wrapper가
+  같은 카운터를 공유한다. feature 생성·삭제·이름변경, 파라미터·제약 값 쓰기, formula
+  변경, `sketch.edit()` 세션을 닫는 것, `part.update()`(성공/실패 무관) 등 COM에
+  mutation을 시도하는 모든 경로가 카운터를 올리고, 읽기와 COM 전에 거부된 요청은 올리지
+  않는다. 파라미터 값은 그 파라미터가 아무것도 구동하지 않아도 카운터를 올린다. 이
+  카운터가 스냅샷을 뜬 시점보다 올라가 있으면 그 스냅샷의 `Edge`를 쓰는 순간 COM에 닿기
+  전에 `StaleSnapshotError`를 낸다. CATIA UI나 다른 스크립트로 만든 변경은 이 카운터에
+  보이지 않으므로, 새 작업 전에는 항상 새 `part.topology.edges()`를 불러야 한다.
 
 그 외:
 
@@ -275,6 +281,44 @@ part.update()
 - 필렛/챔퍼 모두 `create_*` 뒤 update가 실패하면 그 feature가 트리에 남고, **지우기 전까지
   이후의 모든 `Part.Update()`가 실패한다.** `remove_edge_fillet(name)`/`remove_chamfer(name)`
   으로 지운 뒤에 재시도해야 한다.
+
+### 3.4.3 Shell, Thickness, Hole (면 참조)
+
+모서리와 같은 참조 경로가 면에도 통한다. `part.topology.faces()`가 돌려주는
+`FaceSnapshot`에서 `Face`를 얻어 `create_shell`/`create_thickness`/`create_hole`에
+넘긴다.
+
+```python
+faces = part.topology.faces()   # 솔리드 전체 면, FaceSnapshot
+
+shell = part.part_design.create_shell(
+    "S1", faces[0], internal_thickness=2.0, external_thickness=0.0
+)
+part.update()
+
+thickness = part.part_design.create_thickness("T1", faces[1], offset=3.0)
+part.update()
+
+hole = part.part_design.create_hole("H1", faces[2], depth=5.0)
+part.update()
+```
+
+검증된 값은 shell `(internal_thickness=2.0, external_thickness=0.0)`, thickness
+`offset=3.0`, hole `depth=5.0`이고, 각각 첫 면 하나에서 생성 + `Part.Update()`를
+확인했다(probe 37). `internal_thickness`/`offset`/`depth`는 유한하고 양수만 받고,
+`external_thickness`만 검증된 경계값이 `0.0`이라 0 이상을 허용한다.
+
+- **모서리와 같은 model generation을 공유한다.** 모델이 바뀌면 이전 `FaceSnapshot`의
+  `Face`는 COM 전에 `StaleSnapshotError`로 거부된다.
+- **다만 재사용 실패는 모서리만큼 반복 검증하지 않았다.** 모서리는 같은 snapshot의
+  다음·중간·마지막 모서리를 전부 시험해 실패를 확인했지만, 면은 feature마다 새 검색으로
+  한 번씩만 확인했다. 같은 `Reference` 메커니즘이라 같은 규칙을 보수적 기본값으로 적용한
+  것이지, 면에 대해 재사용 실패를 실제로 재현한 결과는 아니다.
+- `ensure_shell`/`ensure_thickness`/`ensure_hole`은 없다. 모서리와 같은 이유로, 면에는
+  기존 feature와 비교할 안정적인 핸들이 없다.
+- 생성 뒤 update가 실패하면 그 feature가 트리에 남고, 지우기 전까지 이후의 모든
+  `Part.Update()`가 실패한다. `remove_shell`/`remove_thickness`/`remove_hole`으로 지운
+  뒤에 재시도해야 한다.
 
 ### 3.5 Formula
 
@@ -365,12 +409,18 @@ Catia.attach(com3dx_path=None) -> Catia
 ### SolidMeasurement / 측정 결과
 
 ```python
-part.measurement.measure(part.com_object.MainBody) -> MassProperties
+part.measurement.measure() -> MassProperties            # Part의 main body (기본값)
+part.measurement.measure(part.com_object.MainBody)      # raw 대상도 여전히 받는다
 
 MassProperties(
     volume_mm3, area_mm2, mass_kg, cog_mm=(x, y, z)
 )
 ```
+
+기본 대상은 생성 시점이 아니라 측정 시점마다 다시 읽는다. 기본 대상도 없는데 인자도
+없으면 COM 호출 전에 `ValidationError`다. `SolidMeasurement.com_object`가 다른 wrapper와
+같은 이름의 escape hatch이고, `editor_com_object`는 `DeprecationWarning`을 내는 alias로
+1.0 전에 제거한다.
 
 측정 서비스는 `Part`가 아니라 해당 `Editor.GetService()`에서 얻는다. 따라서 raw `Part`를
 직접 감싼 경우에는 editor를 추측하지 않고 `NoActiveEditorError`를 낸다. CATIA 서비스가
@@ -521,6 +571,25 @@ edge.com_object / edge.index / edge.descriptor   # index/descriptor는 이 snaps
 # (내부에서 항상 1).
 ```
 
+### PartDesign / Shell / Thickness / Hole
+
+```python
+                .shells / .thicknesses / .holes
+                .get_shell(name) / .get_thickness(name) / .get_hole(name)
+                .create_shell(name, face, internal_thickness, external_thickness,
+                               unit="mm")
+                .create_thickness(name, face, offset, unit="mm")
+                .create_hole(name, face, depth, unit="mm")
+                .remove_shell(name) / .remove_thickness(name) / .remove_hole(name)
+
+face_snapshot[i] / len(face_snapshot) / iter(face_snapshot)  -> Face
+face.com_object / face.index / face.descriptor   # index/descriptor는 이 snapshot 안에서만 유효
+
+# ensure_shell / ensure_thickness / ensure_hole 없음. 이유는 edge와 같다.
+# internal_thickness/offset/depth는 양수만 받는다. external_thickness만
+# 검증된 경계값이 0.0이라 0 이상을 허용한다.
+```
+
 ### PlaneCollection / OffsetPlane / AnglePlane
 
 ```python
@@ -564,30 +633,50 @@ formula.name / .body / .comment / .activated / .input_count
 ### 예외
 
 전부 `Auto3dxError`를 상속한다. `pywintypes.com_error`는 라이브러리 밖으로 나오지 않는다.
+다섯 범주는 "호출자가 그 뒤에 무엇을 할 수 있는가"로 나뉜다. 반응이 같으면 범주를,
+다르면 구체 클래스를 잡는다.
 
 ```text
-Com3dxNotFoundError        com3dx.py 헬퍼를 못 찾음
-CatiaConnectionError       세션 attach 실패
-NoActiveEditorError        열린 editor 없음
-NoActivePartError          현재 편집 대상이 Part가 아님 (Assembly 등)
-ParameterNotFoundError     이름으로 파라미터를 못 찾음
-ParameterNameError         쓸 수 없는 이름 (빈 문자열, "\" 포함 등)
-ParameterAlreadyExistsError  이미 있는 이름으로 생성 시도
-ParameterTypeError         지원하지 않는 파라미터 타입 / 값 타입
-UnsupportedUnitError       지원하지 않는 단위
-PartUpdateError            Part.Update() 실패
-SketchNotFoundError        이름으로 스케치를 못 찾음
-SketchAlreadyExistsError   이미 있는 이름으로 생성 시도
-SketchSupportMismatchError 같은 이름인데 다른 평면
-FeatureNotFoundError       이름으로 feature를 못 찾음
-FeatureConflictError       같은 이름인데 다른 스케치 기반, 또는 패턴 방향이 같은 축
-StaleSnapshotError     모델이 바뀐 뒤 옛 EdgeSnapshot의 Edge를 사용
-UnsupportedSupportError    "XY"/"YZ"/"ZX" 외의 평면 문자열
-FormulaNotFoundError       이름으로 formula를 못 찾음
-FormulaAlreadyExistsError  이미 있는 이름으로 생성 시도
-AmbiguousNameError         같은 이름이 둘 이상
-PartialCreationError       생성은 됐는데 이름 지정이 실패 (모델에 흔적 남음)
+Auto3dxError
+├── SessionError             세션에 닿지 못함. 모델은 손대지 않았다
+│   ├── Com3dxNotFoundError        com3dx.py 헬퍼를 못 찾음
+│   ├── CatiaConnectionError       세션 attach 실패
+│   ├── NoActiveEditorError        열린 editor 없음
+│   └── NoActivePartError          현재 편집 대상이 Part가 아님 (Assembly 등)
+├── ValidationError          COM 호출 전에 거부됨. 모델은 그대로다
+│   ├── ParameterNameError         쓸 수 없는 이름 (빈 문자열, "\" 포함 등)
+│   ├── ParameterTypeError         지원하지 않는 파라미터/값 타입, 또는 edge·radius 등
+│   │                              파라미터가 아닌 인자 (이름 부채, 8절 참고)
+│   ├── UnsupportedUnitError       지원하지 않는 단위
+│   ├── UnsupportedMagnitudeError  CreateDimension의 magnitude가 단위 카탈로그에 없음
+│   ├── UnsupportedSupportError    "XY"/"YZ"/"ZX" 외의 평면 문자열
+│   └── StaleSnapshotError         모델이 바뀐 뒤 옛 EdgeSnapshot/FaceSnapshot의
+│                                  Edge/Face를 사용
+├── NotFoundError            그 이름의 객체가 없음 (열거로 확인, 실패한 조회로 추정하지 않음)
+│   ├── ParameterNotFoundError     이름으로 파라미터를 못 찾음
+│   ├── SketchNotFoundError        이름으로 스케치를 못 찾음
+│   ├── FeatureNotFoundError       이름으로 feature를 못 찾음
+│   ├── FormulaNotFoundError       이름으로 formula를 못 찾음
+│   └── ConstraintNotFoundError    이름으로 제약을 못 찾음
+├── ConflictError            모델의 이름·상태가 요청을 막음. 아무것도 만들지 않았다
+│   ├── ParameterAlreadyExistsError  이미 있는 이름으로 생성 시도
+│   ├── SketchAlreadyExistsError     이미 있는 이름으로 생성 시도
+│   ├── FormulaAlreadyExistsError    이미 있는 이름으로 생성 시도
+│   ├── FeatureConflictError         같은 이름인데 다른 스케치 기반, 또는 패턴 방향이 같은 축
+│   ├── SketchSupportMismatchError   같은 이름인데 다른 평면
+│   └── AmbiguousNameError           같은 이름이 둘 이상
+└── AutomationError          CATIA가 COM 호출을 거부하거나 실패함. hresult 속성을 가짐
+    ├── PartUpdateError            Part.Update() 실패
+    └── PartialCreationError       생성은 됐는데 이름 지정이 실패 (모델에 흔적 남음)
 ```
+
+`ValidationError`는 COM에 닿기 전에 거부됐다는, 즉 모델이 안 바뀌었다는 보장을 준다.
+`AutomationError`는 COM 호출이 실제로 시도됐다는 뜻이라 모델이 바뀌었을 수 있고, 원본
+`pywintypes.com_error`를 `__cause__`로 chain한다. `PartUpdateError`와
+`StaleSnapshotError`는 흔히 개별로 잡을 만해서 `Auto3dxError`, `SessionError`,
+`ValidationError`, `NotFoundError`, `ConflictError`, `AutomationError`와 함께
+`Catia`/`Part`만 있는 패키지 루트에서도 바로 import할 수 있다. 나머지 구체 클래스는
+`auto_3dx.errors`에서 가져온다.
 
 ---
 
@@ -643,19 +732,26 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 ## 7. 확장 순서 제안
 
-완료: 모서리 선택 레이어(`part.topology.edges()`/`EdgeSnapshot`), Chamfer 인자 확정
-(mode=1 고정), 사용자 정의 offset/각도 평면(스케치 + Pad까지 검증). 이제 남은 순서는
-다음과 같다.
+완료: 모서리·면 선택 레이어(`part.topology.edges()`/`faces()`, `EdgeSnapshot`/
+`FaceSnapshot`), Chamfer 인자 확정(mode=1 고정), Shell/Thickness/Hole(면 참조),
+사용자 정의 offset/각도 평면(스케치 + Pad까지 검증), Part당 하나의 공유 model
+generation, 예외 다섯 범주, 작은 패키지 루트, 측정 기본 대상(main body). 이제 남은
+순서는 다음과 같다.
 
-1. **면 참조 레이어** — 모서리와 같은 `Selection.Search('Topology.Face,all')` +
-   `SelectedElement.Reference` 경로가 Shell/Thickness/Draft/Hole 같은 face-taking
-   factory에도 통하는지 아직 시험하지 않았다. 통한다면 이 네 개가 다음 후보다.
-2. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
+1. **`part.inspect`의 나머지 필드** — `part.inspect.summary()`는 이미 Part 이름, 재빌드
+   상태, main body의 feature(SDK가 만들 수 없는 종류 포함), 스케치 이름, 사용자
+   파라미터를 frozen dataclass로 돌려준다. 다른 body, 기하 세트와 그 내용, 모서리와 면
+   개수는 아직 없다. 모든 필드가 live로 검증된 읽기에 근거해야 하므로 probe 38이 live
+   세션에서 먼저 돌아야 한다.
+2. **topology 검색이 지우는 사용자 selection 복원** — 지금 `part.topology.edges()`/
+   `faces()`는 검색 전후로 CATIA 사용자 selection을 복원하지 않는다. 이것도 live
+   세션에서 검증할 probe가 먼저 필요하다.
+3. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
    검증해야 한다. 지금 기준으로는 미검증이며 구현하지 않는다.
-3. **모서리 재선택 selector** — 지금은 재빌드마다 `part.topology.edges()`를 새로 불러야
-   한다. BRep 이름 재해석, 재빌드 후 이름/순서 보존, 측정 기반 선택, feature 단위
-   검색 범위 한정 네 가지 경로를 모두 시험했고 전부 막혔다(`geometry.edges`). 새로운
-   돌파구가 없으면 이 항목은 열린 채로 남는다.
+4. **모서리·면 재선택 selector** — 지금은 재빌드마다 `part.topology.edges()`/`faces()`를
+   새로 불러야 한다. BRep 이름 재해석, 재빌드 후 이름/순서 보존, 측정 기반 선택,
+   feature 단위 검색 범위 한정 네 가지 경로를 모두 시험했고 전부 막혔다
+   (`geometry.edges`). 새로운 돌파구가 없으면 이 항목은 열린 채로 남는다.
 
 각 항목은 probe로 실제 동작을 확인한 뒤 라이브러리에 올린다. 기존 probe가 그 절차의
 예시다.
