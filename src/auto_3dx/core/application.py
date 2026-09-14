@@ -11,6 +11,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._com import automation_error
 from auto_3dx.core.part import Part
 from auto_3dx.errors import (
     AmbiguousNameError,
@@ -179,9 +180,7 @@ class Catia:
         try:
             return self._com_object.Name
         except pywintypes.com_error as error:
-            raise Auto3dxError(
-                f"Could not read the Application name.{_format_com_error(error)}"
-            ) from error
+            raise automation_error(error, "reading Application.Name") from error
 
     def active_editor(self) -> Any:
         """Return the raw active ``Editor`` COM object.
@@ -254,9 +253,7 @@ class Catia:
         try:
             return self._com_object.Editors
         except pywintypes.com_error as error:
-            raise Auto3dxError(
-                f"Could not read Application.Editors.{_format_com_error(error)}"
-            ) from error
+            raise automation_error(error, "reading Application.Editors") from error
 
     def _editor_count(self, editors_com_object: Any) -> int:
         """Returns ``Editors.Count``.
@@ -278,9 +275,7 @@ class Catia:
         try:
             return editors_com_object.Count
         except pywintypes.com_error as error:
-            raise Auto3dxError(
-                f"Could not read Editors.Count.{_format_com_error(error)}"
-            ) from error
+            raise automation_error(error, "reading Editors.Count") from error
 
     def editors(self) -> "list[EditorInfo]":
         """Lists every editor currently open in the session.
