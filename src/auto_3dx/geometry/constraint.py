@@ -35,6 +35,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._com import automation_error
 from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
@@ -101,24 +102,9 @@ Verified (`scripts/probes/27_sketch_geometry.py`) with two distinct closed
 `Part.Update()` succeeded. Not dimensional (no `Dimension`)."""
 
 
-def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
-    """Converts an unmapped `pywintypes.com_error` into an `Auto3dxError`.
-
-    Duplicated from `geometry.sketch`/`parameters.parameter` rather than
-    imported: this module is imported *by* `geometry.sketch` (for the
-    `CONSTRAINT_*` constants and `Constraint`), so importing back from it
-    would create a cycle.
-
-    Args:
-        error: The COM error to convert.
-
-    Returns:
-        An `Auto3dxError` whose message includes the failure's HRESULT in
-        hexadecimal form.
-    """
-    hresult = error.args[0] if error.args else None
-    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
-    return Auto3dxError(f"Unexpected COM failure (HRESULT={hresult_hex}).")
+# COM failures translate in one place (`auto_3dx._com`, `docs/api-design.md`
+# section 8). The private name stays because sibling modules import it from here.
+_wrap_com_error = automation_error
 
 
 class Constraint:

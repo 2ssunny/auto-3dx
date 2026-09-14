@@ -38,16 +38,19 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._com import automation_error, format_hresult, hresult_of
 from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
+    AutomationError,
     ParameterTypeError,
     PartialCreationError,
     SketchAlreadyExistsError,
     SketchNotFoundError,
     SketchSupportMismatchError,
     UnsupportedSupportError,
+    ValidationError,
 )
 from auto_3dx.geometry.constraint import (
     CONSTRAINT_COINCIDENT,
@@ -104,23 +107,13 @@ _AXIS_DATA_BY_SUPPORT: dict[str, tuple[float, ...]] = {
 """Verified `GetAbsoluteAxisData` reference frames (origin + X axis + Y axis) per support."""
 
 
-def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
-    """Converts an unmapped `pywintypes.com_error` into an `Auto3dxError`.
-
-    Args:
-        error: The COM error to convert.
-
-    Returns:
-        An `Auto3dxError` whose message includes the failure's HRESULT in
-        hexadecimal form.
-    """
-    hresult = error.args[0] if error.args else None
-    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
-    return Auto3dxError(f"Unexpected COM failure (HRESULT={hresult_hex}).")
+# COM failures translate in one place (`auto_3dx._com`, `docs/api-design.md`
+# section 8). The private name stays because sibling modules import it from here.
+_wrap_com_error = automation_error
 
 
-def _wrap_constraint_com_error(error: pywintypes.com_error) -> Auto3dxError:
-    """Converts a failed constraint-creation COM call into an `Auto3dxError`.
+def _wrap_constraint_com_error(error: pywintypes.com_error) -> AutomationError:
+    """Converts a failed constraint-creation COM call into an `AutomationError`.
 
     Verified (`docs/conventions.md` sections 1.2.4 and 6.14): `AddMonoEltCst`/
     `AddBiEltCst` only succeed while the owning sketch is open for editing,
@@ -132,16 +125,16 @@ def _wrap_constraint_com_error(error: pywintypes.com_error) -> Auto3dxError:
         error: The COM error to convert.
 
     Returns:
-        An `Auto3dxError` describing the failure and naming the most likely
-        cause.
+        An `AutomationError` describing the failure, naming the most likely
+        cause, and carrying the HRESULT.
     """
-    hresult = error.args[0] if error.args else None
-    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
-    return Auto3dxError(
-        f"Failed to create the constraint (HRESULT={hresult_hex}). Constraints "
-        "only work while the sketch is open for editing, i.e. inside a "
+    hresult = hresult_of(error)
+    return AutomationError(
+        f"Failed to create the constraint (HRESULT={format_hresult(hresult)}). "
+        "Constraints only work while the sketch is open for editing, i.e. inside a "
         "`Sketch.edit()` block; this is the most likely cause if that block "
-        "has already exited."
+        "has already exited.",
+        hresult,
     )
 
 
@@ -174,7 +167,7 @@ def _axis_data_matches(actual: tuple[float, ...], expected: tuple[float, ...]) -
             for a, b in zip(actual, expected)
         )
     except TypeError as error:
-        raise Auto3dxError(
+        raise AutomationError(
             "Axis data contains a non-numeric entry; expected 9 floats from "
             "GetAbsoluteAxisData."
         ) from error
@@ -235,7 +228,7 @@ class SketchEditor:
     def _require_active(self) -> None:
         """Rejects use after the owning ``Sketch.edit()`` block has exited."""
         if not self._active:
-            raise Auto3dxError(
+            raise ValidationError(
                 "This SketchEditor is no longer active; create geometry and "
                 "constraints only inside the Sketch.edit() block that returned it."
             )
@@ -950,7 +943,7 @@ class Sketch:
         try:
             return tuple(raw)
         except TypeError as error:
-            raise Auto3dxError(
+            raise AutomationError(
                 "GetAbsoluteAxisData returned a non-iterable result; expected "
                 "9 floats."
             ) from error
@@ -1058,7 +1051,7 @@ class Sketch:
                 `CloseEdition()` fails unexpectedly.
         """
         if self._editing:
-            raise Auto3dxError(
+            raise ValidationError(
                 "This sketch is already being edited; edit() does not support "
                 "re-entrant or concurrent use."
             )

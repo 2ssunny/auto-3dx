@@ -266,8 +266,9 @@ is public until the properties it depends on are live-verified and the choice is
 
 ## 8. Error architecture
 
-Status: the hierarchy is Enforced by `tests/unit/test_errors.py`. Planned: every module
-translating COM failures through `auto_3dx._com`, which today only `Part` does.
+Status: Enforced. `tests/unit/test_errors.py` pins every class to its category, and
+`tests/unit/test_error_classification.py` pins that every module translates COM failures
+through `auto_3dx._com` and that guards raise by when they happen.
 
 Errors are grouped by **what the caller can do about them**:
 
@@ -316,8 +317,12 @@ Rules:
   mapped, because a member missing from a release is a real possibility (`Shapes.Remove` does
   not exist in B428).
 - COM error translation lives in one module, `auto_3dx._com`: `automation_error(error, action)`
-  returns an `AutomationError` with the HRESULT as `hresult`. [Planned: five modules still keep
-  their own copy, which returns a bare `Auto3dxError`.]
+  returns an `AutomationError` with the HRESULT as `hresult`. A module may keep the private
+  name `_wrap_com_error` only as an alias of it, for sibling modules that import that name.
+- A guard that refuses a request before any COM call raises a `ValidationError`, even when
+  the refusal is about state rather than arguments: reusing a closed `SketchEditor`,
+  re-entering `sketch.edit()`, or deleting without an editor selection. When CATIA returns
+  data the SDK cannot use, such as non-numeric axis data, that is an `AutomationError`.
 - Known naming debt: `ParameterTypeError` is also raised for non-parameter arguments such as an
   edge, a radius or a pattern spacing. It is a `ValidationError`, so catching the category is
   correct; renaming it is deferred until a caller needs to tell those cases apart.
@@ -475,7 +480,7 @@ Status: Enforced by review.
 | Topology snapshots restore the user's selection | 7 | Planned |
 | Error categories and `AutomationError` | 8 | Done |
 | One COM error translation module: `_com.py` exists | 8 | Done |
-| Every module translating COM failures through `_com.py` | 8 | Planned |
+| Every module translating COM failures through `_com.py` | 8 | Done |
 | `Part.update()` maps only COM failures | 8 | Done |
 | `measurement.measure()` defaults to the main body | 9 | Done |
 | Small package root | 13 | Done |

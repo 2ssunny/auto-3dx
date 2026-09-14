@@ -18,7 +18,8 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.errors import Auto3dxError
+from auto_3dx._com import hresult_of
+from auto_3dx.errors import AutomationError, ValidationError
 
 _NO_SELECTION_MESSAGE = (
     "Deleting geometry requires the editor's Selection, which is not "
@@ -56,7 +57,7 @@ def require_selection(selection: Any) -> Any:
         Auto3dxError: If `selection` is ``None``.
     """
     if selection is None:
-        raise Auto3dxError(_NO_SELECTION_MESSAGE)
+        raise ValidationError(_NO_SELECTION_MESSAGE)
     return selection
 
 
@@ -93,19 +94,23 @@ def delete_via_selection(selection: Any, com_object: Any, description: str) -> N
         try:
             selection.Clear()
         except pywintypes.com_error as cleanup_error:
-            raise Auto3dxError(
+            raise AutomationError(
                 f"Could not delete {description}.{delete_suffix} The "
                 f"selection could also not be cleared afterward"
                 f"{_hresult_suffix(cleanup_error)}, so the selection may "
-                "still be dirty."
+                "still be dirty.",
+                hresult_of(delete_error),
             ) from delete_error
-        raise Auto3dxError(f"Could not delete {description}.{delete_suffix}") from delete_error
+        raise AutomationError(
+            f"Could not delete {description}.{delete_suffix}", hresult_of(delete_error)
+        ) from delete_error
     else:
         try:
             selection.Clear()
         except pywintypes.com_error as cleanup_error:
-            raise Auto3dxError(
+            raise AutomationError(
                 f"Deleted {description}, but the selection could not be "
                 f"cleared afterward{_hresult_suffix(cleanup_error)}. The "
-                "selection may still be dirty and could widen a later delete."
+                "selection may still be dirty and could widen a later delete.",
+                hresult_of(cleanup_error),
             ) from cleanup_error

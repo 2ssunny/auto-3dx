@@ -11,6 +11,7 @@ from typing import Any
 
 import pywintypes
 
+from auto_3dx._com import automation_error
 from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     Auto3dxError,
@@ -555,16 +556,6 @@ def validate_parameter_name(name: str) -> str:
     return name
 
 
-def _wrap_com_error(error: pywintypes.com_error) -> Auto3dxError:
-    """Converts an unmapped `pywintypes.com_error` into an `Auto3dxError`.
-
-    Args:
-        error: The COM error to convert.
-
-    Returns:
-        An `Auto3dxError` whose message includes the failure's HRESULT in
-        hexadecimal form.
-    """
-    hresult = error.args[0] if error.args else None
-    hresult_hex = f"0x{hresult & 0xFFFFFFFF:08X}" if isinstance(hresult, int) else hresult
-    return Auto3dxError(f"Unexpected COM failure (HRESULT={hresult_hex}).")
+# COM failures translate in one place (`auto_3dx._com`, `docs/api-design.md`
+# section 8). The private name stays because sibling modules import it from here.
+_wrap_com_error = automation_error
