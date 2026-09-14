@@ -953,6 +953,8 @@ COM 오류는 "없음"과 "일시적 실패"를 구분해 주지 않으므로, �
 
 ## 3. 계층과 의존 방향
 
+> **이 절은 `docs/api-design.md`가 대체한다.** 아래 내용은 이력으로 남긴다. 새 코드와 리뷰는 api-design.md를 기준으로 한다.
+
 ```text
 auto_3dx (public API)
         ↓
@@ -984,6 +986,8 @@ com3dx / pywin32 / Windows COM
 ---
 
 ## 5. 예외 계층과 변환 규칙
+
+> **이 절은 `docs/api-design.md`가 대체한다.** 아래 내용은 이력으로 남긴다. 새 코드와 리뷰는 api-design.md를 기준으로 한다.
 
 ```text
 Auto3dxError
@@ -1785,6 +1789,8 @@ class FormulaCollection:
 추가 예외: `FormulaNotFoundError(Auto3dxError)`, `FormulaAlreadyExistsError(Auto3dxError)`.
 
 ### 6.7 `auto_3dx/__init__.py`
+
+> **이 절은 `docs/api-design.md`가 대체한다.** 아래 내용은 이력으로 남긴다. 새 코드와 리뷰는 api-design.md를 기준으로 한다.
 
 공개 이름은 wrapper 타입 전체와 예외 계층 전체다.
 
