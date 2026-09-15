@@ -412,6 +412,8 @@ summary.parameters                     # ParameterInfo for user parameters only
 summary.bodies                         # BodyInfo(name, is_main, features, sketches)
 summary.geometrical_sets               # GeometricalSetInfo(name, elements, nested_set_count)
 summary.topology                       # TopologyCounts(edges, faces), None without a selection
+summary.in_work_object                 # InWorkObjectInfo(name, kind, is_main_body), or None
+part.inspect.in_work_object()          # the same value on its own
 print(summary.render())                # human-readable text built from the data
 ```
 
@@ -424,6 +426,15 @@ any other body has `supported=False`, because `part.part_design` works on the ma
 `geometrical_sets` lists the sets directly under the Part with their elements' names and kinds.
 `topology` counts come from `part.topology`, so the user's selection is restored (section 7)
 and the generation does not advance.
+
+`in_work_object` reports where CATIA puts the next feature: its `name`, its `kind` (the CATIA
+wrapper type name) and `is_main_body` (COM identity with `MainBody`, not a name comparison).
+It is `None` when CATIA reports no In-Work Object. The value never carries the COM object, so
+an agent can check the In-Work Object without `part.com_object.InWorkObject`. Observed live
+(2026-09-15): creating and editing a sketch left it unchanged, creating a pad made the new pad
+the In-Work Object (`kind="Pad"`), and creating a plane handed it back to the main body
+(`kind="Body"`, `is_main_body=True`). Removing features does not restore the previous one.
+There is no public setter.
 
 Deliberately absent, because no live read backs them yet: the contents of nested geometrical
 sets (only their count is verified), geometrical sets inside a body, and sketches inside a
@@ -544,4 +555,5 @@ Status: Enforced by review.
 | Test that only `Part.update()` rebuilds, and nothing saves | 6 | Done |
 | `part.inspect`: name, rebuild status, features, sketches, user parameters | 11 | Done |
 | `part.inspect`: bodies, geometrical sets, topology counts | 11 | Done |
+| `part.inspect`: In-Work Object (`InWorkObjectInfo`) | 11 | Done |
 | File export | 12 | Probed: unavailable for PLM-backed documents |

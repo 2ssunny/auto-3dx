@@ -47,6 +47,7 @@ HOMES = {
         "GeometryInfo",
         "GeometricalSetInfo",
         "TopologyCounts",
+        "InWorkObjectInfo",
     ],
     "auto_3dx.geometry": [
         "Sketch",

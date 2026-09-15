@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **861 unit 통과**
-- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **38 integration
-  통과, 1건 skip**(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과한다). 실행 뒤
+- 현재 정적 검증: **868 unit 통과**
+- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **40 integration
+  통과**(수동으로 파라미터를 추가하지 않은 Part에서는 그중 1건이 skip된다). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -361,6 +361,7 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | **`Save()`** | **하지 않음** (아래 6) |
 | **feature rebuild 상태** | 동작 | `part.is_up_to_date(target=None)`. feature 변경 전후 false→true 검증. unsaved-change 감지는 아님 |
 | **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심 조회. bounding box는 제공 안 함 |
+| **모델 검사** | 동작 | `part.inspect.summary()`: feature·스케치·사용자 파라미터·body·기하 세트·모서리/면 개수·In-Work Object(`InWorkObjectInfo(name, kind, is_main_body)`). 읽기 전용, COM 객체를 돌려주지 않음 |
 
 ### 3.7 손대지 않은 영역
 
@@ -406,6 +407,8 @@ Catia.attach(com3dx_path=None) -> Catia
 .formulas        -> FormulaCollection
 .update()        # 실패 시 PartUpdateError
 .measurement     -> SolidMeasurement  # editor 기반 read-only 측정
+.topology        -> Topology          # edges() / faces() 스냅샷
+.inspect         -> Inspector         # summary(), in_work_object() 등 read-only 검사
 ```
 
 ### SolidMeasurement / 측정 결과
