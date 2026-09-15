@@ -116,7 +116,7 @@ class Edge:
       once the model has moved on, or even across a fresh `Python` process.
 
     A caller that has modified the model since taking a snapshot must take a
-    new one (`PartDesign.snapshot_edges`) before trusting either `index` or
+    new one (`part.topology.edges()`) before trusting either `index` or
     `descriptor` again.
     """
 
@@ -210,7 +210,7 @@ class Edge:
 class EdgeSnapshot:
     """Every edge of the solid, as `Selection.Search` reported it at one instant.
 
-    `PartDesign.snapshot_edges()` is the only way to obtain one. It describes
+    `part.topology.edges()` is how a caller obtains one. It describes
     the model exactly as it stood the moment the search ran: edge count and
     order both change after every modification, so a snapshot must never be
     used against a model that has since changed.

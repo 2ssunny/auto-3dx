@@ -971,6 +971,21 @@ Add(Pad) 뒤 Search(면)                            -> Search가 selection을 �
 `Add`가 예외 없이 무시될 수 있으므로 복원은 `Count`를 다시 읽어 확인한다. 이 경우 selection은
 이미 바뀌었으므로 스냅샷은 돌려주고 `SelectionNotRestoredWarning`으로 알린다(api-design 7절).
 
+**In-Work Object 읽기와 SDK 작업에 따른 변화 (실측, 2026-09-15).** `Part.InWorkObject`의 `Name`,
+타입 이름, `== MainBody`를 SDK 작업 단계마다 읽었다.
+
+```text
+시작, 두 번째 읽기           AUTO3DX_BASE_PAD  Pad   main=False
+sketches.create / edit / update  변화 없음
+create_pad + update           새 pad           Pad   main=False
+planes.create_offset          PartBody          Body  main=True   (geometry.planes가 되찾음)
+정리(세트·pad·스케치 삭제) + update  PartBody    Body  main=True   (이전 값으로 돌아가지 않음)
+InWorkObject = 원래 객체       AUTO3DX_BASE_PAD  Pad   main=False
+```
+
+이 읽기로 `part.inspect.in_work_object()`를 만들었다. 통합 테스트 세션은 In-Work Object도
+시작 시 저장하고 끝날 때 되돌린다(`tests/integration/conftest.py`).
+
 **export는 이 설치본에서 쓸 수 없다.** 유일한 Automation 경로는
 `Application.Documents`에서 `PartDocument.Part == Part`로 문서를 찾아
 `PartDocument.ExportData(path, format)`을 부르는 것이다. `Documents`에는 CATPCCModel

@@ -13,12 +13,13 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
-  pywin32 312. Conda는 필요하지 않다. 두 환경 모두 unit 861 통과, live integration 38 통과·1 skip,
+  pywin32 312. Conda는 필요하지 않다. unit은 두 환경 모두 868 통과. live integration은 표준 CPython에서 40 통과(In-Work
+  Object 검사 추가 후), Conda에서 38 통과·1 skip(추가 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **861 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
+- 테스트: **868 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
-  검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **38 통과, 1건 skip**(수동 준비 필요)이고, 실행 뒤 모델이 기준
+  검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **40 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
 - probe: `scripts/probes/`에 39개 존재
 - 브랜치: `develop` (push·PR 안 함)
@@ -359,7 +360,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 8 | 예외 다섯 범주 재편 | 완료 | `SessionError`/`ValidationError`/`NotFoundError`/`ConflictError`/`AutomationError` (`api-design.md` 8절, `test_errors.py`) |
 | 9 | 작은 패키지 루트 | 완료 | `Catia`/`Part`/예외 범주만 남기고 65개에서 축소 (`api-design.md` 13절, `test_public_exports.py`) |
 | 10 | `only Part.update() rebuilds` 정책 테스트 | 완료 | 패키지 소스를 파싱해 `Update()`/`Save()`/`PLMPropagate()` 호출 위치를 고정 (`test_update_policy.py`) |
-| 11 | `part.inspect` | 완료 | 이름·재빌드 상태·feature·스케치·사용자 파라미터에 더해 모든 body(main body는 COM 동일성으로 표시), Part 바로 아래 기하 세트와 그 요소, 모서리·면 개수까지 돌려준다. 중첩 기하 세트의 내용, body 안의 기하 세트, 기하 세트 안의 스케치는 live 근거가 없어 넣지 않았다 (`test_inspection.py`, live `test_inspection_live.py`) |
+| 11 | `part.inspect` | 완료 | 이름·재빌드 상태·feature·스케치·사용자 파라미터에 더해 모든 body(main body는 COM 동일성으로 표시), Part 바로 아래 기하 세트와 그 요소, 모서리·면 개수, In-Work Object(`InWorkObjectInfo(name, kind, is_main_body)`, COM 객체 없음)까지 돌려준다. 중첩 기하 세트의 내용, body 안의 기하 세트, 기하 세트 안의 스케치는 live 근거가 없어 넣지 않았다 (`test_inspection.py`, live `test_inspection_live.py`) |
 | 12 | topology 검색의 사용자 selection 복원 | 완료 | `part.topology.edges()`/`faces()`가 검색 전 selection을 캡처하고 뒤에 복원한 뒤 개수로 확인한다. CATIA가 복원 일부를 조용히 거부하면 스냅샷은 그대로 돌려주고 `SelectionNotRestoredWarning`을 낸다 (`test_topology_selection.py`, live `test_snapshots_restore_the_user_selection_and_stay_usable`) |
 | 13 | 스레드 안전성 | 중간 | 미검증 (2.7) |
 | 14 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |

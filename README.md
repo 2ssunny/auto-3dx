@@ -41,10 +41,10 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 861 통과 | 38 통과, 1 skip |
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 861 통과 | 실행 안 함 |
-| Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 861 통과 | 38 통과, 1 skip |
-| Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 861 통과 | 개발 중 실행, 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 868 통과 | 40 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 | 실행 안 함 |
+| Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 | 38 통과, 1 skip (In-Work Object 검사 추가 전) |
+| Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 | 개발 중 실행, 통과 |
 
 두 live 실행 모두 실행 전후 모델, selection, In-Work Object가 같았습니다.
 
@@ -433,7 +433,8 @@ shaft.set_second_angle(0, unit="deg")
 part.update()
 ```
 
-Rib와 Slot은 profile과 path 두 Sketch를 raw COM 객체로 전달합니다. 같은 이름의
+Rib와 Slot은 profile과 path 두 `Sketch` wrapper를 받습니다. 각 스케치의 COM 객체를
+`AddNewRib`/`AddNewSlot`에 넘기는 일은 SDK가 내부에서 합니다. 같은 이름의
 기존 feature가 있는 경우 `ensure_*`가 profile identity를 확인합니다. CATIA가
 path를 안정적으로 되돌려 주지 않는 제한 때문에 path의 동일성은 비교하지
 않습니다.
@@ -602,6 +603,34 @@ bounding box는 제공하지 않습니다. `InertiaBoxService`가 있고 한 세
 
 측정은 `Update()`, `Save()`, `PLMPropagate()`를 호출하지 않습니다.
 
+## 모델 검사
+
+모델을 바꾸기 전에 무엇이 들어 있는지 읽습니다. 결과는 COM 객체가 아니라 frozen
+dataclass이고, 검사는 모델 generation, selection, In-Work Object를 바꾸지 않습니다.
+
+```python
+summary = part.inspect.summary()
+print(summary.render())
+
+summary.features          # FeatureInfo(name, kind, supported), main body, 트리 순서
+summary.sketches          # main body 스케치 이름
+summary.parameters        # 사용자 파라미터
+summary.bodies            # BodyInfo(name, is_main, features, sketches)
+summary.geometrical_sets  # GeometricalSetInfo(name, elements, nested_set_count)
+summary.topology          # TopologyCounts(edges, faces), selection이 없는 Part면 None
+summary.in_work_object    # InWorkObjectInfo(name, kind, is_main_body), 없으면 None
+
+iwo = part.inspect.in_work_object()
+if iwo is not None and not iwo.is_main_body:
+    print(f"In-Work Object가 main body가 아닙니다: {iwo.name} ({iwo.kind})")
+```
+
+In-Work Object는 CATIA가 다음 feature를 넣는 위치입니다. `kind`는 CATIA wrapper 타입
+이름(`"Body"`, `"Pad"` 등)이고, `is_main_body`는 이름이 아니라 COM 동일성으로 판단합니다.
+live에서 pad를 만들면 새 pad가 In-Work Object가 되었고, 평면을 만들면 main body로
+돌아왔습니다. feature를 지워도 이전 In-Work Object로 돌아가지는 않습니다. 확인할 때
+`part.com_object.InWorkObject`를 직접 읽을 필요가 없습니다.
+
 ## 변경과 저장의 안전 규칙
 
 이 라이브러리는 현재 CATIA 세션의 모델을 변경할 수 있지만 서버 저장까지
@@ -682,9 +711,9 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트 861개, B428_Cloud live
-통합 테스트 38개 통과와 1개 skip입니다(그 1건은 열려 있는 Part에 수동으로 파라미터를
-추가해야 통과합니다). 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 868개입니다. B428_Cloud
+live 통합 테스트는 40개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
+중 1건은 skip됩니다. 최근 실행한 Part에는 그 파라미터가 있어 40개가 모두 통과했습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 
 ## 저장소 문서

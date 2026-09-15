@@ -971,7 +971,7 @@ class PartDesign:
     created the same way -- `_list`/`_get`/`_create_feature`/`_remove` with
     `EDGE_FILLET_KIND`/`CHAMFER_KIND` -- but they take an edge `Reference`
     (`geometry.edges.Edge`) instead of a `Sketch`, obtained through
-    `snapshot_edges()`. There is no `ensure_edge_fillet`/`ensure_chamfer`:
+    `part.topology.edges()`. There is no `ensure_edge_fillet`/`ensure_chamfer`:
     unlike a `Sketch`, an edge has no verified, stable handle a caller can
     read back and compare, so `_ensure_by_sketch` does not apply and no
     truthful substitute exists (`geometry.edges` explains why in full).
@@ -980,7 +980,7 @@ class PartDesign:
     counterpart, read and created the same way -- `_list`/`_get`/
     `_create_feature`/`_remove` with `SHELL_KIND`/`THICKNESS_KIND`/
     `HOLE_KIND` -- but they take a face `Reference` (`geometry.faces.Face`)
-    obtained through `snapshot_faces()`. `_require_current_face` mirrors
+    obtained through `part.topology.faces()`. `_require_current_face` mirrors
     `_require_current_edge` exactly, and both share the one `_generation`
     counter and the one `StaleSnapshotError`: a face reference and an
     edge reference go stale for the same reason (a model change may or may
@@ -2430,7 +2430,7 @@ class PartDesign:
         Args:
             name: The new fillet's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
-            edge: The `Edge` to fillet, from `snapshot_edges()`.
+            edge: The `Edge` to fillet, from `part.topology.edges()`.
             radius: The fillet radius. Must be finite and positive.
             unit: The unit `radius` is expressed in. Defaults to
                 `MILLIMETRE`.
@@ -2459,7 +2459,7 @@ class PartDesign:
         validate_parameter_name(name)
         if not isinstance(edge, Edge):
             raise ParameterTypeError(
-                "edge must be an Edge from PartDesign.snapshot_edges(), not "
+                "edge must be an Edge from part.topology.edges(), not "
                 f"{type(edge).__name__}."
             )
         self._require_current_edge(edge, "fillet")
@@ -2562,7 +2562,7 @@ class PartDesign:
         Args:
             name: The new chamfer's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
-            edge: The `Edge` to chamfer, from `snapshot_edges()`.
+            edge: The `Edge` to chamfer, from `part.topology.edges()`.
             length1: The first chamfer length. Must be finite and positive.
             length2_or_angle: The second chamfer length or angle. Must be
                 finite and positive.
@@ -2591,7 +2591,7 @@ class PartDesign:
         validate_parameter_name(name)
         if not isinstance(edge, Edge):
             raise ParameterTypeError(
-                "edge must be an Edge from PartDesign.snapshot_edges(), not "
+                "edge must be an Edge from part.topology.edges(), not "
                 f"{type(edge).__name__}."
             )
         self._require_current_edge(edge, "chamfer")
@@ -2727,7 +2727,7 @@ class PartDesign:
         Args:
             name: The new shell's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
-            face: The `Face` to open, from `snapshot_faces()`.
+            face: The `Face` to open, from `part.topology.faces()`.
             internal_thickness: The shell's wall thickness. Must be finite
                 and strictly positive -- only `2.0` is verified, and a zero
                 or negative wall thickness has no justified meaning here.
@@ -2758,7 +2758,7 @@ class PartDesign:
         validate_parameter_name(name)
         if not isinstance(face, Face):
             raise ParameterTypeError(
-                "face must be a Face from PartDesign.snapshot_faces(), not "
+                "face must be a Face from part.topology.faces(), not "
                 f"{type(face).__name__}."
             )
         self._require_current_face(face, "shell")
@@ -2845,7 +2845,7 @@ class PartDesign:
         Args:
             name: The new feature's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
-            face: The `Face` to thicken, from `snapshot_faces()`.
+            face: The `Face` to thicken, from `part.topology.faces()`.
             offset: The thickening offset. Must be finite and strictly
                 positive -- only `3.0` is verified, and a zero offset would
                 do nothing while a negative one has never been tried, so
@@ -2873,7 +2873,7 @@ class PartDesign:
         validate_parameter_name(name)
         if not isinstance(face, Face):
             raise ParameterTypeError(
-                "face must be a Face from PartDesign.snapshot_faces(), not "
+                "face must be a Face from part.topology.faces(), not "
                 f"{type(face).__name__}."
             )
         self._require_current_face(face, "thickness")
@@ -2957,7 +2957,7 @@ class PartDesign:
         Args:
             name: The new hole's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
-            face: The `Face` to drill from, from `snapshot_faces()`.
+            face: The `Face` to drill from, from `part.topology.faces()`.
             depth: The hole's depth. Must be finite and strictly positive --
                 only `5.0` is verified, and a zero or negative depth has no
                 justified meaning for a hole.
@@ -2983,7 +2983,7 @@ class PartDesign:
         validate_parameter_name(name)
         if not isinstance(face, Face):
             raise ParameterTypeError(
-                "face must be a Face from PartDesign.snapshot_faces(), not "
+                "face must be a Face from part.topology.faces(), not "
                 f"{type(face).__name__}."
             )
         self._require_current_face(face, "hole")

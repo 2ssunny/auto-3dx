@@ -3,11 +3,13 @@
 Inspection exists so a caller, especially an AI agent, can find out what a model
 contains before changing it. Its value depends on three promises these tests pin: it
 reports what is really there, including features the SDK cannot create; it returns
-structured data rather than text; and it changes nothing -- no generation advance, no
-rebuild, no save, and a user selection that ends as it started even though edge and
-face counts come from a topology search.
+structured data rather than text or COM handles; and it changes nothing -- no generation
+advance, no rebuild, no save, the In-Work Object left where it was, and a user
+selection that ends as it started even though edge and face counts come from a topology
+search.
 """
 
+import dataclasses
 from typing import Any
 
 import pytest
@@ -22,6 +24,7 @@ from auto_3dx.inspect import (
     FeatureInfo,
     GeometricalSetInfo,
     GeometryInfo,
+    InWorkObjectInfo,
     PartSummary,
     TopologyCounts,
 )
@@ -82,8 +85,8 @@ class _Collection:
         return self._items[index - 1]
 
 
-class _Body:
-    """Fake CATIA `Body` with features and sketches."""
+class Body:
+    """Fake CATIA `Body`; the class name is the kind CATIA reports."""
 
     def __init__(self, name: str, shapes: "list[Any]", sketches: "list[Any]") -> None:
         self.Name = name
@@ -106,12 +109,12 @@ class _RawPart:
     def __init__(self, parameters: Any, up_to_date: bool = True) -> None:
         self.Name = "Housing"
         self.Parameters = parameters
-        self.MainBody = _Body(
+        self.MainBody = Body(
             "PartBody",
             [Pad("Base"), Pocket("Bore"), Draft("Draft.1")],
             [_SketchComObject("BaseSketch"), _SketchComObject("BoreSketch")],
         )
-        self.tool_body = _Body("Tool", [Pad("ToolPad")], [])
+        self.tool_body = Body("Tool", [Pad("ToolPad")], [])
         self.Bodies = _Collection([self.MainBody, self.tool_body])
         self.HybridBodies = _Collection(
             [
@@ -122,7 +125,18 @@ class _RawPart:
                 )
             ]
         )
+        self._in_work_object: Any = self.MainBody
+        self.in_work_writes = 0
         self._up_to_date = up_to_date
+
+    @property
+    def InWorkObject(self) -> Any:  # noqa: N802 - COM property name
+        return self._in_work_object
+
+    @InWorkObject.setter
+    def InWorkObject(self, value: Any) -> None:  # noqa: N802 - COM property name
+        self.in_work_writes += 1
+        self._in_work_object = value
 
     def IsUpToDate(self, target: Any) -> bool:  # noqa: N802 - COM method name
         return self._up_to_date
@@ -148,7 +162,6 @@ class _Selection:
     def __init__(self) -> None:
         self.user_pick = object()
         self.items = [_Selected(self.user_pick)]
-        self.deleted = False
 
     @property
     def Count(self) -> int:  # noqa: N802 - COM property name
@@ -189,6 +202,10 @@ def _part(
     return Part(_RawPart(parameters, up_to_date), selection=selection)
 
 
+def _com_error() -> pywintypes.com_error:
+    return pywintypes.com_error(HRESULT_EXCEPTION_OCCURRED, "Exception occurred.", None, None)
+
+
 def test_summary_reports_what_the_model_contains(
     parameters_collection_factory: Any, length_parameter_factory: Any
 ) -> None:
@@ -206,6 +223,9 @@ def test_summary_reports_what_the_model_contains(
         "Construction"
     ]
     assert summary.topology == TopologyCounts(edges=EDGE_COUNT, faces=FACE_COUNT)
+    assert summary.in_work_object == InWorkObjectInfo(
+        name="PartBody", kind="Body", is_main_body=True
+    )
 
 
 def test_features_keep_model_tree_order_and_their_real_kind(
@@ -277,6 +297,85 @@ def test_topology_is_absent_without_an_editor_selection(
     assert part.inspect.summary().topology is None
 
 
+def test_in_work_object_reports_the_main_body(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    part = _part(parameters_collection_factory, length_parameter_factory)
+
+    assert part.inspect.in_work_object() == InWorkObjectInfo(
+        name="PartBody", kind="Body", is_main_body=True
+    )
+
+
+def test_in_work_object_reports_a_feature_with_its_real_kind(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """Live, creating a pad made the new pad the In-Work Object."""
+    part = _part(parameters_collection_factory, length_parameter_factory)
+    part.com_object.InWorkObject = part.com_object.MainBody.Shapes.Item(1)
+
+    assert part.inspect.in_work_object() == InWorkObjectInfo(
+        name="Base", kind="Pad", is_main_body=False
+    )
+
+
+def test_a_body_named_like_the_main_body_is_not_reported_as_the_main_body(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """`is_main_body` is COM identity, never a name comparison."""
+    part = _part(parameters_collection_factory, length_parameter_factory)
+    part.com_object.tool_body.Name = "PartBody"
+    part.com_object.InWorkObject = part.com_object.tool_body
+
+    assert part.inspect.in_work_object() == InWorkObjectInfo(
+        name="PartBody", kind="Body", is_main_body=False
+    )
+
+
+def test_no_in_work_object_is_reported_as_none(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    part = _part(parameters_collection_factory, length_parameter_factory)
+    part.com_object.InWorkObject = None
+
+    assert part.inspect.in_work_object() is None
+    assert "In-Work Object: none" in part.inspect.summary().render()
+
+
+def test_in_work_object_info_is_an_immutable_value_without_a_com_handle(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """Inspection must not hand out the COM object: it would bypass every safety rule."""
+    info = _part(parameters_collection_factory, length_parameter_factory).inspect.in_work_object()
+
+    assert [field.name for field in dataclasses.fields(InWorkObjectInfo)] == [
+        "name",
+        "kind",
+        "is_main_body",
+    ]
+    assert not hasattr(info, "com_object")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.name = "Other"  # type: ignore[misc]
+
+
+def test_a_com_failure_reading_the_in_work_object_is_an_automation_error(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    part = _part(parameters_collection_factory, length_parameter_factory)
+
+    class _FailingPart(_RawPart):
+        @property
+        def InWorkObject(self) -> Any:  # noqa: N802 - COM property name
+            raise _com_error()
+
+    part.com_object.__class__ = _FailingPart
+
+    with pytest.raises(AutomationError, match="Part.InWorkObject") as caught:
+        part.inspect.in_work_object()
+
+    assert caught.value.hresult == HRESULT_EXCEPTION_OCCURRED
+
+
 def test_feature_dimensions_are_not_reported_as_parameters(
     parameters_collection_factory: Any, length_parameter_factory: Any
 ) -> None:
@@ -298,14 +397,18 @@ def test_an_unrebuilt_model_is_reported_as_needing_an_update(
 def test_inspection_changes_nothing(
     parameters_collection_factory: Any, length_parameter_factory: Any
 ) -> None:
-    """No generation advance, no rebuild or save, and the user's pick is still selected."""
+    """No generation advance, no rebuild or save, In-Work Object and user pick untouched."""
     selection = _Selection()
     part = _part(parameters_collection_factory, length_parameter_factory, selection=selection)
+    raw = part.com_object
 
     part.inspect.summary()
+    part.inspect.in_work_object()
 
     assert part.part_design.snapshot_generation == 0
     assert [item.Value for item in selection.items] == [selection.user_pick]
+    assert raw.InWorkObject is raw.MainBody
+    assert raw.in_work_writes == 0
 
 
 def test_render_is_readable_text_built_from_the_data(
@@ -322,6 +425,7 @@ def test_render_is_readable_text_built_from_the_data(
     assert "- PartBody (main body, 3 features, 2 sketches)" in text
     assert "- Construction (1 elements, 1 nested sets not listed)" in text
     assert "  - Offset.1 (HybridShapePlaneOffset)" in text
+    assert "In-Work Object: PartBody (Body, main body)" in text
     assert text.splitlines()[-1] == "Topology: 3 edges, 2 faces"
 
 
@@ -334,9 +438,7 @@ def test_a_com_failure_while_listing_features_is_an_automation_error(
     class _FailingBody:
         @property
         def Shapes(self) -> Any:  # noqa: N802 - COM property name
-            raise pywintypes.com_error(
-                HRESULT_EXCEPTION_OCCURRED, "Exception occurred.", None, None
-            )
+            raise _com_error()
 
     part.com_object.MainBody = _FailingBody()
 
@@ -355,9 +457,7 @@ def test_a_com_failure_while_listing_geometrical_sets_is_an_automation_error(
     class _FailingCollection:
         @property
         def Count(self) -> int:  # noqa: N802 - COM property name
-            raise pywintypes.com_error(
-                HRESULT_EXCEPTION_OCCURRED, "Exception occurred.", None, None
-            )
+            raise _com_error()
 
     part.com_object.HybridBodies = _FailingCollection()
 

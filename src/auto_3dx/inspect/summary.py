@@ -18,7 +18,11 @@ Every field here comes from a read already backed by live evidence:
 * geometrical sets through `Part.HybridBodies`, each set's `HybridShapes` items with
   their `Name` and type name, and the count of its nested `HybridBodies` (probe 38);
 * edge and face counts through `part.topology`, whose searches restore the user's
-  CATIA selection.
+  CATIA selection;
+* the In-Work Object through `Part.InWorkObject`, its `Name` and type name, and COM
+  identity with `MainBody`. Live (2026-09-15) it reported a `Pad` and the main `Body`:
+  creating a pad made the new pad the In-Work Object, and creating a plane handed it
+  back to the main body.
 
 Deliberately absent, because no live read backs them: the contents of nested
 geometrical sets, geometrical sets inside a body, and sketches inside a geometrical
@@ -159,6 +163,27 @@ class TopologyCounts:
 
 
 @dataclasses.dataclass(frozen=True)
+class InWorkObjectInfo:
+    """The Part's In-Work Object: where CATIA puts the next feature it creates.
+
+    A value, not a handle: it never carries the COM object, so it cannot be used to
+    change the model.
+
+    Attributes:
+        name: The object's name as CATIA reports it.
+        kind: The CATIA wrapper type name. Observed live: ``"Body"`` for the main body
+            and ``"Pad"`` after creating a pad, which makes the new pad the In-Work
+            Object. Other kinds are reported as CATIA names them.
+        is_main_body: Whether it is the Part's main body, by COM identity rather than
+            by name.
+    """
+
+    name: str
+    kind: str
+    is_main_body: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class PartSummary:
     """A structured snapshot of what a Part contains.
 
@@ -173,6 +198,7 @@ class PartSummary:
         geometrical_sets: The geometrical sets directly under the Part.
         topology: Edge and face counts, or `None` when this Part has no editor
             selection to search with.
+        in_work_object: The In-Work Object, or `None` when CATIA reports none.
     """
 
     name: str
@@ -183,6 +209,7 @@ class PartSummary:
     bodies: "tuple[BodyInfo, ...]" = ()
     geometrical_sets: "tuple[GeometricalSetInfo, ...]" = ()
     topology: "TopologyCounts | None" = None
+    in_work_object: "InWorkObjectInfo | None" = None
 
     def render(self) -> str:
         """Formats the summary for a person to read.
@@ -226,6 +253,14 @@ class PartSummary:
             )
             lines.extend(
                 f"  - {element.name} ({element.kind})" for element in geometrical_set.elements
+            )
+        if self.in_work_object is None:
+            lines.append("In-Work Object: none")
+        else:
+            role = ", main body" if self.in_work_object.is_main_body else ""
+            lines.append(
+                f"In-Work Object: {self.in_work_object.name} "
+                f"({self.in_work_object.kind}{role})"
             )
         if self.topology is None:
             lines.append("Topology: not available (no editor selection)")
@@ -309,6 +344,7 @@ class Inspector:
             bodies=self.bodies(),
             geometrical_sets=self.geometrical_sets(),
             topology=self.topology(),
+            in_work_object=self.in_work_object(),
         )
 
     def features(self) -> "tuple[FeatureInfo, ...]":
@@ -448,6 +484,31 @@ class Inspector:
         faces = self._part.topology.faces()
         return TopologyCounts(edges=len(edges), faces=len(faces))
 
+    def in_work_object(self) -> "InWorkObjectInfo | None":
+        """Reads the Part's In-Work Object without changing it.
+
+        Only `Part.InWorkObject` and its `Name` are read; nothing is assigned.
+
+        Returns:
+            The In-Work Object's name, kind and whether it is the main body, or `None`
+            when CATIA reports no In-Work Object.
+
+        Raises:
+            AutomationError: If reading the In-Work Object, its name or the main body
+                fails.
+        """
+        raw_part = self._part.com_object
+        in_work = _read("Part.InWorkObject", lambda: raw_part.InWorkObject)
+        if in_work is None:
+            return None
+        main_body = _read("Part.MainBody", lambda: raw_part.MainBody)
+        return InWorkObjectInfo(
+            name=_read("Part.InWorkObject.Name", lambda: in_work.Name),
+            kind=type(in_work).__name__,
+            # COM identity (`==`, verified for bodies): a second body can share the name.
+            is_main_body=bool(in_work == main_body),
+        )
+
     @staticmethod
     def _features_of(body: Any, label: str, is_main: bool) -> "tuple[FeatureInfo, ...]":
         """Reads one body's solid features.
@@ -469,7 +530,9 @@ class Inspector:
             kind = type(shape).__name__
             features.append(
                 FeatureInfo(
-                    name=_read(f"{label}.Shapes.Item({index}).Name", lambda shape=shape: shape.Name),
+                    name=_read(
+                        f"{label}.Shapes.Item({index}).Name", lambda shape=shape: shape.Name
+                    ),
                     kind=kind,
                     supported=is_main and kind in SUPPORTED_FEATURE_KINDS,
                 )
