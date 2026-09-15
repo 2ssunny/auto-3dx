@@ -10,3 +10,6 @@ dist/
 
 # pytest basetemp, when a run is given one inside the repo.
 /.pytest_temp/
+
+# Local virtual environments, such as a disposable vanilla CPython check.
+/.venv*/
