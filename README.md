@@ -46,9 +46,12 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 861 통과 | 38 통과, 1 skip |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 861 통과 | 개발 중 실행, 통과 |
 
-두 live 실행 모두 실행 전후 모델, selection, In-Work Object가 같았습니다. 위에 없는 조합
-(Python 3.12, 32-bit Python, Microsoft Store Python, 다른 3DEXPERIENCE 릴리스)은
-검증하지 않았습니다. Python 3.12는 CI matrix에 들어 있지만 아직 실행 결과가 없습니다.
+두 live 실행 모두 실행 전후 모델, selection, In-Work Object가 같았습니다.
+
+GitHub Actions Windows runner(3DEXPERIENCE 없음)에서도 표준 CPython 3.11, 3.12, 3.13,
+3.14로 `pip install ".[test]"` 후 단위 테스트가 모두 통과했습니다. Python 3.12는 이 CI
+단위 테스트로만 확인했고 live 통합 테스트는 실행하지 않았습니다. 위에 없는 조합(32-bit
+Python, Microsoft Store Python, 다른 3DEXPERIENCE 릴리스)은 검증하지 않았습니다.
 
 ## 설치
 
