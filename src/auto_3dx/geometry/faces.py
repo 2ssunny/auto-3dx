@@ -116,7 +116,7 @@ class Face:
       inherited caution rather than a separately measured fact for faces.
 
     A caller that has modified the model since taking a snapshot must take a
-    new one (`PartDesign.snapshot_faces`) before trusting either `index` or
+    new one (`part.topology.faces()`) before trusting either `index` or
     `descriptor` again.
     """
 
@@ -205,7 +205,7 @@ class Face:
 class FaceSnapshot:
     """Every face of the solid, as `Selection.Search` reported it at one instant.
 
-    `PartDesign.snapshot_faces()` is the only way to obtain one. It describes
+    `part.topology.faces()` is how a caller obtains one. It describes
     the model exactly as it stood the moment the search ran: as with edges,
     face count and order should be assumed to change after every
     modification, so a snapshot must never be used against a model that has

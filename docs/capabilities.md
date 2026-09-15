@@ -211,8 +211,9 @@ AddNewLoft        AddNewSplit       AddNewTrim        AddNewSolidCombine ... 외
 **제약은 `sketch.edit()` 안에서만 걸린다.** 편집 세션이 닫힌 뒤에는 전부 실패한다. 그래서
 생성 메서드는 `SketchEditor`에만 있다 — 위치가 곧 계약이다.
 
-인자는 `line()` / `circle()`이 돌려준 **raw COM 객체를 그대로** 넘긴다. Part Design과 달리
-`Reference`로 감싸면 거부된다.
+인자는 `line()` / `circle()`이 돌려준 **`SketchElement`를 그대로** 넘긴다. SDK가 그 안의 2D
+COM 객체를 꺼내 CATIA에 전달하고, 다른 스케치에서 그린 요소는 COM 호출 전에 `ValidationError`로
+거부한다. Part Design과 달리 CATIA는 `Reference`로 감싼 인자를 거부하므로 SDK도 감싸지 않는다.
 
 ```python
 with sketch.edit() as editor:

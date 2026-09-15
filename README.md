@@ -433,7 +433,8 @@ shaft.set_second_angle(0, unit="deg")
 part.update()
 ```
 
-Rib와 Slot은 profile과 path 두 Sketch를 raw COM 객체로 전달합니다. 같은 이름의
+Rib와 Slot은 profile과 path 두 `Sketch` wrapper를 받습니다. 각 스케치의 COM 객체를
+`AddNewRib`/`AddNewSlot`에 넘기는 일은 SDK가 내부에서 합니다. 같은 이름의
 기존 feature가 있는 경우 `ensure_*`가 profile identity를 확인합니다. CATIA가
 path를 안정적으로 되돌려 주지 않는 제한 때문에 path의 동일성은 비교하지
 않습니다.
