@@ -28,7 +28,7 @@ from auto_3dx.errors import (
     SketchAlreadyExistsError,
     UnsupportedUnitError,
 )
-from auto_3dx.geometry.constraint import CONSTRAINT_LENGTH, Constraint, ConstraintCollection
+from auto_3dx.geometry.constraint import CONSTRAINT_LENGTH, Constraint
 from auto_3dx.geometry.sketch import SUPPORT_XY, Sketch, SketchCollection
 
 SKETCH_NAME = "AUTO3DX_TEST_SKETCH"

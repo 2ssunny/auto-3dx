@@ -72,7 +72,6 @@ from auto_3dx.errors import (
     FeatureNotFoundError,
     PartialCreationError,
     ParameterTypeError,
-    StaleSnapshotError,
     UnsupportedSupportError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
