@@ -138,10 +138,10 @@ angled = part.planes.create_angle(
 - `remove(plane)`은 평면 하나만 지운다. 각도 평면의 축 점 2개와 축 선은 그대로 남는다.
   이것까지 함께 지우려면 `remove_geometrical_set()`으로 이 컬렉션이 만든 것 전부를
   지워야 한다.
-- `ensure_offset`/`ensure_angle`은 없다. 기하 세트 안의 도형을 이름으로 다시 찾아
-  읽는 경로가 검증되지 않았기 때문이다(`Sketches`/`Shapes`/`Parameters`와 달리
-  `HybridShapes` 컬렉션을 `Count`/`Item(i)`로 순회해 본 적이 없다). 재사용이 필요하면
-  호출자가 반환된 `Plane` 객체를 직접 들고 있어야 한다.
+- `ensure_offset`/`ensure_angle`은 없다. `HybridShapes`를 `Count`/`Item(i)`로 순회해
+  이름과 타입을 읽는 것은 probe 38에서 live로 확인됐지만(2026-09-15, conventions 1.5),
+  이름으로 다시 찾은 평면이 요청과 같은지 비교하는 `ensure`는 아직 만들지 않았다.
+  재사용이 필요하면 호출자가 반환된 `Plane` 객체를 직접 들고 있어야 한다.
 - `sketches.ensure(name, support=...)`의 `support`는 여전히 원점 평면 문자열 3개만
   받는다. offset/각도 평면 위 스케치의 재사용 여부는 `create()`로 직접 관리해야 한다.
 
