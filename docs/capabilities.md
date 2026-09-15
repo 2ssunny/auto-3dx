@@ -5,7 +5,8 @@
 없으면 skip되므로, 과거 probe의 성공과 현재 테스트 실행 결과를 구분해서 기록한다.
 
 - 대상 설치본: B428_Cloud
-- 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
+- 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
+  pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
 - 현재 정적 검증: **861 unit 통과**
 - 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **38 integration
   통과, 1건 skip**(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과한다). 실행 뒤

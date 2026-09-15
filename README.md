@@ -22,24 +22,49 @@ Part 자체의 PLM 생성과 저장은 이 라이브러리의 책임 범위가 �
 
 ## 요구 사항
 
-- Windows
-- Python 3.11 이상
+- Windows, 64-bit Python 3.11 이상 (검증된 버전은 아래 표)
 - 실행 중인 3DEXPERIENCE CATIA 세션
-- 3DEXPERIENCE 설치본의 `com3dx.py`
+- 3DEXPERIENCE 설치본의 `com3dx.py` (설치본에 들어 있으며 pip로 설치하지 않습니다)
 - `pywin32` (패키지 설치 시 자동 설치)
+
+Conda는 필요하지 않습니다. pip로 의존성을 설치할 수 있는 일반 Python 환경이면 됩니다.
+`com3dx.py`는 Python 환경이 아니라 3DEXPERIENCE 설치본에서 찾습니다(아래
+"com3dx 경로 지정").
 
 현재 실제 검증 대상은 `B428_Cloud` 설치본입니다. 릴리스에 따라 Automation
 object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스는 별도로
 검증해야 합니다.
 
+### 검증된 Python 환경
+
+2026-09-15, B428_Cloud에서 확인한 조합입니다.
+
+| 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
+|---|---|---|---|---|---|
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 861 통과 | 38 통과, 1 skip |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 861 통과 | 실행 안 함 |
+| Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 861 통과 | 38 통과, 1 skip |
+| Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 861 통과 | 개발 중 실행, 통과 |
+
+두 live 실행 모두 실행 전후 모델, selection, In-Work Object가 같았습니다. 위에 없는 조합
+(Python 3.12, 32-bit Python, Microsoft Store Python, 다른 3DEXPERIENCE 릴리스)은
+검증하지 않았습니다. Python 3.12는 CI matrix에 들어 있지만 아직 실행 결과가 없습니다.
+
 ## 설치
 
-저장소 루트에서 Python 3.11 이상의 환경을 활성화한 다음 editable install을
-수행합니다.
+표준 CPython으로 가상 환경을 만들고 저장소 루트에서 설치합니다.
 
 ```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -e .
 ```
+
+Conda를 쓴다면 환경을 활성화한 뒤 같은 `python -m pip install -e .`를 실행합니다.
+어느 쪽이든 `pywin32`는 pip가 설치하고, 첫 연결 때 `com3dx`가 그 Python 전용
+COM wrapper cache(`%TEMP%\gen_py\<버전>`)를 만듭니다. 새 환경의 첫 `Catia.attach()`는
+그래서 몇 초 더 걸릴 수 있습니다.
 
 `pyproject.toml`이 패키지 이름과 import 이름을 다음처럼 구분합니다.
 
@@ -73,20 +98,23 @@ print(part.parameters.user_names())
 
 경로는 디렉터리가 아니라 `com3dx.py` 파일 전체 경로입니다. 탐색 순서는
 명시적 경로, `AUTO_3DX_COM3DX_PATH` 환경 변수, CATIA.Application 레지스트리
-순서입니다.
+순서입니다. 보통은 아무것도 지정하지 않아도 됩니다. 3DEXPERIENCE가 등록한
+`CATIA.Application` COM 서버의 실행 파일 위치에서 `com3dx.py`를 찾으며, 표준 CPython
+venv와 Conda 모두 이 경로로 연결했습니다. 여러 릴리스가 설치되어 특정 릴리스를
+골라야 할 때만 경로를 지정합니다(`<release>`는 설치된 릴리스 폴더 이름입니다).
 
 ```python
 from pathlib import Path
 
 catia = Catia.attach(
-    Path(r"C:\Program Files\Dassault Systemes\B428_Cloud\win_b64\code\python3dx\lib\com3dx.py")
+    Path(r"C:\Program Files\Dassault Systemes\<release>\win_b64\code\python3dx\lib\com3dx.py")
 )
 ```
 
 또는 PowerShell에서 다음처럼 지정할 수 있습니다.
 
 ```powershell
-$env:AUTO_3DX_COM3DX_PATH = 'C:\Program Files\Dassault Systemes\B428_Cloud\win_b64\code\python3dx\lib\com3dx.py'
+$env:AUTO_3DX_COM3DX_PATH = 'C:\Program Files\Dassault Systemes\<release>\win_b64\code\python3dx\lib\com3dx.py'
 python .\your_script.py
 ```
 
@@ -619,10 +647,10 @@ constraint, 축 시스템, 다른 Body/HybridBody도 현재 public wrapper 범�
 ## 테스트
 
 `pyproject.toml`은 `integration` marker를 등록하고 기본 실행에서 통합
-테스트를 제외합니다. 개발 환경에 pytest가 없다면 먼저 설치합니다.
+테스트를 제외합니다. 테스트 도구는 `test` extra로 설치합니다.
 
 ```powershell
-python -m pip install pytest
+python -m pip install -e ".[test]"
 ```
 
 CATIA 없이 실행하는 단위 테스트:
@@ -642,13 +670,19 @@ python -m pytest tests/integration -m integration -q
 정리하므로, 저장하지 않은 별도 작업 세션에서 실행하는 것이 좋습니다. 테스트와
 라이브러리 모두 `Save()`와 `PLMPropagate()`를 호출하지 않습니다.
 
-현재 fake-COM 단위 테스트 861개가 통과합니다. B428_Cloud live 통합 테스트는
-이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리 모델 generation 공유, 예외 범주 재편,
-루트 축소, 측정 기본값, SketchElement, topology 검색의 selection 복원, 검사 필드 확장) 이후
-2026-09-15에 다시 실행해 38개 통과, 1개 skip을
-확인했습니다(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과합니다).
-실행 뒤 모델이 실행 전 상태와 같음도 확인했습니다.
-통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라 달라집니다.
+통합 테스트 세션은 시작할 때 사용자의 CATIA selection을 저장하고 비운 뒤, 끝날 때
+되돌리고 개수로 확인합니다(`tests/integration/conftest.py`). `remove_*`가 selection을
+거쳐 지우므로 이 장치가 없으면 실행 뒤 selection이 비어 있었습니다.
+
+단위 테스트는 가짜 COM 객체만 쓰고 3DEXPERIENCE, 레지스트리의 com3dx 항목, `com3dx`를
+건드리지 않으므로 3DEXPERIENCE가 없는 Windows에서도 실행됩니다.
+`.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
+CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
+
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트 861개, B428_Cloud live
+통합 테스트 38개 통과와 1개 skip입니다(그 1건은 열려 있는 Part에 수동으로 파라미터를
+추가해야 통과합니다). 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
+달라집니다.
 
 ## 저장소 문서
 

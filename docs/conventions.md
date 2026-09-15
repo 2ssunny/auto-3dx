@@ -15,12 +15,18 @@
 ### 환경
 
 ```text
-Conda env      : auto-3dx
-Python         : 3.11.16 (64-bit)
-pywin32        : 312
 Release        : B428_Cloud
-com3dx.py      : <code>\python3dx\lib\com3dx.py
+com3dx.py      : <code>\python3dx\lib\com3dx.py  (CATIA.Application 레지스트리에서 발견)
+Python         : 표준 CPython 3.14.2 venv, pywin32 312   (live 검증, 2026-09-15)
+                 Conda env auto-3dx, Python 3.11.16, pywin32 312   (live 검증, 2026-09-15)
+                 Anaconda base 3.13.9, pywin32 311, PYTHONPATH=src (개발 중 live 실행)
+                 모두 64-bit. 이 절의 COM 사실 대부분은 Conda 3.11.16에서 처음 측정했다
 ```
+
+COM 동작은 Python 배포판과 무관하다. `com3dx`는 pywin32의 `gencache`로 Python 버전별
+wrapper cache(`%TEMP%\gen_py\3.11`, `...\3.14`)를 만들고, 새 인터프리터에서 처음 연결하면
+"Checking cache ..."를 출력하며 cache를 새로 만든 뒤 연결한다. 표준 CPython venv와 Conda의
+live 통합 테스트 결과와 실행 뒤 모델 상태가 같았다.
 
 ### COM 객체 계층 (실측)
 
@@ -1902,15 +1908,20 @@ Distribution name : auto-3dx
 Import name       : auto_3dx
 Layout            : src layout
 requires-python   : >=3.11
-dependencies      : pywin32
+dependencies      : pywin32 (sys_platform == "win32")
+extras            : test = pytest>=8
 ```
 
-설치:
+`com3dx`는 의존성이 아니다. 3DEXPERIENCE 설치본에 들어 있고 `transport.windows_com`이
+실행 시점에 찾는다. 설치는 어떤 Python 환경이든 같다.
 
 ```powershell
-conda activate auto-3dx
-python -m pip install -e .
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[test]"
 ```
+
+Conda에서는 환경을 활성화한 뒤 마지막 명령만 실행한다.
 
 ---
 
