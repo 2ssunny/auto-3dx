@@ -1,11 +1,12 @@
 from pywintypes import com_error
 import sys
-from pathlib import Path
 
-COM3DX_DIRECTORY = Path(
-    r"C:\Program Files\Dassault Systemes"
-    r"\B428_Cloud\win_b64\code\python3dx\lib"
-) # Define directory of 3dx configuration file
+from auto_3dx.transport import find_com3dx_path
+
+
+# Found the way the SDK finds it (AUTO_3DX_COM3DX_PATH, else the registered
+# CATIA.Application server), not from a machine-specific install path.
+COM3DX_DIRECTORY = find_com3dx_path().parent
 
 sys.path.insert(0, str(COM3DX_DIRECTORY))
 
@@ -113,7 +114,6 @@ for name in methods:
     print(" ", name)
 
 
-
 def collect_callable_names(wrapper_type: type) -> list[str]:
     names: set[str] = set()
 
@@ -188,7 +188,6 @@ print()
 print(f"Methods ({len(methods)}):")
 for name in methods:
     print(" ", name)
-
 
 
 PARAMETER_NAME = "AUTO3DX_TEST_LENGTH"
@@ -304,7 +303,6 @@ for index in range(1, parameter_count + 1):
         f"value={parameter_value!r}, "
         f"python_type={value_type}"
     )
-
 
 
 

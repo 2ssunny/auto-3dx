@@ -1,17 +1,17 @@
-"""Verify that the installed com3dx helper can load in the Conda environment."""
+"""Verify that the installed com3dx helper can load in the current Python environment."""
 
 from __future__ import annotations
 
 import importlib.metadata
 import struct
 import sys
-from pathlib import Path
+
+from auto_3dx.transport import find_com3dx_path
 
 
-COM3DX_DIRECTORY = Path(
-    r"C:\Program Files\Dassault Systemes"
-    r"\B428_Cloud\win_b64\code\python3dx\lib"
-)
+# Found the way the SDK finds it (AUTO_3DX_COM3DX_PATH, else the registered
+# CATIA.Application server), not from a machine-specific install path.
+COM3DX_DIRECTORY = find_com3dx_path().parent
 COM3DX_FILE = COM3DX_DIRECTORY / "com3dx.py"
 
 
