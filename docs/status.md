@@ -13,11 +13,10 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **811 unit 통과**. integration은 이번 세션의 아키텍처 변경(모델 generation
-  공유, 예외 범주 재편, 루트 축소, 측정 기본값) 이전 마지막 실행 기준 **34 통과, 1건
-  skip**(수동 준비 필요)이고, live 세션이 그 뒤로 꺼져 있어 이번 변경 이후로는
-  재실행하지 못했다
-- probe: `scripts/probes/`에 38개 존재
+- 테스트: **832 unit 통과**. integration은 이번 세션의 아키텍처 변경(모델 generation
+  공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement) 이후 2026-09-15에 live로
+  재실행해 **34 통과, 1건 skip**(수동 준비 필요)이고, 실행 뒤 모델이 기준 상태와 같았다
+- probe: `scripts/probes/`에 39개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -371,5 +370,5 @@ MeasurableService 길이 경로도 막힌 것이 확인됐다. 다음 후보는 
 Part 이름·In-Work Object·Body의 Shape·Sketch·기하 세트의 HybridShape·사용자 파라미터·
 `IsUpToDate`·모서리와 면 개수의 반복 일관성을 확인하고, 가장 중요하게는 topology 검색
 전후로 selection을 캡처·복원해 PASS/FAIL로 보고하도록 만들어져 있다. 읽기 전용이며
-아무것도 만들거나 지우지 않는다. live 세션이 꺼져 있어 아직 실행하지 못했으므로, 11번의 나머지 필드와 12번은
-그 실행을 기다린다.
+아무것도 만들거나 지우지 않는다. 2026-09-15에 live로 실행했고 필요한 읽기와 비어 있지 않은
+selection의 복원이 모두 통과했다(conventions 1.5). 11번의 나머지 필드와 12번은 이제 구현만 남았다.
