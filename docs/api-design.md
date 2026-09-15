@@ -390,8 +390,8 @@ Status: Implemented.
 
 ## 11. Inspection
 
-Status: Implemented for the fields below, and pinned by `tests/unit/test_inspection.py`.
-Planned: the fields that wait for live evidence from probe 38.
+Status: Implemented, pinned by `tests/unit/test_inspection.py` and live by
+`tests/integration/test_inspection_live.py`.
 
 Reading an existing model reliably matters as much as creating geometry, because an agent must
 be able to find out what is there before it changes anything.
@@ -409,6 +409,9 @@ summary.up_to_date                     # CATIA rebuild status
 summary.features                       # FeatureInfo(name, kind, supported), tree order
 summary.sketches                       # sketch names, tree order
 summary.parameters                     # ParameterInfo for user parameters only
+summary.bodies                         # BodyInfo(name, is_main, features, sketches)
+summary.geometrical_sets               # GeometricalSetInfo(name, elements, nested_set_count)
+summary.topology                       # TopologyCounts(edges, faces), None without a selection
 print(summary.render())                # human-readable text built from the data
 ```
 
@@ -416,9 +419,15 @@ print(summary.render())                # human-readable text built from the data
 interface that the SDK does not wrap; `supported` says whether `part.part_design` can handle
 that kind. Nothing in the model is hidden because the SDK cannot create it.
 
-Absent until probe 38 runs live: other bodies, geometrical sets and their contents, and edge
-and face counts. The topology search behind the counts currently clears the user's
-selection, which inspection must not do.
+`bodies` includes the main body, recognised by COM identity rather than by name. A feature in
+any other body has `supported=False`, because `part.part_design` works on the main body only.
+`geometrical_sets` lists the sets directly under the Part with their elements' names and kinds.
+`topology` counts come from `part.topology`, so the user's selection is restored (section 7)
+and the generation does not advance.
+
+Deliberately absent, because no live read backs them yet: the contents of nested geometrical
+sets (only their count is verified), geometrical sets inside a body, and sketches inside a
+geometrical set.
 
 ---
 
@@ -534,5 +543,5 @@ Status: Enforced by review.
 | Small package root | 13 | Done |
 | Test that only `Part.update()` rebuilds, and nothing saves | 6 | Done |
 | `part.inspect`: name, rebuild status, features, sketches, user parameters | 11 | Done |
-| `part.inspect`: bodies, geometrical sets, topology counts (reads verified live) | 11 | Planned |
+| `part.inspect`: bodies, geometrical sets, topology counts | 11 | Done |
 | File export | 12 | Probed: unavailable for PLM-backed documents |

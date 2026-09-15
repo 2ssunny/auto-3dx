@@ -39,7 +39,15 @@ HOMES = {
     ],
     "auto_3dx.formulas": ["Formula", "FormulaCollection"],
     "auto_3dx.measurement": ["MassProperties", "SolidMeasurement"],
-    "auto_3dx.inspect": ["Inspector", "PartSummary", "FeatureInfo"],
+    "auto_3dx.inspect": [
+        "Inspector",
+        "PartSummary",
+        "FeatureInfo",
+        "BodyInfo",
+        "GeometryInfo",
+        "GeometricalSetInfo",
+        "TopologyCounts",
+    ],
     "auto_3dx.geometry": [
         "Sketch",
         "SketchCollection",

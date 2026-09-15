@@ -4,7 +4,8 @@ Inspection exists so a caller, especially an AI agent, can find out what a model
 contains before changing it. Its value depends on three promises these tests pin: it
 reports what is really there, including features the SDK cannot create; it returns
 structured data rather than text; and it changes nothing -- no generation advance, no
-rebuild, no save, and no contact with the user's selection.
+rebuild, no save, and a user selection that ends as it started even though edge and
+face counts come from a topology search.
 """
 
 from typing import Any
@@ -14,10 +15,22 @@ import pywintypes
 
 from auto_3dx.core.part import Part
 from auto_3dx.errors import AutomationError
-from auto_3dx.inspect import FeatureInfo, PartSummary
+from auto_3dx.geometry.edges import EDGE_SEARCH_QUERY
+from auto_3dx.geometry.faces import FACE_SEARCH_QUERY
+from auto_3dx.inspect import (
+    BodyInfo,
+    FeatureInfo,
+    GeometricalSetInfo,
+    GeometryInfo,
+    PartSummary,
+    TopologyCounts,
+)
 
 HRESULT_EXCEPTION_OCCURRED = -2147352567
 WIDTH_MM = 60.0
+EDGE_COUNT = 3
+FACE_COUNT = 2
+NESTED_SET_COUNT = 1
 
 
 class Pad:
@@ -36,6 +49,13 @@ class Pocket:
 
 class Draft:
     """Fake CATIA draft, a kind created in the UI that the SDK does not wrap."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+
+
+class HybridShapePlaneOffset:
+    """Fake CATIA offset plane inside a geometrical set."""
 
     def __init__(self, name: str) -> None:
         self.Name = name
@@ -62,12 +82,22 @@ class _Collection:
         return self._items[index - 1]
 
 
-class _MainBody:
-    """Fake `MainBody` with features and sketches."""
+class _Body:
+    """Fake CATIA `Body` with features and sketches."""
 
-    def __init__(self, shapes: "list[Any]", sketches: "list[Any]") -> None:
+    def __init__(self, name: str, shapes: "list[Any]", sketches: "list[Any]") -> None:
+        self.Name = name
         self.Shapes = _Collection(shapes)
         self.Sketches = _Collection(sketches)
+
+
+class _HybridBody:
+    """Fake geometrical set with elements and nested sets."""
+
+    def __init__(self, name: str, shapes: "list[Any]", nested: "list[Any]") -> None:
+        self.Name = name
+        self.HybridShapes = _Collection(shapes)
+        self.HybridBodies = _Collection(nested)
 
 
 class _RawPart:
@@ -76,9 +106,21 @@ class _RawPart:
     def __init__(self, parameters: Any, up_to_date: bool = True) -> None:
         self.Name = "Housing"
         self.Parameters = parameters
-        self.MainBody = _MainBody(
+        self.MainBody = _Body(
+            "PartBody",
             [Pad("Base"), Pocket("Bore"), Draft("Draft.1")],
             [_SketchComObject("BaseSketch"), _SketchComObject("BoreSketch")],
+        )
+        self.tool_body = _Body("Tool", [Pad("ToolPad")], [])
+        self.Bodies = _Collection([self.MainBody, self.tool_body])
+        self.HybridBodies = _Collection(
+            [
+                _HybridBody(
+                    "Construction",
+                    [HybridShapePlaneOffset("Offset.1")],
+                    [_HybridBody("Inner", [], [])],
+                )
+            ]
         )
         self._up_to_date = up_to_date
 
@@ -92,21 +134,48 @@ class _RawPart:
         raise AssertionError("Inspection must never save.")
 
 
-class _UntouchableSelection:
-    """Fake selection that fails the test on any use.
+class _Selected:
+    """Fake `SelectedElement`."""
 
-    The topology search behind edge and face counts clears the user's selection, so
-    inspection deliberately does not use it.
-    """
+    def __init__(self, value: Any) -> None:
+        self.Value = value
+        self.Reference = value
 
-    def __getattr__(self, name: str) -> Any:
-        raise AssertionError(f"Inspection must not touch the selection (used {name}).")
+
+class _Selection:
+    """Fake `Selection` holding one user pick; searches find edges or faces."""
+
+    def __init__(self) -> None:
+        self.user_pick = object()
+        self.items = [_Selected(self.user_pick)]
+        self.deleted = False
+
+    @property
+    def Count(self) -> int:  # noqa: N802 - COM property name
+        return len(self.items)
+
+    def Item(self, index: int) -> _Selected:  # noqa: N802 - COM method name
+        return self.items[index - 1]
+
+    def Clear(self) -> None:  # noqa: N802 - COM method name
+        self.items = []
+
+    def Search(self, query: str) -> None:  # noqa: N802 - COM method name
+        hits = {EDGE_SEARCH_QUERY: EDGE_COUNT, FACE_SEARCH_QUERY: FACE_COUNT}[query]
+        self.items = [_Selected(object()) for _ in range(hits)]
+
+    def Add(self, value: Any) -> None:  # noqa: N802 - COM method name
+        self.items.append(_Selected(value))
+
+    def Delete(self) -> None:  # noqa: N802 - COM method name
+        raise AssertionError("Inspection must never delete.")
 
 
 def _part(
     parameters_collection_factory: Any,
     length_parameter_factory: Any,
     up_to_date: bool = True,
+    selection: Any = "default",
 ) -> Part:
     """Builds a Part with one user parameter and one feature-internal dimension."""
     width = length_parameter_factory(name="Housing\\Width", value=WIDTH_MM)
@@ -115,7 +184,9 @@ def _part(
         [("Housing\\Width", width), ("Housing\\Base\\FirstLimit\\Length", internal)],
         direct_items=[("Housing\\Width", width)],
     )
-    return Part(_RawPart(parameters, up_to_date), selection=_UntouchableSelection())
+    if selection == "default":
+        selection = _Selection()
+    return Part(_RawPart(parameters, up_to_date), selection=selection)
 
 
 def test_summary_reports_what_the_model_contains(
@@ -130,6 +201,11 @@ def test_summary_reports_what_the_model_contains(
     assert summary.sketches == ("BaseSketch", "BoreSketch")
     assert [parameter.short_name for parameter in summary.parameters] == ["Width"]
     assert summary.parameters[0].value == WIDTH_MM
+    assert [body.name for body in summary.bodies] == ["PartBody", "Tool"]
+    assert [geometrical_set.name for geometrical_set in summary.geometrical_sets] == [
+        "Construction"
+    ]
+    assert summary.topology == TopologyCounts(edges=EDGE_COUNT, faces=FACE_COUNT)
 
 
 def test_features_keep_model_tree_order_and_their_real_kind(
@@ -143,6 +219,62 @@ def test_features_keep_model_tree_order_and_their_real_kind(
         FeatureInfo(name="Bore", kind="Pocket", supported=True),
         FeatureInfo(name="Draft.1", kind="Draft", supported=False),
     )
+
+
+def test_bodies_mark_the_main_body_by_identity(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """Every body is listed; `part_design` handles only the main body's features."""
+    part = _part(parameters_collection_factory, length_parameter_factory)
+
+    main, tool = part.inspect.bodies()
+
+    assert main == BodyInfo(
+        name="PartBody",
+        is_main=True,
+        features=part.inspect.features(),
+        sketches=("BaseSketch", "BoreSketch"),
+    )
+    assert tool == BodyInfo(
+        name="Tool",
+        is_main=False,
+        features=(FeatureInfo(name="ToolPad", kind="Pad", supported=False),),
+        sketches=(),
+    )
+
+
+def test_a_body_sharing_the_main_body_name_is_not_the_main_body(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """The main body is found by COM identity, never by name."""
+    part = _part(parameters_collection_factory, length_parameter_factory)
+    part.com_object.tool_body.Name = "PartBody"
+
+    assert [body.is_main for body in part.inspect.bodies()] == [True, False]
+
+
+def test_geometrical_sets_list_their_elements_and_count_nested_sets(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """Nested sets are counted, not opened: their contents are not live-verified."""
+    part = _part(parameters_collection_factory, length_parameter_factory)
+
+    assert part.inspect.geometrical_sets() == (
+        GeometricalSetInfo(
+            name="Construction",
+            elements=(GeometryInfo(name="Offset.1", kind="HybridShapePlaneOffset"),),
+            nested_set_count=NESTED_SET_COUNT,
+        ),
+    )
+
+
+def test_topology_is_absent_without_an_editor_selection(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """A Part built without a selection cannot search; the field is absent, not guessed."""
+    part = _part(parameters_collection_factory, length_parameter_factory, selection=None)
+
+    assert part.inspect.summary().topology is None
 
 
 def test_feature_dimensions_are_not_reported_as_parameters(
@@ -166,12 +298,14 @@ def test_an_unrebuilt_model_is_reported_as_needing_an_update(
 def test_inspection_changes_nothing(
     parameters_collection_factory: Any, length_parameter_factory: Any
 ) -> None:
-    """No generation advance; rebuild, save and selection use would fail the test."""
-    part = _part(parameters_collection_factory, length_parameter_factory)
+    """No generation advance, no rebuild or save, and the user's pick is still selected."""
+    selection = _Selection()
+    part = _part(parameters_collection_factory, length_parameter_factory, selection=selection)
 
     part.inspect.summary()
 
     assert part.part_design.snapshot_generation == 0
+    assert [item.Value for item in selection.items] == [selection.user_pick]
 
 
 def test_render_is_readable_text_built_from_the_data(
@@ -185,6 +319,10 @@ def test_render_is_readable_text_built_from_the_data(
     assert "- Base (Pad)" in text
     assert "- Draft.1 (Draft, not supported by auto-3dx)" in text
     assert "- Width = 60.0 mm" in text
+    assert "- PartBody (main body, 3 features, 2 sketches)" in text
+    assert "- Construction (1 elements, 1 nested sets not listed)" in text
+    assert "  - Offset.1 (HybridShapePlaneOffset)" in text
+    assert text.splitlines()[-1] == "Topology: 3 edges, 2 faces"
 
 
 def test_a_com_failure_while_listing_features_is_an_automation_error(
@@ -204,6 +342,27 @@ def test_a_com_failure_while_listing_features_is_an_automation_error(
 
     with pytest.raises(AutomationError) as caught:
         part.inspect.features()
+
+    assert caught.value.hresult == HRESULT_EXCEPTION_OCCURRED
+
+
+def test_a_com_failure_while_listing_geometrical_sets_is_an_automation_error(
+    parameters_collection_factory: Any, length_parameter_factory: Any
+) -> None:
+    """The new reads translate COM failures exactly like the old ones."""
+    part = _part(parameters_collection_factory, length_parameter_factory)
+
+    class _FailingCollection:
+        @property
+        def Count(self) -> int:  # noqa: N802 - COM property name
+            raise pywintypes.com_error(
+                HRESULT_EXCEPTION_OCCURRED, "Exception occurred.", None, None
+            )
+
+    part.com_object.HybridBodies = _FailingCollection()
+
+    with pytest.raises(AutomationError, match="Part.HybridBodies.Count") as caught:
+        part.inspect.geometrical_sets()
 
     assert caught.value.hresult == HRESULT_EXCEPTION_OCCURRED
 

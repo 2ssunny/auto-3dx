@@ -13,9 +13,9 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **852 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
-  모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원)
-  이후 2026-09-15에 live로 재실행해 **36 통과, 1건 skip**(수동 준비 필요)이고, 실행 뒤 모델이 기준
+- 테스트: **861 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
+  모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
+  검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **38 통과, 1건 skip**(수동 준비 필요)이고, 실행 뒤 모델이 기준
   상태와 같았다
 - probe: `scripts/probes/`에 39개 존재
 - 브랜치: `develop` (push·PR 안 함)
@@ -356,7 +356,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 8 | 예외 다섯 범주 재편 | 완료 | `SessionError`/`ValidationError`/`NotFoundError`/`ConflictError`/`AutomationError` (`api-design.md` 8절, `test_errors.py`) |
 | 9 | 작은 패키지 루트 | 완료 | `Catia`/`Part`/예외 범주만 남기고 65개에서 축소 (`api-design.md` 13절, `test_public_exports.py`) |
 | 10 | `only Part.update() rebuilds` 정책 테스트 | 완료 | 패키지 소스를 파싱해 `Update()`/`Save()`/`PLMPropagate()` 호출 위치를 고정 (`test_update_policy.py`) |
-| 11 | `part.inspect` | 일부 완료 | 이름·재빌드 상태·feature·스케치·사용자 파라미터는 구현됨 (`test_inspection.py`). 다른 body·기하 세트·모서리와 면 개수에 필요한 읽기는 probe 38로 live 확인됨(2026-09-15), 구현 대기 |
+| 11 | `part.inspect` | 완료 | 이름·재빌드 상태·feature·스케치·사용자 파라미터에 더해 모든 body(main body는 COM 동일성으로 표시), Part 바로 아래 기하 세트와 그 요소, 모서리·면 개수까지 돌려준다. 중첩 기하 세트의 내용, body 안의 기하 세트, 기하 세트 안의 스케치는 live 근거가 없어 넣지 않았다 (`test_inspection.py`, live `test_inspection_live.py`) |
 | 12 | topology 검색의 사용자 selection 복원 | 완료 | `part.topology.edges()`/`faces()`가 검색 전 selection을 캡처하고 뒤에 복원한 뒤 개수로 확인한다. CATIA가 복원 일부를 조용히 거부하면 스냅샷은 그대로 돌려주고 `SelectionNotRestoredWarning`을 낸다 (`test_topology_selection.py`, live `test_snapshots_restore_the_user_selection_and_stay_usable`) |
 | 13 | 스레드 안전성 | 중간 | 미검증 (2.7) |
 | 14 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
@@ -372,4 +372,4 @@ Part 이름·In-Work Object·Body의 Shape·Sketch·기하 세트의 HybridShape
 `IsUpToDate`·모서리와 면 개수의 반복 일관성을 확인하고, 가장 중요하게는 topology 검색
 전후로 selection을 캡처·복원해 PASS/FAIL로 보고하도록 만들어져 있다. 읽기 전용이며
 아무것도 만들거나 지우지 않는다. 2026-09-15에 live로 실행했고 필요한 읽기와 비어 있지 않은
-selection의 복원이 모두 통과했다(conventions 1.5). 12번은 구현됐고, 11번의 나머지 필드는 구현만 남았다.
+selection의 복원이 모두 통과했다(conventions 1.5). 그 증거로 11번과 12번을 모두 구현했다.

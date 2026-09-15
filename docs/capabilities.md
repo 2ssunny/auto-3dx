@@ -6,8 +6,8 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 현재 정적 검증: **852 unit 통과**
-- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **36 integration
+- 현재 정적 검증: **861 unit 통과**
+- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **38 integration
   통과, 1건 skip**(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과한다). 실행 뒤
   모델이 실행 전 상태와 같았다
 
@@ -739,17 +739,13 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 `FaceSnapshot`), Chamfer 인자 확정(mode=1 고정), Shell/Thickness/Hole(면 참조),
 사용자 정의 offset/각도 평면(스케치 + Pad까지 검증), Part당 하나의 공유 model
 generation, 예외 다섯 범주, 작은 패키지 루트, 측정 기본 대상(main body), topology 검색 전후의
-사용자 selection 복원(`SelectionNotRestoredWarning`). 이제 남은
+사용자 selection 복원(`SelectionNotRestoredWarning`), 같은 CATIA Part의 wrapper끼리 공유하는
+generation, `part.inspect.summary()`의 body·기하 세트·모서리와 면 개수. 이제 남은
 순서는 다음과 같다.
 
-1. **`part.inspect`의 나머지 필드** — `part.inspect.summary()`는 이미 Part 이름, 재빌드
-   상태, main body의 feature(SDK가 만들 수 없는 종류 포함), 스케치 이름, 사용자
-   파라미터를 frozen dataclass로 돌려준다. 다른 body, 기하 세트와 그 내용, 모서리와 면
-   개수는 아직 없다. 모든 필드가 live로 검증된 읽기에 근거해야 하므로 probe 38이 live
-   세션에서 먼저 돌아야 한다.
-2. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
+1. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
    검증해야 한다. 지금 기준으로는 미검증이며 구현하지 않는다.
-3. **모서리·면 재선택 selector** — 지금은 재빌드마다 `part.topology.edges()`/`faces()`를
+2. **모서리·면 재선택 selector** — 지금은 재빌드마다 `part.topology.edges()`/`faces()`를
    새로 불러야 한다. BRep 이름 재해석, 재빌드 후 이름/순서 보존, 측정 기반 선택,
    feature 단위 검색 범위 한정 네 가지 경로를 모두 시험했고 전부 막혔다
    (`geometry.edges`). 새로운 돌파구가 없으면 이 항목은 열린 채로 남는다.
