@@ -929,6 +929,44 @@ COM 오류는 "없음"과 "일시적 실패"를 구분해 주지 않으므로, �
 
 ---
 
+### 1.5 검사·selection 복원·export (실측, 2026-09-15, probes 38·39)
+
+검사에 쓸 읽기가 live로 확인됐다.
+
+```text
+Part.Bodies.Count / Item(i) / Name          -> 동작. Item(1) == MainBody -> True
+같은 Body를 두 번 읽어 ==                   -> True (Body COM 동일성)
+Body.Shapes / Sketches의 Count·Item·Name    -> 동작
+HybridBodies.Item(i).HybridShapes.Count     -> 동작 (임시 offset 평면 1개로 확인)
+HybridShapes.Item(i).Name / type 이름        -> AUTO3DX_P38_PLANE / HybridShapePlaneOffset
+HybridBody.HybridBodies.Count (중첩 세트)   -> 동작 (0)
+Part.IsUpToDate(Part)                      -> Python bool
+Topology.Edge / Face 검색 2회              -> 16/16, 6/6 일치
+```
+
+**Part의 COM 동일성도 확인됐다.** `active_part()`를 두 번 읽은 COM 객체는 `==`로 같고 `is`로는
+다르다. `part_named(같은 이름)`도 같고, 다른 열린 Part와는 다르다.
+
+**비어 있지 않은 selection 복원이 된다.** 기준 pad와 기준 스케치를 선택한 상태에서 topology
+검색을 돌리면 selection이 바뀐다. 검색 전에 `Selection.Item(i).Value`로 캡처하고, 끝나면
+`Clear()` 후 캡처한 값마다 `Add()`하면 두 항목이 순서, 이름, 타입 모두 그대로 돌아왔다. 다른
+프로세스에서 읽어도 복원된 selection이 보였다.
+
+**export는 이 설치본에서 쓸 수 없다.** 유일한 Automation 경로는
+`Application.Documents`에서 `PartDocument.Part == Part`로 문서를 찾아
+`PartDocument.ExportData(path, format)`을 부르는 것이다. `Documents`에는 CATPCCModel
+`Document` 하나와 열린 Part마다 `PartDocument`가 하나씩 있었다. 활성 Part의 문서는 PLM 기반이라
+`Path`가 비어 있고 `FullName`이 불투명한 ID다.
+
+```text
+ExportData(path, "stp") -> HRESULT 0x80020009, 내부 0x80004005 (E_FAIL), 설명 없음
+ExportData(path, "stl") -> 같은 실패
+파일 생성 없음 / Saved 전후 False 그대로 / 모델 변화 없음
+```
+
+시도 뒤에 활성 객체를 읽을 수 없는 editor(`CATIAEditor36`)가 새로 생겼다. 원인을 확실히 가리지
+못했으므로 export 시도는 반복하지 않는다.
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

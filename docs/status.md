@@ -356,8 +356,8 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 8 | 예외 다섯 범주 재편 | 완료 | `SessionError`/`ValidationError`/`NotFoundError`/`ConflictError`/`AutomationError` (`api-design.md` 8절, `test_errors.py`) |
 | 9 | 작은 패키지 루트 | 완료 | `Catia`/`Part`/예외 범주만 남기고 65개에서 축소 (`api-design.md` 13절, `test_public_exports.py`) |
 | 10 | `only Part.update() rebuilds` 정책 테스트 | 완료 | 패키지 소스를 파싱해 `Update()`/`Save()`/`PLMPropagate()` 호출 위치를 고정 (`test_update_policy.py`) |
-| 11 | `part.inspect` | 일부 완료 | 이름·재빌드 상태·feature·스케치·사용자 파라미터는 구현됨 (`test_inspection.py`). 다른 body·기하 세트·모서리와 면 개수는 probe 38의 live 증거를 기다린다 |
-| 12 | topology 검색의 사용자 selection 복원 | live probe 대기 | `part.topology.edges()`/`faces()`가 검색 전후로 CATIA 사용자 selection을 복원하지 않는다. 11번과 같은 probe 38이 검증을 겸한다 |
+| 11 | `part.inspect` | 일부 완료 | 이름·재빌드 상태·feature·스케치·사용자 파라미터는 구현됨 (`test_inspection.py`). 다른 body·기하 세트·모서리와 면 개수에 필요한 읽기는 probe 38로 live 확인됨(2026-09-15), 구현 대기 |
+| 12 | topology 검색의 사용자 selection 복원 | 구현 대기 | 비어 있지 않은 selection의 캡처와 복원이 probe 38에서 live로 통과했다(2026-09-15). `part.topology.edges()`/`faces()`에 넣는 일이 남았다 |
 | 13 | 스레드 안전성 | 중간 | 미검증 (2.7) |
 | 14 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
 

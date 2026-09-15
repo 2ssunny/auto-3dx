@@ -150,10 +150,11 @@ SDK therefore tracks a **model generation** and refuses stale references before 
 
 - Each `Part` owns exactly one generation counter. Every collection and wrapper obtained through
   that `Part` shares it.
-- Planned, pending live evidence: `Catia` handing out one generation per CATIA Part, compared
-  by COM identity, so two `Part` wrappers of one model cannot disagree about it. COM identity
-  was verified for sketches but not yet for Parts. Until it is, each `Part` wrapper owns its
-  generation: obtain the Part once and keep using that object.
+- Planned: `Catia` handing out one generation per CATIA Part, compared by COM identity, so two
+  `Part` wrappers of one model cannot disagree about it. The evidence now exists: two
+  `active_part()` reads compare `==`, `part_named()` of the same name compares `==`, and a
+  different open Part compares unequal (live, 2026-09-15). Until it is implemented, each
+  `Part` wrapper owns its generation: obtain the Part once and keep using that object.
 - The counter is private. Callers observe it only through staleness errors and the `generation`
   attribute on snapshots.
 
@@ -409,7 +410,7 @@ selection, which inspection must not do.
 
 ## 12. Measurement, export and persistence
 
-Status: measurement Implemented; export Planned, not yet probed.
+Status: measurement Implemented. Export probed live (probe 39) and not available: see below.
 
 **Measurement** is a verification layer. A capability is exposed only when it is backed by
 reproducible live evidence. An inertia bounding box once returned correct values and later
@@ -429,6 +430,13 @@ returned all zeros silently on an unchanged model, so it is not exposed.
   and include every unsaved change in the session, not just the SDK's.
 - File export is a persistence operation. When it exists it will take an explicit path, refuse
   to overwrite an existing file unless asked to, and never save the model as a side effect.
+- **Export is not available in this installation.** The only Automation route is
+  `PartDocument.ExportData(path, format)`, reached through `Application.Documents` by matching
+  `PartDocument.Part` to the Part. On the active Part's document, which is PLM-backed (empty
+  `Path`, opaque `FullName`), both `stp` and `stl` failed with `E_FAIL` and no description. No
+  file was written and `Saved` did not change. A new non-Part editor appeared in the session
+  after those attempts and could not be attributed with certainty, so export attempts are
+  not repeated. `part.export` stays reserved and unimplemented.
 
 ---
 
@@ -501,9 +509,9 @@ Status: Enforced by review.
 |---|---|---|
 | Shared model generation on `Part`: `PartDesign`, `Topology`, `update()` | 5 | Done |
 | Shared model generation: sketches, planes, parameters, formulas, constraints | 5 | Done |
-| One generation per CATIA Part across wrappers (needs live COM identity check) | 5 | Planned |
+| One generation per CATIA Part across wrappers (COM identity verified live) | 5 | Planned |
 | `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Done |
-| Topology snapshots restore the user's selection | 7 | Planned |
+| Topology snapshots restore the user's selection (restore verified live) | 7 | Planned |
 | Error categories and `AutomationError` | 8 | Done |
 | One COM error translation module: `_com.py` exists | 8 | Done |
 | Every module translating COM failures through `_com.py` | 8 | Done |
@@ -512,5 +520,5 @@ Status: Enforced by review.
 | Small package root | 13 | Done |
 | Test that only `Part.update()` rebuilds, and nothing saves | 6 | Done |
 | `part.inspect`: name, rebuild status, features, sketches, user parameters | 11 | Done |
-| `part.inspect`: bodies, geometrical sets, topology counts (needs probe 38) | 11 | Planned |
-| File export | 12 | Not probed |
+| `part.inspect`: bodies, geometrical sets, topology counts (reads verified live) | 11 | Planned |
+| File export | 12 | Probed: unavailable for PLM-backed documents |
