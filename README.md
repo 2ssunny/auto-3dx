@@ -642,10 +642,10 @@ python -m pytest tests/integration -m integration -q
 정리하므로, 저장하지 않은 별도 작업 세션에서 실행하는 것이 좋습니다. 테스트와
 라이브러리 모두 `Save()`와 `PLMPropagate()`를 호출하지 않습니다.
 
-현재 fake-COM 단위 테스트 846개가 통과합니다. B428_Cloud live 통합 테스트는
-이번 세션의 아키텍처 변경(모델 generation 공유, 예외 범주 재편, 루트 축소,
-측정 기본값, SketchElement, topology 검색의 selection 복원) 이후 2026-09-15에 다시
-실행해 35개 통과, 1개 skip을
+현재 fake-COM 단위 테스트 852개가 통과합니다. B428_Cloud live 통합 테스트는
+이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리 모델 generation 공유, 예외 범주 재편,
+루트 축소, 측정 기본값, SketchElement, topology 검색의 selection 복원) 이후
+2026-09-15에 다시 실행해 36개 통과, 1개 skip을
 확인했습니다(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과합니다).
 실행 뒤 모델이 실행 전 상태와 같음도 확인했습니다.
 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라 달라집니다.

@@ -6,8 +6,8 @@
 
 - 대상 설치본: B428_Cloud
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 현재 정적 검증: **846 unit 통과**
-- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **35 integration
+- 현재 정적 검증: **852 unit 통과**
+- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **36 integration
   통과, 1건 skip**(그 1건은 열려 있는 Part에 수동으로 파라미터를 추가해야 통과한다). 실행 뒤
   모델이 실행 전 상태와 같았다
 
@@ -259,9 +259,10 @@ part.update()
   모서리 개수와 순서(그리고 `Edge.index`)가 전부 바뀐다. 그래서 `part.topology.edges()`를 다시
   부르는 것 외에는 답이 없다.
 - **모델이 바뀌면 이전 snapshot은 거부된다.** 같은 snapshot으로 필렛을 두 번 만들면
-  성공할 때도 실패할 때도 있고, 호출자는 어느 쪽인지 미리 알 수 없다. 그래서 `Part`는
-  하나의 model generation 카운터를 갖고, 그 Part로부터 얻은 모든 collection과 wrapper가
-  같은 카운터를 공유한다. feature 생성·삭제·이름변경, 파라미터·제약 값 쓰기, formula
+  성공할 때도 실패할 때도 있고, 호출자는 어느 쪽인지 미리 알 수 없다. 그래서 CATIA Part
+  하나에 model generation 카운터가 하나 있고, 그 Part로부터 얻은 모든 collection과 wrapper가
+  같은 카운터를 공유한다. `active_part()`를 다시 부르거나 `part_named()`, 다른
+  `Catia.attach()`로 얻은 wrapper도 COM 동일성(`==`)으로 같은 Part면 같은 카운터를 쓴다. feature 생성·삭제·이름변경, 파라미터·제약 값 쓰기, formula
   변경, `sketch.edit()` 세션을 닫는 것, `part.update()`(성공/실패 무관) 등 COM에
   mutation을 시도하는 모든 경로가 카운터를 올리고, 읽기와 COM 전에 거부된 요청은 올리지
   않는다. 파라미터 값은 그 파라미터가 아무것도 구동하지 않아도 카운터를 올린다. 이

@@ -5,9 +5,10 @@ its name, its parameters, its sketches, its planes, its Part Design features,
 its topology, its measurements, ``IsUpToDate()``, and ``Update()``. Unverified
 members are intentionally not wrapped here.
 
-A ``Part`` is the unit of state (``docs/api-design.md`` section 2). It owns one model
-generation and hands it to every collection it builds, so a mutation made through any
-of them makes every outstanding topology snapshot stale.
+A ``Part`` is the unit of state (``docs/api-design.md`` section 2). Every wrapper of
+the same CATIA Part shares one model generation, matched by COM identity, and hands it
+to every collection it builds. A mutation made through any of them, or through another
+wrapper of the same Part, makes every outstanding topology snapshot stale.
 """
 
 from typing import Any
@@ -15,7 +16,7 @@ from typing import Any
 import pywintypes
 
 from auto_3dx._com import automation_error, format_hresult, hresult_of
-from auto_3dx._generation import ModelGeneration
+from auto_3dx._generation import shared_generation
 from auto_3dx.errors import (
     Auto3dxError,
     AutomationError,
@@ -58,7 +59,9 @@ class Part:
         self._com_object = com_object
         self._selection = selection
         self._editor = editor
-        self._generation = ModelGeneration()
+        # Shared by COM identity: `Catia.active_part()` builds a new wrapper on every
+        # call, and each must see the others' mutations.
+        self._generation = shared_generation(com_object)
         self._topology: Topology | None = None
         self._parameters: ParameterCollection | None = None
         self._sketches: SketchCollection | None = None

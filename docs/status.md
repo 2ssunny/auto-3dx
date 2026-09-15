@@ -13,9 +13,9 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: `auto-3dx` conda env, Python 3.11.16 (64-bit), pywin32 312
-- 테스트: **846 unit 통과**. integration은 이번 세션의 아키텍처 변경(모델 generation
-  공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원) 이후
-  2026-09-15에 live로 재실행해 **35 통과, 1건 skip**(수동 준비 필요)이고, 실행 뒤 모델이 기준
+- 테스트: **852 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
+  모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원)
+  이후 2026-09-15에 live로 재실행해 **36 통과, 1건 skip**(수동 준비 필요)이고, 실행 뒤 모델이 기준
   상태와 같았다
 - probe: `scripts/probes/`에 39개 존재
 - 브랜치: `develop` (push·PR 안 함)
@@ -352,7 +352,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 4 | `IsUpToDate` 의미 확인 | 완료 | `Part.is_up_to_date()` 구현 및 live false→true 전이 검증 (2.6) |
 | 5 | 측정 기반 검증 | 완료 | `Part.measurement` 구현 및 live integration 완료 (2.6) |
 | 6 | API design contract (`docs/api-design.md`) | 완료 | 앞으로의 공개 API 판단 기준 문서. 감사 결과를 바탕으로 결정했다 |
-| 7 | Part당 공유 model generation | 완료 | 파라미터·스케치·평면·formula·제약·`update()`까지 mutation을 시도하는 모든 경로가 하나의 카운터를 공유한다 (`api-design.md` 5절, `test_part_generation_wiring.py`) |
+| 7 | Part당 공유 model generation | 완료 | 파라미터·스케치·평면·formula·제약·`update()`까지 mutation을 시도하는 모든 경로가 하나의 카운터를 공유한다. 같은 CATIA Part의 wrapper끼리도 COM 동일성으로 같은 카운터를 쓴다(`active_part()` 재호출, `part_named()`, 다른 `Catia` 인스턴스) (`api-design.md` 5.1절, `test_part_generation_wiring.py`, `test_shared_generation.py`, live `test_shared_generation_live.py`) |
 | 8 | 예외 다섯 범주 재편 | 완료 | `SessionError`/`ValidationError`/`NotFoundError`/`ConflictError`/`AutomationError` (`api-design.md` 8절, `test_errors.py`) |
 | 9 | 작은 패키지 루트 | 완료 | `Catia`/`Part`/예외 범주만 남기고 65개에서 축소 (`api-design.md` 13절, `test_public_exports.py`) |
 | 10 | `only Part.update() rebuilds` 정책 테스트 | 완료 | 패키지 소스를 파싱해 `Update()`/`Save()`/`PLMPropagate()` 호출 위치를 고정 (`test_update_policy.py`) |

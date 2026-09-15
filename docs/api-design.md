@@ -138,8 +138,9 @@ Rules that apply everywhere:
 Status: Enforced. Every collection and wrapper reachable from a `Part` shares its generation
 (`tests/unit/test_part_generation_wiring.py`), and each mutation path is pinned by the
 generation tests for its module: `test_model_generation.py`, `test_sketch_generation.py`,
-`test_plane_generation.py` and `test_value_generation.py`. Planned: sharing one generation
-across two `Part` wrappers of the same model (5.1).
+`test_plane_generation.py` and `test_value_generation.py`. Every wrapper of the same CATIA
+Part shares one generation (5.1, `test_shared_generation.py`, live
+`test_shared_generation_live.py`).
 
 Topology references are transient. A BRep name cannot be stored and re-resolved, and a rebuild
 can change every edge and face name and index. Reusing an old reference after a change succeeds
@@ -148,13 +149,17 @@ SDK therefore tracks a **model generation** and refuses stale references before 
 
 ### 5.1 The generation
 
-- Each `Part` owns exactly one generation counter. Every collection and wrapper obtained through
-  that `Part` shares it.
-- Planned: `Catia` handing out one generation per CATIA Part, compared by COM identity, so two
-  `Part` wrappers of one model cannot disagree about it. The evidence now exists: two
-  `active_part()` reads compare `==`, `part_named()` of the same name compares `==`, and a
-  different open Part compares unequal (live, 2026-09-15). Until it is implemented, each
-  `Part` wrapper owns its generation: obtain the Part once and keep using that object.
+- Each CATIA Part has exactly one generation counter. Every collection and wrapper obtained
+  through a `Part` shares it.
+- Every `Part` wrapper of the same CATIA Part shares that counter, matched by COM identity:
+  two `active_part()` reads compare `==` while `is` differs, `part_named()` of the same name
+  compares `==`, and a different open Part compares unequal (live, 2026-09-15). This holds
+  across `active_part()`, `part_named()`, `parts()`, separate `Catia.attach()` calls and a
+  `Part` built directly from the raw object, because `Part` itself looks the counter up.
+- The registry is process-wide and keeps each Part it has seen for the life of the process.
+  Forgetting one would let a later wrapper start again at zero while a snapshot from the old
+  counter at zero still looked current. A comparison that fails counts as a different Part: a
+  spare counter is safe, a counter shared between two Parts is not.
 - The counter is private. Callers observe it only through staleness errors and the `generation`
   attribute on snapshots.
 
@@ -518,7 +523,7 @@ Status: Enforced by review.
 |---|---|---|
 | Shared model generation on `Part`: `PartDesign`, `Topology`, `update()` | 5 | Done |
 | Shared model generation: sketches, planes, parameters, formulas, constraints | 5 | Done |
-| One generation per CATIA Part across wrappers (COM identity verified live) | 5 | Planned |
+| One generation per CATIA Part across wrappers | 5 | Done |
 | `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Done |
 | Topology snapshots restore the user's selection | 7 | Done |
 | Error categories and `AutomationError` | 8 | Done |
