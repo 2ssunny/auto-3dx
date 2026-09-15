@@ -385,22 +385,70 @@ FORMAT_CHECKERS: "dict[str, Callable[[Path], bool]]" = {
 }
 
 
+def select_target_document(
+    candidates: "list[tuple[int, Any, str]]", raw_part: Any
+) -> "tuple[int, Any] | None":
+    """Picks the one PartDocument whose Part is the active Part.
+
+    The first live run found a ``Document`` (CATPCCModel1.CATPCCModel) and one
+    ``PartDocument`` per open Part, all declaring ExportData. Exporting the first
+    candidate exported the CATPCCModel instead of the active Part. The type library
+    declares ``PartDocument.Part -> Part``, and Part COM identity by ``==`` was
+    verified live (two ``active_part()`` reads compare equal; a different open Part
+    does not), so that comparison decides the target. Anything other than exactly
+    one match is refused rather than guessed.
+
+    Args:
+        candidates: Result of :func:`find_export_candidates`.
+        raw_part: The active Part's raw COM object.
+
+    Returns:
+        ``(index, document)`` for the single matching PartDocument, or ``None``.
+    """
+    print("=== Export target: the PartDocument whose Part is the active Part ===")
+    matches: "list[tuple[int, Any]]" = []
+    for index, document, type_name in candidates:
+        if type_name != "PartDocument":
+            print(f"    document[{index}] skipped: type {type_name} holds no Part")
+            continue
+        document_part = attempt(f"Documents.Item({index}).Part", lambda d=document: d.Part)
+        if document_part is _FAILED:
+            continue
+        same = attempt(
+            f"Documents.Item({index}).Part == active Part",
+            lambda p=document_part: bool(p == raw_part),
+        )
+        print(f"    document[{index}] Part={_ascii(document_part.Name)} is active Part={same}")
+        if same is True:
+            matches.append((index, document))
+    if len(matches) != 1:
+        print(f"REFUSED: expected exactly one matching PartDocument, found {len(matches)}.")
+        return None
+    return matches[0]
+
+
 def _random_token() -> str:
     """Returns a short random hex token for naming this run's output files."""
     return secrets.token_hex(RANDOM_TOKEN_BYTES)
 
 
 def run_export_attempts(
-    candidates: "list[tuple[int, Any, str]]", output_dir: Path
+    candidates: "list[tuple[int, Any, str]]", output_dir: Path, raw_part: Any
 ) -> None:
-    """Attempts ExportData for each format on the first export candidate found.
+    """Attempts ExportData for each format on the active Part's own document.
 
-    Refuses to run if ``output_dir`` does not already exist, and refuses to
-    overwrite any existing target file (both checked before any COM call).
+    Refuses to run if ``output_dir`` does not already exist, refuses unless exactly
+    one PartDocument holds the active Part, and refuses to overwrite any existing
+    target file. All three are checked before any ExportData call.
+
+    ``PartDocument.Saved`` is read before and after each export. It is a read-only
+    property; nothing here saves. A change in it would mean exporting altered the
+    document's saved state, which the SDK would need to know before offering export.
 
     Args:
         candidates: Result of :func:`find_export_candidates`.
         output_dir: Directory to write into; must already exist.
+        raw_part: The active Part's raw COM object.
     """
     print("=== Export attempts ===")
     if not output_dir.is_dir():
@@ -411,8 +459,11 @@ def run_export_attempts(
         print("No export-capable document object was found; nothing to attempt.")
         return
 
-    index, document, type_name = candidates[0]
-    print(f"Using document[{index}] (type={type_name}) as the ExportData target.")
+    selected = select_target_document(candidates, raw_part)
+    if selected is None:
+        return
+    index, document = selected
+    print(f"Using document[{index}] (PartDocument of the active Part) as the target.")
 
     token = _random_token()
     for format_code in EXPORT_FORMATS:
@@ -422,12 +473,16 @@ def run_export_attempts(
             print(f"    REFUSED: target already exists, will not overwrite: {target}")
             continue
 
+        saved_before = attempt("PartDocument.Saved (before)", lambda: bool(document.Saved))
         result = attempt(
             f"Document.ExportData({target!r}, {format_code!r})",
             lambda target=target, format_code=format_code: document.ExportData(
                 str(target), format_code
             ),
         )
+        saved_after = attempt("PartDocument.Saved (after)", lambda: bool(document.Saved))
+        print(f"    Saved before={saved_before} after={saved_after} "
+              f"unchanged={saved_before == saved_after}")
         if result is _FAILED:
             continue
 
@@ -519,7 +574,7 @@ def main() -> None:
     candidates = find_export_candidates(application)
 
     if args.run:
-        run_export_attempts(candidates, args.output_dir)
+        run_export_attempts(candidates, args.output_dir, raw_part)
     else:
         print(
             "Discovery only: pass --run --output-dir <existing directory> to "
