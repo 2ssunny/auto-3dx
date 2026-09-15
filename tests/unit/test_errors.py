@@ -58,8 +58,15 @@ def _error_classes() -> "dict[str, type]":
         for name, value in vars(errors).items()
         if inspect.isclass(value)
         and issubclass(value, BaseException)
+        and not issubclass(value, Warning)
         and value.__module__ == errors.__name__
     }
+
+
+def test_warnings_are_outside_the_error_hierarchy() -> None:
+    """`except Auto3dxError` must never swallow a warning category by accident."""
+    assert errors.SelectionNotRestoredWarning.__bases__ == (UserWarning,)
+    assert not issubclass(errors.SelectionNotRestoredWarning, errors.Auto3dxError)
 
 
 def test_every_category_derives_directly_from_the_base() -> None:

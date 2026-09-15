@@ -16,10 +16,9 @@ Every field here comes from a read already backed by live evidence:
   kinds the SDK creates, and `Name` is documented on the Automation base object every
   shape derives from.
 
-What is deliberately absent, until probe 38 supplies live evidence: other bodies,
-geometrical sets and their contents, and edge and face counts. The topology search
-behind those counts currently clears the user's CATIA selection, and inspection must
-leave the session as it found it.
+What is not reported yet: other bodies, geometrical sets and their contents, and edge
+and face counts. Probe 38 verified the reads they need, and topology searches now
+restore the user's CATIA selection, so they are waiting only on implementation.
 
 Inspection never advances the model generation, never rebuilds, and never touches
 the selection or the In-Work Object.

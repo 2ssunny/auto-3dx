@@ -11,6 +11,9 @@ to work for edges (section 1.2.2.2, probes 28/31/34/35):
         reference = selection.Item(i).Reference  # a real, feature-usable Reference
     selection.Clear()
 
+The search replaces the editor's selection, so `geometry._topology_search` captures
+the user's selection first and restores it afterwards.
+
 `Part.CreateReferenceFromObject` fails on a search hit -- `Selection.Item(i)
 .Reference` is the only way to turn one into something
 `AddNewEdgeFilletWithConstantRadius`/`AddNewChamfer` will accept. A face
@@ -78,7 +81,7 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.geometry.deletion import require_selection
+from auto_3dx.geometry._topology_search import search_references
 from auto_3dx.geometry.sketch import _wrap_com_error
 
 EDGE_SEARCH_QUERY: str = "Topology.Edge,all"
@@ -299,10 +302,11 @@ def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
     reference (`docs/conventions.md` section 1.2.2.2):
     `Part.CreateReferenceFromObject` fails on a search hit, so each
     `Reference` must come from `SelectedElement.Reference` instead. The
-    exact call order matters and is reproduced here verbatim: `Clear()`,
+    exact call order matters and is reproduced verbatim by
+    `geometry._topology_search.search_references`: `Clear()`,
     `Search(EDGE_SEARCH_QUERY)`, then `Item(i).Reference` for `i` in
-    `1..Count`, then a trailing `Clear()` so the editor's selection is not
-    left showing every edge of the solid.
+    `1..Count`. The user's selection is captured before the search and
+    restored afterwards, so taking a snapshot does not change it.
 
     Args:
         selection: The raw CATIA `Selection` COM object from the editor.
@@ -316,17 +320,17 @@ def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
         snapshot is refused once its owner has changed the model.
 
     Raises:
-        Auto3dxError: If `selection` is `None`, or the underlying COM call
-            fails unexpectedly.
+        ValidationError: If `selection` is `None`.
+        AutomationError: If the selection cannot be captured (nothing is
+            changed), or the search fails.
+
+    Warns:
+        SelectionNotRestoredWarning: If the selection did not fully come back.
+            The snapshot is still valid.
     """
-    require_selection(selection)
-    try:
-        selection.Clear()
-        selection.Search(EDGE_SEARCH_QUERY)
-        count = selection.Count
-        edges = [Edge(selection.Item(position).Reference, position, generation)
-                 for position in range(1, count + 1)]
-        selection.Clear()
-    except pywintypes.com_error as error:
-        raise _wrap_com_error(error) from error
+    references = search_references(selection, EDGE_SEARCH_QUERY)
+    edges = [
+        Edge(reference, position, generation)
+        for position, reference in enumerate(references, start=1)
+    ]
     return EdgeSnapshot(edges, generation)

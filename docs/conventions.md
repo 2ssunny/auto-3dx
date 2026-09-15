@@ -952,6 +952,19 @@ Topology.Edge / Face 검색 2회              -> 16/16, 6/6 일치
 `Clear()` 후 캡처한 값마다 `Add()`하면 두 항목이 순서, 이름, 타입 모두 그대로 돌아왔다. 다른
 프로세스에서 읽어도 복원된 selection이 보였다.
 
+추가 실측(같은 날, selection만 건드림):
+
+```text
+Search("Topology.Face,all")로 남은 PlanarFace 6개 -> 캡처·복원 6/6, 순서·이름·타입 일치
+Selection.Add(검색으로 얻은 Reference)            -> 예외 없이 무시됨 (Count 변화 없음)
+Search(면) 직후 Add(그 면들을 가진 Pad)            -> 7개가 됨
+그 7개를 캡처해 복원: 면 6개 Add 뒤 Add(Pad)        -> 예외 없이 무시됨 (6 -> 6)
+Add(Pad) 뒤 Search(면)                            -> Search가 selection을 바꿔 6개
+```
+
+`Add`가 예외 없이 무시될 수 있으므로 복원은 `Count`를 다시 읽어 확인한다. 이 경우 selection은
+이미 바뀌었으므로 스냅샷은 돌려주고 `SelectionNotRestoredWarning`으로 알린다(api-design 7절).
+
 **export는 이 설치본에서 쓸 수 없다.** 유일한 Automation 경로는
 `Application.Documents`에서 `PartDocument.Part == Part`로 문서를 찾아
 `PartDocument.ExportData(path, format)`을 부르는 것이다. `Documents`에는 CATPCCModel

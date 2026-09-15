@@ -20,6 +20,7 @@ even for a feature whose update failed. The document is never saved.
 
 import sys
 import uuid
+import warnings
 from typing import Any
 
 import pytest
@@ -37,6 +38,7 @@ from auto_3dx.errors import (  # noqa: E402
     CatiaConnectionError,
     NoActiveEditorError,
     NoActivePartError,
+    SelectionNotRestoredWarning,
     StaleSnapshotError,
 )
 from auto_3dx.geometry.part_design import (  # noqa: E402
@@ -172,3 +174,78 @@ def test_snapshot_is_repeatable_while_the_model_is_unchanged(part: Any) -> None:
     assert len(first) == len(second)
     assert [edge.index for edge in first] == [edge.index for edge in second]
     assert [edge.descriptor for edge in first] == [edge.descriptor for edge in second]
+
+
+def _selected(selection: Any) -> "list[tuple[str, str]]":
+    """Reads the selection as (name, type) pairs, in order."""
+    return [
+        (str(selection.Item(i).Value.Name), type(selection.Item(i).Value).__name__)
+        for i in range(1, int(selection.Count) + 1)
+    ]
+
+
+def test_snapshots_restore_the_user_selection_and_stay_usable(part: Any) -> None:
+    """A non-empty selection survives both searches, and the references still build."""
+    selection = Catia.attach().active_editor().Selection
+    if int(selection.Count) != 0:
+        pytest.skip("The user has something selected; this test only restores to empty.")
+    token = uuid.uuid4().hex[:8].upper()
+    sketch_name = f"AUTO3DX_IT_SEL_SKETCH_{token}"
+    pad_name = f"AUTO3DX_IT_SEL_PAD_{token}"
+    fillet_name = f"AUTO3DX_IT_SEL_FILLET_{token}"
+    body = part.com_object.MainBody
+    sketches_before = int(body.Sketches.Count)
+    shapes_before = int(body.Shapes.Count)
+    removals = [("remove_edge_fillet", fillet_name), ("remove_pad", pad_name)]
+
+    try:
+        sketch = part.sketches.create(sketch_name, support="XY")
+        with sketch.edit() as editor:
+            editor.rectangle(RECTANGLE_SIDE, RECTANGLE_SIDE)
+        pad = part.part_design.create_pad(pad_name, sketch, PAD_HEIGHT)
+        part.update()
+
+        # Features and sketches, the objects a user picks in the tree.
+        selection.Clear()
+        selection.Add(pad.com_object)
+        selection.Add(sketch.com_object)
+        before = _selected(selection)
+        assert [kind for _, kind in before] == ["Pad", "Sketch"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SelectionNotRestoredWarning)
+            part.topology.faces()
+        assert _selected(selection) == before
+
+        # Topology items, what a user picks in the 3D view.
+        selection.Clear()
+        selection.Search("Topology.Face,all")
+        before = _selected(selection)
+        assert len(before) > 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SelectionNotRestoredWarning)
+            part.topology.faces()
+        assert _selected(selection) == before
+
+        # Known CATIA limit: straight after a search, faces plus the Pad that owns
+        # them can be selected, but once the faces are re-added the Pad is silently
+        # refused. The snapshot must still be returned, with a warning.
+        selection.Clear()
+        selection.Search("Topology.Face,all")
+        face_count = int(selection.Count)
+        selection.Add(pad.com_object)
+        assert int(selection.Count) == face_count + 1
+        with pytest.warns(SelectionNotRestoredWarning):
+            edges = part.topology.edges()
+        assert len(edges) > 0
+
+        # References read before the restore must still drive a feature.
+        part.part_design.create_edge_fillet(fillet_name, edges[0], FILLET_RADIUS)
+        part.update()
+        assert part.is_up_to_date()
+    finally:
+        selection.Clear()
+        _cleanup(part, removals, sketch_name)
+
+    assert int(selection.Count) == 0
+    assert int(body.Sketches.Count) == sketches_before
+    assert int(body.Shapes.Count) == shapes_before

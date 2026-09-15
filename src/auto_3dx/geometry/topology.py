@@ -13,6 +13,10 @@ verified search scopes it to one feature.
 A snapshot is single-generation. It is stamped with the Part's model generation, and
 every consumer refuses it once the model has changed through the SDK
 (`docs/api-design.md` sections 5 and 7).
+
+The search replaces the editor's selection, so the user's selection is captured
+before it and restored afterwards. When CATIA silently refuses part of the restore,
+the snapshot is still returned and `SelectionNotRestoredWarning` is emitted.
 """
 
 from typing import Any
@@ -44,28 +48,40 @@ class Topology:
     def edges(self) -> EdgeSnapshot:
         """Takes a fresh snapshot of every edge of the solid.
 
-        This is read-only: it does not advance the model generation.
+        This is read-only: it does not advance the model generation, and the user's
+        CATIA selection is restored afterwards.
 
         Returns:
             An `EdgeSnapshot` stamped with the current generation.
 
         Raises:
-            Auto3dxError: If no editor selection is available, or the search
-                fails unexpectedly.
+            ValidationError: If no editor selection is available.
+            AutomationError: If the current selection cannot be read (nothing is
+                changed), or the search fails.
+
+        Warns:
+            SelectionNotRestoredWarning: If the selection did not fully come back.
+                The snapshot is still valid.
         """
         return take_edge_snapshot(self._selection, self._generation.value)
 
     def faces(self) -> FaceSnapshot:
         """Takes a fresh snapshot of every face of the solid.
 
-        This is read-only: it does not advance the model generation.
+        This is read-only: it does not advance the model generation, and the user's
+        CATIA selection is restored afterwards.
 
         Returns:
             A `FaceSnapshot` stamped with the current generation.
 
         Raises:
-            Auto3dxError: If no editor selection is available, or the search
-                fails unexpectedly.
+            ValidationError: If no editor selection is available.
+            AutomationError: If the current selection cannot be read (nothing is
+                changed), or the search fails.
+
+        Warns:
+            SelectionNotRestoredWarning: If the selection did not fully come back.
+                The snapshot is still valid.
         """
         return take_face_snapshot(self._selection, self._generation.value)
 

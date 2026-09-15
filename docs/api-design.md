@@ -257,7 +257,12 @@ part.part_design.create_shell("S1", faces[0], 2.0, 0.0)
 - `Edge.descriptor` is CATIA's BRep string, for logging and comparison only. It cannot be stored
   and resolved later: `CreateReferenceFromBRepName` failed in every context tried.
 - A snapshot is single-generation (section 5).
-- Taking a snapshot must not leave the user's CATIA selection changed. [Planned]
+- Taking a snapshot does not leave the user's CATIA selection changed. The selection is
+  captured before the search, restored afterwards and checked by count. When it cannot be
+  captured, the snapshot is refused with `AutomationError` before anything changes. When
+  CATIA silently refuses part of the restore (live: a Pad re-added after its own faces), the
+  snapshot is still returned and `SelectionNotRestoredWarning` is emitted: the selection is
+  already lost by then, so raising would only discard a valid snapshot.
 
 **Persistent semantic identity is not solved.** A future selector may choose an edge or face by
 measurable properties such as geometry type, normal, radius, area or position. No such selector
@@ -270,6 +275,10 @@ is public until the properties it depends on are live-verified and the choice is
 Status: Enforced. `tests/unit/test_errors.py` pins every class to its category, and
 `tests/unit/test_error_classification.py` pins that every module translates COM failures
 through `auto_3dx._com` and that guards raise by when they happen.
+
+Warnings sit outside this hierarchy, so `except Auto3dxError` never hides one. A warning
+reports a side effect the SDK could not fully undo after an operation that succeeded;
+`SelectionNotRestoredWarning(UserWarning)` is the only one.
 
 Errors are grouped by **what the caller can do about them**:
 
@@ -511,7 +520,7 @@ Status: Enforced by review.
 | Shared model generation: sketches, planes, parameters, formulas, constraints | 5 | Done |
 | One generation per CATIA Part across wrappers (COM identity verified live) | 5 | Planned |
 | `part.topology` replacing `part_design.snapshot_edges` / `snapshot_faces` | 7 | Done |
-| Topology snapshots restore the user's selection (restore verified live) | 7 | Planned |
+| Topology snapshots restore the user's selection | 7 | Done |
 | Error categories and `AutomationError` | 8 | Done |
 | One COM error translation module: `_com.py` exists | 8 | Done |
 | Every module translating COM failures through `_com.py` | 8 | Done |

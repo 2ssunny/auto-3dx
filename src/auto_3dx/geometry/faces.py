@@ -72,17 +72,12 @@ behaviour), and `take_face_snapshot` differs from `take_edge_snapshot` only
 in the query string. Collapsing the two *classes* into one shared base was
 deliberately not done: an `isinstance(x, Edge)`/`isinstance(x, Face)` check
 is exactly how `create_edge_fillet`/`create_shell` (etc.) refuse a reference
-of the wrong kind, the docstring narrative each one carries is specific to
-its own measured facts (see the section above), and this module cannot edit
-`edges.py` to make `Edge` share a base with `Face` even if that were
-otherwise a good idea -- the result would be `Face` alone refactored, not a
-true shared sibling relationship. What genuinely is the same mechanical
-routine -- `Clear()`, `Search(query)`, `Item(i).Reference` for `i` in
-`1..Count`, `Clear()` -- is factored into `_read_search_references` below,
-written as a standalone, query-parameterised function with no dependency on
-`Face`. It is offered here in a form that `geometry.edges.take_edge_snapshot`
-could be rewritten to call (its current body is the same four lines, just
-inlined), for whoever next has permission to edit that file.
+of the wrong kind, and the docstring narrative each one carries is specific
+to its own measured facts (see the section above). What genuinely is the same
+mechanical routine -- capture the user's selection, `Clear()`,
+`Search(query)`, `Item(i).Reference` for `i` in `1..Count`, restore the
+selection -- lives once in `geometry._topology_search.search_references`,
+which both snapshot functions call.
 """
 
 from collections.abc import Iterator, Sequence
@@ -90,7 +85,7 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.geometry.deletion import require_selection
+from auto_3dx.geometry._topology_search import search_references
 from auto_3dx.geometry.sketch import _wrap_com_error
 
 FACE_SEARCH_QUERY: str = "Topology.Face,all"
@@ -102,43 +97,6 @@ wrong kind of reference for `AddNewShell`/`AddNewThickness`/`AddNewHole`.
 This is the one string this module ever passes to `Search`
 (`docs/conventions.md` section 1.2.2.2, probe 37).
 """
-
-
-def _read_search_references(selection: Any, query: str) -> "list[Any]":
-    """Runs one `Selection.Search` and returns the raw `Reference`s it found.
-
-    This is the exact four-step routine `docs/conventions.md` section
-    1.2.2.2 verified for topology references in general, not just edges:
-    `Clear()`, `Search(query)`, then `Item(i).Reference` for `i` in
-    `1..Count`, then a trailing `Clear()` so the editor's selection is not
-    left showing every hit. `geometry.edges.take_edge_snapshot` inlines this
-    same body for `EDGE_SEARCH_QUERY`; it is written here as a standalone,
-    query-parameterised function (rather than folded into
-    `take_face_snapshot` directly) so it can be lifted into a shared module
-    and reused by both call sites once someone can edit `edges.py`.
-
-    Args:
-        selection: The raw CATIA `Selection` COM object from the editor.
-        query: The exact `Selection.Search` query string to run, e.g.
-            `FACE_SEARCH_QUERY` or `geometry.edges.EDGE_SEARCH_QUERY`.
-
-    Returns:
-        One raw `Reference` per hit, in search order.
-
-    Raises:
-        Auto3dxError: If `selection` is `None`, or the underlying COM call
-            fails unexpectedly.
-    """
-    require_selection(selection)
-    try:
-        selection.Clear()
-        selection.Search(query)
-        count = selection.Count
-        references = [selection.Item(position).Reference for position in range(1, count + 1)]
-        selection.Clear()
-    except pywintypes.com_error as error:
-        raise _wrap_com_error(error) from error
-    return references
 
 
 class Face:
@@ -334,10 +292,11 @@ def take_face_snapshot(selection: Any, generation: int = 0) -> FaceSnapshot:
     verified against a live session (`docs/conventions.md` section 1.2.2.2,
     probe 37): `Part.CreateReferenceFromObject` fails on a search hit here
     too, so each `Reference` must come from `SelectedElement.Reference`
-    instead. The exact call order matters and is reproduced here verbatim
-    via `_read_search_references`: `Clear()`, `Search(FACE_SEARCH_QUERY)`,
-    then `Item(i).Reference` for `i` in `1..Count`, then a trailing
-    `Clear()`.
+    instead. The exact call order matters and is reproduced verbatim by
+    `geometry._topology_search.search_references`: `Clear()`,
+    `Search(FACE_SEARCH_QUERY)`, then `Item(i).Reference` for `i` in
+    `1..Count`. The user's selection is captured before the search and
+    restored afterwards, so taking a snapshot does not change it.
 
     Args:
         selection: The raw CATIA `Selection` COM object from the editor.
@@ -351,10 +310,15 @@ def take_face_snapshot(selection: Any, generation: int = 0) -> FaceSnapshot:
         snapshot is refused once its owner has changed the model.
 
     Raises:
-        Auto3dxError: If `selection` is `None`, or the underlying COM call
-            fails unexpectedly.
+        ValidationError: If `selection` is `None`.
+        AutomationError: If the selection cannot be captured (nothing is
+            changed), or the search fails.
+
+    Warns:
+        SelectionNotRestoredWarning: If the selection did not fully come back.
+            The snapshot is still valid.
     """
-    references = _read_search_references(selection, FACE_SEARCH_QUERY)
+    references = search_references(selection, FACE_SEARCH_QUERY)
     faces = [
         Face(reference, position, generation)
         for position, reference in enumerate(references, start=1)

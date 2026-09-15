@@ -2352,16 +2352,17 @@ class PartDesign:
         both change after any modification (measured: 29, then 32 after one
         fillet, then 38, then 41) -- so take a new snapshot after a
         `create_edge_fillet`/`create_chamfer` call rather than reusing an old
-        one across a model change. See `geometry.edges` for the full
-        rationale, including why an `Edge` from an older snapshot remains
-        usable even though its `index` does not.
+        one across a model change; an older snapshot is refused. The user's
+        CATIA selection is restored afterwards, exactly as for
+        `part.topology.edges()`. See `geometry.edges` for the full rationale.
 
         Returns:
             A fresh `EdgeSnapshot`.
 
         Raises:
-            Auto3dxError: If no editor selection is available, or the
-                underlying COM call fails unexpectedly.
+            ValidationError: If no editor selection is available.
+            AutomationError: If the selection cannot be read, or the search
+                fails.
         """
         warnings.warn(
             "PartDesign.snapshot_edges() is deprecated; use part.topology.edges(), "
@@ -2650,14 +2651,16 @@ class PartDesign:
         reusing an old one across a model change. See `geometry.faces` for
         the full rationale, including which parts of it are independently
         measured for faces and which are carried over from the edge layer as
-        a conservative policy.
+        a conservative policy. The user's CATIA selection is restored
+        afterwards, exactly as for `part.topology.faces()`.
 
         Returns:
             A fresh `FaceSnapshot`.
 
         Raises:
-            Auto3dxError: If no editor selection is available, or the
-                underlying COM call fails unexpectedly.
+            ValidationError: If no editor selection is available.
+            AutomationError: If the selection cannot be read, or the search
+                fails.
         """
         warnings.warn(
             "PartDesign.snapshot_faces() is deprecated; use part.topology.faces(), "

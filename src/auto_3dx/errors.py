@@ -15,6 +15,10 @@ concrete class when it is not:
 CATIA, so there is nothing to clean up. Anything raised after a COM call was
 attempted must not be a `ValidationError`.
 
+Warnings are not errors and sit outside the hierarchy. They report a side effect the
+SDK could not fully undo after an operation that otherwise succeeded, such as
+`SelectionNotRestoredWarning`.
+
 This module is a leaf. Every other module may import it, and it imports nothing
 from the SDK.
 """
@@ -80,6 +84,18 @@ class AutomationError(Auto3dxError):
         """
         super().__init__(message)
         self.hresult = hresult
+
+
+# --- Warnings ----------------------------------------------------------------------
+
+
+class SelectionNotRestoredWarning(UserWarning):
+    """A topology snapshot succeeded, but the user's CATIA selection did not fully return.
+
+    The snapshot is valid and the model was not changed; only UI selection state was
+    lost. CATIA can silently refuse to re-add an item: live, a feature was dropped when
+    its own faces were already selected. Re-select in the CATIA UI if it matters.
+    """
 
 
 # --- Session -----------------------------------------------------------------------
