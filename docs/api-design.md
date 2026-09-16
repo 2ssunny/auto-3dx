@@ -559,4 +559,5 @@ Status: Enforced by review.
 | `part.inspect`: bodies, geometrical sets, topology counts | 11 | Done |
 | `part.inspect`: In-Work Object (`InWorkObjectInfo`) | 11 | Done |
 | `part.planes`: `list`/`names`/`get`, and cleanup without in-memory state | 4 | Done |
+| `sketch.support()` resolving user-defined planes, not only origin planes | 4 | Done |
 | File export | 12 | Probed: unavailable for PLM-backed documents |

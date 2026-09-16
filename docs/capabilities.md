@@ -7,8 +7,8 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **884 unit 통과**
-- 현재 라이브 검증: 2026-09-16 재실행 기준 **41 integration 통과**(수동으로 파라미터를
+- 현재 정적 검증: **896 unit 통과**
+- 현재 라이브 검증: 2026-09-16 재실행 기준 **42 integration 통과**(수동으로 파라미터를
   추가하지 않은 Part에서는 그중 1건이 skip된다). 실행 뒤
   모델이 실행 전 상태와 같았다
 
@@ -150,6 +150,12 @@ angled = part.planes.create_angle(
 - `ensure_offset`/`ensure_angle`은 없다. 이제 이름으로 찾는 절반(`get`)과 값을 읽는 절반
   (`offset`/`angle`/`base_display_name`)이 모두 있으므로 정직하게 만들 수 있지만, 이번
   변경 범위 밖이다. 재사용이 필요하면 `names()`/`get()`으로 먼저 확인하면 된다.
+- 사용자 정의 평면 위 스케치도 `sketch.support()`가 그 평면을 돌려준다. 스케치의
+  `GetAbsoluteAxisData`와 평면의 `GetOrigin`/`GetFirstAxis`/`GetSecondAxis`가 완전히 같다는
+  실측(conventions 1.7)에 근거한 동등 비교이며, 다른 프로세스에서 다시 찾은 스케치에도 통한다.
+  프레임이 같은 평면이 둘이면 고르지 않고 `None`이다.
+- **평면을 만든 뒤 그 평면에 스케치를 만들려면 먼저 `part.update()`를 불러야 한다.** 빼먹으면
+  `Sketches.Add`가 COM 오류로 거부한다(conventions 1.7).
 - `sketches.ensure(name, support=...)`의 `support`는 여전히 원점 평면 문자열 3개만
   받는다. offset/각도 평면 위 스케치의 재사용 여부는 `create()`로 직접 관리해야 한다.
 
@@ -487,7 +493,9 @@ part.sketches.count / .list() / .names() / .get(name)
              # ensure의 support는 원점 평면 문자열만 받는다 (아래)
              .remove(name)
 
-sketch.name / .rename(name) / .support() / .axis_data() / .element_names()
+sketch.name / .rename(name) / .axis_data() / .element_names()
+      .support()   # "XY"/"YZ"/"ZX" 문자열, part.planes의 평면(OffsetPlane/AnglePlane),
+                   # 또는 판정 불가면 None. create(support=...)에 그대로 다시 넘길 수 있다
       .set_center_line(line)          # Shaft / Groove용 회전축
       .constraints -> ConstraintCollection
 

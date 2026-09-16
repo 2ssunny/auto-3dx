@@ -257,9 +257,10 @@ GetAbsoluteAxisData(oAxisData) -> 9 doubles
 쓰기 가능: Name, CenterLine
 ```
 
-**`Sketch`에는 support/plane 속성이 없다.** 어느 평면에 붙었는지는
+**`Sketch`에는 support/plane 속성이 없다.** 2026-09-16에 live 객체의 멤버를 다시 확인해도
+`Support`/`Plane`/`Reference`는 없고 `Parent`는 `Sketches` 컬렉션이다. 어느 평면에 붙었는지는
 `GetAbsoluteAxisData`로만 알 수 있고, 실측값은 support마다 다음과 같이 구분된다
-(origin 3 + X방향 3 + Y방향 3):
+(origin 3 + X방향 3 + Y방향 3). 사용자 정의 평면 위의 스케치는 1.7절 방식으로 판정한다:
 
 ```text
 XY -> (0,0,0,  1,0,0,  0,1,0)
@@ -1030,6 +1031,35 @@ ExportData(path, "stl") -> 같은 실패
 
 시도 뒤에 활성 객체를 읽을 수 없는 editor(`CATIAEditor36`)가 새로 생겼다. 원인을 확실히 가리지
 못했으므로 export 시도는 반복하지 않는다.
+
+### 1.7 스케치 support 판정 (실측, 2026-09-16)
+
+사용자 정의 평면 위에 만든 스케치는 `support()`가 `None`이었다. 원점 평면 3개의 기준 프레임과만
+비교했기 때문이다. 평면 쪽이 자기 프레임을 알려준다는 것이 확인되어 이제 프레임을 맞춰 본다.
+
+```text
+plane.IsARefPlane()          -> 1
+plane.GetOrigin([0,0,0])     -> (0.0, 0.0, 35.0)      # 3개짜리 seed 필요, 인자 없으면 Type mismatch
+plane.GetFirstAxis([0,0,0])  -> (1.0, 0.0, 0.0)
+plane.GetSecondAxis([0,0,0]) -> (0.0, 1.0, 0.0)
+sketch.GetAbsoluteAxisData   -> (0,0,35, 1,0,0, 0,1,0)   # 평면 프레임과 완전히 같음
+```
+
+각도 평면(30도)에서도 같았다: 평면 `(0,0,0)/(0,1,0)/(-0.8660254037844386,0,0.5)`,
+스케치 `(0,0,0, 0,1,0, -0.866...,0,0.5)`. 축에 정렬되지 않은 프레임까지 그대로 일치하므로
+기하 추정이 아니라 **동등 비교**로 판정한다. 프레임이 같은 평면이 둘이면 고르지 않고 `None`이다.
+
+**원점 평면은 이 방법을 못 쓴다.** `OriginElements.PlaneXY`는 이 릴리스에서 `AnyObject`로 오고
+`GetOrigin`/`GetFirstAxis`/`GetSecondAxis`/`IsARefPlane`이 전부 `AttributeError`다. 그래서
+원점 3개는 검증된 상수 프레임으로 먼저 판정하고, 그다음에 `part.planes`의 평면과 비교한다.
+
+`MeasurableService`도 시도했다. `GetService("MeasurableService")`는 응답하지만
+`GetMeasurable(reference)`가 `Parameter not optional`로 실패했다. 평면 프레임 경로가 이미
+있으므로 더 파지 않았고, 이 서비스는 여전히 미검증이다.
+
+**평면을 만든 뒤에는 `Part.Update()`를 먼저 불러야 그 평면에 스케치를 만들 수 있다.** update 없이
+`sketches.create(support=plane)`를 부르면 `Sketches.Add`가 `The method Add failed`(0x80004005)로
+거부한다. 기존 live 테스트가 평면 생성 뒤 update를 부르고 있어 그동안 드러나지 않았다.
 
 ## 2. 코드 스타일
 

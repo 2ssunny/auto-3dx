@@ -34,12 +34,13 @@ still only accepts the three origin-plane strings.
 import contextlib
 import math
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pywintypes
 
 from auto_3dx._com import automation_error, format_hresult, hresult_of
 from auto_3dx._generation import ModelGeneration
+from auto_3dx.geometry._frames import plane_frame
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
@@ -109,6 +110,10 @@ _AXIS_DATA_BY_SUPPORT: dict[str, tuple[float, ...]] = {
 
 # COM failures translate in one place (`auto_3dx._com`, `docs/api-design.md`
 # section 8). The private name stays because sibling modules import it from here.
+if TYPE_CHECKING:
+    from auto_3dx.geometry.planes import Plane
+
+
 _wrap_com_error = automation_error
 
 
@@ -991,12 +996,18 @@ class SketchEditor:
 class Sketch:
     """Wraps a raw CATIA `Sketch` COM object.
 
-    A sketch has no support/plane property of its own; `support()` derives it
-    by comparing `GetAbsoluteAxisData` against the verified reference frames
-    in `_AXIS_DATA_BY_SUPPORT`.
+    A sketch has no support/plane property of its own, so `support()` derives it
+    from `GetAbsoluteAxisData`: first against the verified reference frames in
+    `_AXIS_DATA_BY_SUPPORT`, then against the frame each user-defined plane reports
+    (`geometry._frames`).
     """
 
-    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
+    def __init__(
+        self,
+        com_object: Any,
+        generation: ModelGeneration | None = None,
+        part_com_object: Any = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -1007,9 +1018,14 @@ class Sketch:
                 `ConstraintCollection`/`Constraint`/`SketchEditor` this
                 sketch hands out. A wrapper built directly from a raw COM
                 object gets its own, which nothing else shares.
+            part_com_object: The raw CATIA `Part` this sketch belongs to. Only
+                `support()` needs it, to compare this sketch's frame with the
+                user-defined planes in the Part. `SketchCollection` supplies it;
+                without it `support()` still resolves the three origin planes.
         """
         self._com_object = com_object
         self._generation = generation if generation is not None else ModelGeneration()
+        self._part_com_object = part_com_object
         self._editing = False
         self._constraints: ConstraintCollection | None = None
 
@@ -1120,17 +1136,31 @@ class Sketch:
                 "9 floats."
             ) from error
 
-    def support(self) -> str | None:
-        """Derives which origin plane this sketch is attached to.
+    def support(self) -> "str | Plane | None":
+        """Reports which plane this sketch is attached to.
 
-        Compares `axis_data()` against the verified reference frames for
-        `SUPPORT_XY`/`SUPPORT_YZ`/`SUPPORT_ZX` using `math.isclose` and
-        `AXIS_TOLERANCE`.
+        A sketch cannot be asked for its support directly (this release exposes no
+        such member), so its frame is compared with the frames of the planes it could
+        be on, using `math.isclose` and `AXIS_TOLERANCE`:
+
+        * the three origin planes, whose reference frames are verified constants;
+        * the user-defined planes in `part.planes`, each of which reports its own
+          frame. Live, a sketch's `GetAbsoluteAxisData` equalled its plane's
+          `GetOrigin`/`GetFirstAxis`/`GetSecondAxis` exactly, for an offset plane and
+          for an angle plane (`docs/conventions.md` 1.7), so this is an equality test
+          rather than a geometric guess.
+
+        The value mirrors what `SketchCollection.create` accepts as `support`, so a
+        rediscovered sketch's support can be passed straight back to it.
 
         Returns:
-            `SUPPORT_XY`, `SUPPORT_YZ`, or `SUPPORT_ZX` on a match, or `None`
-            if the sketch's axis frame does not match any of them (for
-            example, a sketch on a user-made plane).
+            `SUPPORT_XY`/`SUPPORT_YZ`/`SUPPORT_ZX` for a sketch on an origin plane;
+            the `OffsetPlane`/`AnglePlane` it sits on when exactly one user-defined
+            plane has the same frame; `None` when neither matches. `None` therefore
+            means "could not be determined", not "no support": a sketch on a face, on
+            a plane outside `part.planes`, or one whose frame was moved afterwards
+            also reports `None`, and so does any sketch on a Part this wrapper was
+            built without.
 
         Raises:
             Auto3dxError: If the underlying COM call fails unexpectedly.
@@ -1139,6 +1169,35 @@ class Sketch:
         for support, reference in _AXIS_DATA_BY_SUPPORT.items():
             if _axis_data_matches(actual, reference):
                 return support
+        return self._matching_user_plane(actual)
+
+    def _matching_user_plane(self, axis_data: "tuple[float, ...]") -> "Plane | None":
+        """Finds the user-defined plane whose frame equals this sketch's frame.
+
+        Args:
+            axis_data: This sketch's `GetAbsoluteAxisData` result.
+
+        Returns:
+            The single matching plane, or `None` when this wrapper has no Part, no
+            plane matches, or -- for two coplanar planes sharing one frame -- the
+            match would be a guess.
+
+        Raises:
+            Auto3dxError: If enumerating the planes fails unexpectedly.
+        """
+        if self._part_com_object is None:
+            return None
+        # Imported here, not at module scope: `geometry.planes` imports this module.
+        from auto_3dx.geometry.planes import PlaneCollection
+
+        planes = PlaneCollection(self._part_com_object, generation=self._generation)
+        matches = [
+            plane
+            for plane in planes.list()
+            if _axis_data_matches(axis_data, plane_frame(plane.com_object) or ())
+        ]
+        if len(matches) == 1:
+            return matches[0]
         return None
 
     def element_names(self) -> "list[str]":
@@ -1422,7 +1481,9 @@ class SketchCollection:
                 com_object = sketches.Item(index)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            result.append(Sketch(com_object, self._generation))
+            result.append(
+                Sketch(com_object, self._generation, self._part_com_object)
+            )
         return result
 
     # Return annotation is quoted: by this point `list` is already shadowed in
@@ -1536,7 +1597,7 @@ class SketchCollection:
                 com_object = self._sketches().Add(plane)
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
-            sketch = Sketch(com_object, self._generation)
+            sketch = Sketch(com_object, self._generation, self._part_com_object)
             # The rename is applied directly (not via `sketch.rename()`) so
             # this stays a single mutation instead of a nested one.
             try:

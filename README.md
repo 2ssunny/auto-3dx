@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 884 통과 | 41 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 896 통과 | 42 통과 |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -361,6 +361,26 @@ angled = part.planes.create_angle(
 )
 sketch_on_angle = part.sketches.create("TILTED_SKETCH", support=angled)
 ```
+
+평면을 만든 뒤 그 평면에 스케치를 만들기 전에는 `part.update()`를 한 번
+불러야 합니다. 빼먹으면 CATIA가 스케치 추가를 거부합니다.
+
+다시 찾은 스케치는 자기가 올라앉은 평면을 알려줍니다.
+
+```python
+sketch = part.sketches.get("TOP_SKETCH")
+support = sketch.support()
+# "XY"/"YZ"/"ZX" 문자열이거나, part.planes의 평면이거나, 판정 불가면 None
+if not isinstance(support, str) and support is not None:
+    print(support.name, support.offset)
+
+part.sketches.create("ANOTHER_SKETCH", support=support)   # 그대로 다시 쓸 수 있습니다
+```
+
+스케치에는 support 속성이 없어서, 스케치의 절대 축 프레임과 평면이 보고하는
+프레임을 비교해 판정합니다. 두 값이 완전히 일치하는 것을 offset 평면과 각도
+평면 모두에서 실측했습니다. 프레임이 같은 평면이 둘이면 추측하지 않고 `None`을
+돌려줍니다.
 
 이 컬렉션이 만드는 평면과 각도 평면의 축 점·축 선은 전부 하나의 기하 세트
 (`HybridBody`, 이름 `auto_3dx_Planes`)에 들어갑니다. `remove(plane)`은 평면
@@ -727,8 +747,8 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 884개입니다. B428_Cloud
-live 통합 테스트는 41개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 896개입니다. B428_Cloud
+live 통합 테스트는 42개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
 중 1건은 skip됩니다. 최근 실행한 Part에는 그 파라미터가 있어 40개가 모두 통과했습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 

@@ -37,7 +37,7 @@ from auto_3dx.errors import (  # noqa: E402
     NoActivePartError,
     PlaneNotFoundError,
 )
-from auto_3dx.geometry.planes import GEOMETRICAL_SET_NAME  # noqa: E402
+from auto_3dx.geometry.planes import GEOMETRICAL_SET_NAME, OffsetPlane  # noqa: E402
 
 PLANE_OFFSET = 30.0
 PLANE_ANGLE = 30.0
@@ -212,4 +212,57 @@ def test_a_fresh_collection_finds_and_removes_an_existing_plane(part: Any) -> No
         part.update()
 
     assert part.planes.names() == []
+    assert part.is_up_to_date()
+
+
+def test_a_rediscovered_sketch_reports_its_user_plane_support(part: Any) -> None:
+    """The acceptance-test gap: support() used to be None for a user-defined plane."""
+    if part.planes.names():
+        pytest.skip("The Part already holds SDK planes; they are not ours to remove.")
+    token = uuid.uuid4().hex[:8].upper()
+    plane_name = f"AUTO3DX_IT_SUPPORT_PLANE_{token}"
+    sketch_name = f"AUTO3DX_IT_SUPPORT_SKETCH_{token}"
+    origin_sketch_name = f"AUTO3DX_IT_SUPPORT_XY_{token}"
+
+    try:
+        plane = part.planes.create_offset(plane_name, "XY", PLANE_OFFSET)
+        part.update()
+        part.sketches.create(sketch_name, support=plane)
+        part.sketches.create(origin_sketch_name, support="XY")
+        part.update()
+
+        # A second wrapper shares nothing in memory with the first: whatever it
+        # resolves, it resolved from the model.
+        fresh = Catia.attach().active_part()
+        support = fresh.sketches.get(sketch_name).support()
+
+        assert isinstance(support, OffsetPlane)
+        assert support.name == plane_name
+        assert support.offset == pytest.approx(PLANE_OFFSET)
+        assert support.com_object == fresh.planes.get(plane_name).com_object
+
+        # The support round-trips into the call that takes one.
+        reused = f"{sketch_name}_REUSED"
+        fresh.sketches.create(reused, support=support)
+        fresh.update()
+        assert fresh.sketches.get(reused).support().name == plane_name
+        fresh.sketches.remove(reused)
+        fresh.update()
+
+        # A sketch on an origin plane still reports its support string.
+        assert fresh.sketches.get(origin_sketch_name).support() == "XY"
+    finally:
+        for name in (f"{sketch_name}_REUSED", sketch_name, origin_sketch_name):
+            try:
+                part.sketches.remove(name)
+            except Auto3dxError:
+                pass
+        try:
+            part.planes.remove_geometrical_set()
+        except Auto3dxError:
+            pass
+        part.update()
+
+    assert part.planes.names() == []
+    assert sketch_name not in part.inspect.sketches()
     assert part.is_up_to_date()
