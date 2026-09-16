@@ -986,6 +986,36 @@ InWorkObject = 원래 객체       AUTO3DX_BASE_PAD  Pad   main=False
 이 읽기로 `part.inspect.in_work_object()`를 만들었다. 통합 테스트 세션은 In-Work Object도
 시작 시 저장하고 끝날 때 되돌린다(`tests/integration/conftest.py`).
 
+### 1.6 평면 재발견 (실측, 2026-09-16)
+
+`PlaneCollection`이 만든 기하 세트를 인스턴스에 들고 있었기 때문에, 파이썬 프로세스가
+끝나면 그 안의 평면을 찾지도 지우지도 못했다. 이제 매번 모델에서 찾는다.
+
+```text
+Part.HybridBodies.Count / Item(i).Name        -> 동작 (auto_3dx_Planes 찾기)
+HybridBody.HybridShapes.Count / Item(i).Name  -> 동작
+type(HybridShapes.Item(i)).__name__           -> HybridShapePlaneOffset / HybridShapePlaneAngle
+                                                 HybridShapePointCoord / HybridShapeLinePtPt
+```
+
+`create_angle`이 만드는 축 점 2개와 축 선도 같은 세트에 있으므로, 평면만 돌려주도록
+타입 이름으로 거른다. offset 평면은 `OffsetPlane`, 각도 평면은 `AnglePlane`으로 감싸고
+`Offset.Value`(40.0)와 `Angle.Value`(30.0)를 그대로 읽었다.
+
+**별도 프로세스 검증 (A/B/C, 공개 API만 사용).**
+
+```text
+A: create_offset("AUTO3DX_LIFECYCLE_PLANE", "XY", 40) + update -> names() ['AUTO3DX_LIFECYCLE_PLANE']
+   정리하지 않고 종료
+B: 새 인터프리터로 attach -> names()에서 A의 평면 발견, get()으로 offset 40.0,
+   base_display_name 'xy plane' -> remove(plane) -> remove_geometrical_set() -> update
+   -> names() [] , get()은 PlaneNotFoundError
+C: 새 인터프리터로 inspect -> 기하 세트 0개, 평면 0개, feature/스케치/파라미터/부피/
+   In-Work Object가 A 이전 기준과 같음
+```
+
+세 프로세스 모두 저장·propagate·export를 하지 않았고 raw COM도 쓰지 않았다.
+
 **export는 이 설치본에서 쓸 수 없다.** 유일한 Automation 경로는
 `Application.Documents`에서 `PartDocument.Part == Part`로 문서를 찾아
 `PartDocument.ExportData(path, format)`을 부르는 것이다. `Documents`에는 CATPCCModel

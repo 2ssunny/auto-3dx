@@ -35,7 +35,9 @@ from auto_3dx.errors import (  # noqa: E402
     CatiaConnectionError,
     NoActiveEditorError,
     NoActivePartError,
+    PlaneNotFoundError,
 )
+from auto_3dx.geometry.planes import GEOMETRICAL_SET_NAME  # noqa: E402
 
 PLANE_OFFSET = 30.0
 PLANE_ANGLE = 30.0
@@ -158,3 +160,56 @@ def test_origin_plane_strings_still_work(part: Any) -> None:
         part.update()
 
     assert int(body.Sketches.Count) == sketches_before
+
+
+def test_a_fresh_collection_finds_and_removes_an_existing_plane(part: Any) -> None:
+    """The lifecycle gap: planes must be findable after the collection that made them.
+
+    A second `Part` wrapper stands in for a later process here (a real second
+    process is exercised by the scratch validation): it shares nothing in memory
+    with the first collection, so everything it finds it found in the model.
+    """
+    if part.planes.names():
+        pytest.skip("The Part already holds SDK planes; they are not ours to remove.")
+    token = uuid.uuid4().hex[:8].upper()
+    plane_name = f"AUTO3DX_IT_LIFECYCLE_{token}"
+
+    try:
+        part.planes.create_offset(plane_name, "XY", PLANE_OFFSET)
+        part.update()
+
+        fresh = Catia.attach().active_part()
+        assert fresh.planes is not part.planes
+        assert plane_name in fresh.planes.names()
+
+        found = fresh.planes.get(plane_name)
+        assert found.offset == PLANE_OFFSET
+        assert found.base_display_name
+
+        # A fresh collection appends to the existing set instead of adding a second.
+        second_name = f"{plane_name}_B"
+        fresh.planes.create_offset(second_name, "XY", PLANE_OFFSET * 2)
+        fresh.update()
+        sets = [item.name for item in fresh.inspect.geometrical_sets()]
+        assert sets.count(GEOMETRICAL_SET_NAME) == 1
+        assert fresh.planes.names() == [plane_name, second_name]
+
+        with pytest.raises(PlaneNotFoundError):
+            fresh.planes.get(f"{plane_name}_MISSING")
+
+        # Cleanup through the collection that never created any of it.
+        fresh.planes.remove_geometrical_set()
+        fresh.update()
+        assert fresh.planes.names() == []
+        assert GEOMETRICAL_SET_NAME not in [
+            item.name for item in fresh.inspect.geometrical_sets()
+        ]
+    finally:
+        try:
+            part.planes.remove_geometrical_set()
+        except Auto3dxError:
+            pass
+        part.update()
+
+    assert part.planes.names() == []
+    assert part.is_up_to_date()

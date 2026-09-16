@@ -41,10 +41,10 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 868 통과 | 40 통과 |
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 | 실행 안 함 |
-| Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 | 38 통과, 1 skip (In-Work Object 검사 추가 전) |
-| Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 | 개발 중 실행, 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 884 통과 | 41 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
+| Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
+| Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
 
 두 live 실행 모두 실행 전후 모델, selection, In-Work Object가 같았습니다.
 
@@ -368,11 +368,27 @@ sketch_on_angle = part.sketches.create("TILTED_SKETCH", support=angled)
 지우려면 `remove_geometrical_set()`으로 이 컬렉션이 만든 것 전부를 지워야
 합니다.
 
-`ensure_offset`/`ensure_angle`은 제공하지 않습니다. 기하 세트 안의 도형을
-이름으로 다시 찾아 읽는 경로가 검증되지 않았기 때문입니다. 재사용이 필요하면
-호출자가 반환된 `Plane` 객체를 직접 들고 있어야 합니다. `sketches.ensure()`의
-`support`도 여전히 원점 평면 문자열 3개만 받으므로, offset/각도 평면 위
-스케치의 재사용은 `sketches.create()`로 직접 관리해야 합니다.
+만든 평면은 모델에서 다시 찾을 수 있습니다. 파이썬 프로세스를 새로 시작해도
+`auto_3dx_Planes` 기하 세트를 Part에서 찾아 그 안의 평면을 돌려주므로, 이전
+실행이 남긴 평면을 정리할 수 있습니다.
+
+```python
+part.planes.names()                 # ['TOP_OFFSET', 'TILTED']
+plane = part.planes.get("TOP_OFFSET")   # 없으면 PlaneNotFoundError
+print(plane.offset, plane.base_display_name)
+
+part.planes.remove(plane)           # 평면 하나만
+part.planes.remove_geometrical_set()    # 남은 축 점·선까지 전부
+part.update()
+```
+
+각도 평면의 축 점 2개와 축 선은 평면이 아니라서 `list()`/`names()`에는 나오지
+않지만 `remove_geometrical_set()`은 함께 지웁니다.
+
+`ensure_offset`/`ensure_angle`은 아직 제공하지 않습니다. 재사용이 필요하면
+`names()`/`get()`으로 먼저 확인하면 됩니다. `sketches.ensure()`의 `support`도
+여전히 원점 평면 문자열 3개만 받으므로, offset/각도 평면 위 스케치의 재사용은
+`sketches.create()`로 직접 관리해야 합니다.
 
 ## Part Design
 
@@ -711,8 +727,8 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 868개입니다. B428_Cloud
-live 통합 테스트는 40개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 884개입니다. B428_Cloud
+live 통합 테스트는 41개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
 중 1건은 skip됩니다. 최근 실행한 Part에는 그 파라미터가 있어 40개가 모두 통과했습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 

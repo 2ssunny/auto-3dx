@@ -91,7 +91,7 @@ Conversion from CATIA's internal SI units happens at the boundary, never in call
 
 ## 4. Collection conventions
 
-Status: Implemented for parameters, sketches, formulas and constraints. Planes, patterns and
+Status: Implemented for parameters, sketches, formulas, constraints and planes. Patterns and
 topology are documented exceptions.
 
 A collection holding **one kind** of named object offers, where live evidence supports it:
@@ -118,7 +118,9 @@ Rules that apply everywhere:
 
 1. **An operation exists only with live evidence.** If enumerating a CATIA collection has never
    been driven end to end, the wrapper does not offer `list()` or `get()` for it, and the gap is
-   documented. `PlaneCollection` has no `list()` for this reason.
+   documented. `PlaneCollection` had no `list()` for this reason until probe 38 drove
+   `HybridBodies` and `HybridShapes` end to end; it now offers `list`/`names`/`get`, and still no
+   `ensure_*`: that is a deliberate scope choice, not a missing capability.
 2. **Names are not unique in CATIA.** `get` enumerates and counts matches. Two matches raise
    `AmbiguousNameError`; it never silently picks the first.
 3. **Existence is decided by enumeration**, never by catching a COM failure from a name lookup.
@@ -556,4 +558,5 @@ Status: Enforced by review.
 | `part.inspect`: name, rebuild status, features, sketches, user parameters | 11 | Done |
 | `part.inspect`: bodies, geometrical sets, topology counts | 11 | Done |
 | `part.inspect`: In-Work Object (`InWorkObjectInfo`) | 11 | Done |
+| `part.planes`: `list`/`names`/`get`, and cleanup without in-memory state | 4 | Done |
 | File export | 12 | Probed: unavailable for PLM-backed documents |

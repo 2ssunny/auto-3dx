@@ -192,6 +192,10 @@ class FormulaNotFoundError(NotFoundError):
     """Raised when a formula cannot be found by name in a Relations collection."""
 
 
+class PlaneNotFoundError(NotFoundError):
+    """Raised when a plane cannot be found by name in this SDK's geometrical set."""
+
+
 class ConstraintNotFoundError(NotFoundError):
     """Raised when a constraint cannot be found by name in a Constraints collection."""
 

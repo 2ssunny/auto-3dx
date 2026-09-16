@@ -60,24 +60,25 @@ once the operation has actually reached CATIA, so a request rejected by
 validation first (a bad name, a non-finite offset, an unsupported support)
 leaves the generation untouched.
 
-**Why there is no `ensure_offset`/`ensure_angle`.** This project's `ensure_*`
-rule (`docs/conventions.md` 1.3) is that a name match alone never justifies
-reusing geometry; only a value read back and compared does. For an offset
-plane, `Offset.Value` and the base plane's `Plane.DisplayName` are both
-verified readable, so that comparison could be made honestly. But making it
-requires *finding* the candidate plane by name first, and unlike
-`Sketches`/`Shapes`/`Parameters` -- whose `Count`/`Item(i)` enumeration was
-exercised end to end in this project's probes (created, then successfully
-read back) -- a geometrical set's own shape collection has never been
-enumerated that way here; `HybridShapes` appears only as a declared, readable
-member name in a type-library reflection dump (probe 29), never driven with
-`Count`/`Item(i)` and matched against a shape whose name we just set. Without
-that other half, a by-name lookup could easily return nothing (or the wrong
-thing) while looking like it works. Exactly like `ConstRadEdgeFillet`/
-`Chamfer` in `geometry.part_design`, a missing `ensure_*` is safer than one
-resting on an unverified enumeration, so `create_offset`/`create_angle` are
-the only creation paths this module offers; a caller wanting idempotency
-across runs must track the returned `Plane` itself.
+**Rediscovery, not memory.** The geometrical set and the planes in it are found
+in the live Part every time they are needed: `Part.HybridBodies` is enumerated
+with `Count`/`Item(i)` and matched on `Name`, and the set's `HybridShapes` the
+same way. Both enumerations are live-verified (probe 38, 2026-09-15: a set's
+`HybridShapes.Count`/`Item(i).Name` and the type name `HybridShapePlaneOffset`
+were read back for a plane this module had just created). Nothing is cached
+between calls, so a `PlaneCollection` built in a new process -- or a second one
+built in this process -- finds the set this SDK already created instead of
+adding another beside it, and `remove_geometrical_set` can clean up a set it
+never created itself. That is what `list`/`names`/`get` expose to callers.
+
+**Why there is still no `ensure_offset`/`ensure_angle`.** This project's
+`ensure_*` rule (`docs/conventions.md` 1.3) is that a name match alone never
+justifies reusing geometry; only a value read back and compared does. Both
+halves now exist -- the lookup above, and `Offset.Value`/`Plane.DisplayName`
+read-back -- so an honest `ensure_offset` could be written. It is deliberately
+not part of this module yet: `create_offset`/`create_angle` remain the only
+creation paths, and a caller wanting idempotency can now check `get`/`names`
+first instead of tracking the returned `Plane` object itself.
 """
 
 import math
@@ -87,9 +88,11 @@ import pywintypes
 
 from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
+    AmbiguousNameError,
     Auto3dxError,
     ParameterTypeError,
     PartialCreationError,
+    PlaneNotFoundError,
     UnsupportedSupportError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
@@ -109,8 +112,17 @@ GEOMETRICAL_SET_NAME: str = "auto_3dx_Planes"
 
 A single shared geometrical set (rather than one per plane) mirrors probe 36,
 where every offset plane, angle plane, and the angle plane's axis points and
-line all live in one `HybridBody`.
+line all live in one `HybridBody`. The name is also how the set is found again
+in a later process: `Part.HybridBodies` is enumerated and matched on `Name`.
 """
+
+PLANE_OFFSET_KIND: str = "HybridShapePlaneOffset"
+"""CATIA type name of a plane made by `AddNewPlaneOffset` (read back live, probe 38)."""
+
+PLANE_ANGLE_KIND: str = "HybridShapePlaneAngle"
+"""CATIA type name of a plane made by `AddNewPlaneAngle` (`docs/conventions.md` 1.2.7)."""
+
+_FIRST_COM_INDEX = 1
 
 
 def _validate_finite_length(value: Any, label: str) -> float:
@@ -376,13 +388,29 @@ class AnglePlane(Plane):
             raise _wrap_com_error(error) from error
 
 
-class PlaneCollection:
-    """Creates offset and angled hybrid planes on a Part.
+_PLANE_WRAPPER_BY_KIND: "dict[str, type[Plane]]" = {
+    PLANE_OFFSET_KIND: OffsetPlane,
+    PLANE_ANGLE_KIND: AnglePlane,
+}
+"""The plane kinds this module creates, and the wrapper each is read back as.
 
-    Every plane this collection creates lives in one lazily-created
-    `HybridBody` named `GEOMETRICAL_SET_NAME`, cached on this instance for
-    its lifetime -- matching probe 36, where a single geometrical set holds
-    every plane, plus the angle plane's axis points and line.
+A geometrical set also holds the points and lines `create_angle` builds for an
+angle plane's axis. Those are not planes, so `list`/`names`/`get` skip anything
+whose type name is not a key here; `remove_geometrical_set` still removes them.
+"""
+
+
+class PlaneCollection:
+    """Creates, finds and removes offset and angled hybrid planes on a Part.
+
+    Every plane this collection creates lives in one `HybridBody` named
+    `GEOMETRICAL_SET_NAME` -- matching probe 36, where a single geometrical set
+    holds every plane, plus the angle plane's axis points and line.
+
+    That set is looked up in the live Part whenever it is needed, never
+    remembered between calls, so a collection obtained after a restart finds the
+    set an earlier process created: `list`, `names` and `get` report the planes
+    in it, and `remove_geometrical_set` removes it whoever created it.
     """
 
     def __init__(
@@ -400,17 +428,17 @@ class PlaneCollection:
                 `support`; `MainBody` and `InWorkObject` are used by the
                 in-work-object discipline (see the module docstring).
             selection: The raw CATIA `Selection` COM object from the editor.
-                Required only by `remove`, because neither `HybridBodies` nor
-                a `HybridBody` exposes a verified `Remove` method and deletion
-                has to go through the editor's selection, exactly as it does
-                for sketches and solid features. Creating works without it.
+                Required only by `remove` and `remove_geometrical_set`, because
+                neither `HybridBodies` nor a `HybridBody` exposes a verified
+                `Remove` method and deletion has to go through the editor's
+                selection, exactly as it does for sketches and solid features.
+                Creating and looking up work without it.
             generation: The owning Part's model generation. A standalone
                 instance gets its own, which no other wrapper shares; obtain
                 `PlaneCollection` from a `Part` instead.
         """
         self._part_com_object = part_com_object
         self._selection = selection
-        self._hybrid_body: Any = None
         # Shared with the owning Part and everything else reachable from it
         # (`docs/api-design.md` section 5). create_offset/create_angle/remove/
         # remove_geometrical_set each advance it exactly once per call.
@@ -473,23 +501,29 @@ class PlaneCollection:
         Returns:
             The raw CATIA `HybridBody` COM object.
 
+        An existing set is found in the Part first, so a collection built after
+        a restart -- or a second collection in this process -- appends to the
+        set this SDK already created instead of adding another beside it.
+
+        Returns:
+            The raw CATIA `HybridBody` COM object.
+
         Raises:
+            AmbiguousNameError: If the Part holds more than one geometrical set
+                named `GEOMETRICAL_SET_NAME`.
             PartialCreationError: If the geometrical set was created but the
-                follow-up rename failed. It is still cached and usable under
-                its default CATIA name; a retry will not create a second one
-                on top of it.
+                follow-up rename failed. It exists and is usable under its
+                default CATIA name, but it cannot be found again by name, so it
+                has to be removed by hand.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        if self._hybrid_body is not None:
-            return self._hybrid_body
+        existing = self._find_geometrical_set()
+        if existing is not None:
+            return existing
         try:
             hybrid_body = self._part_com_object.HybridBodies.Add()
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        # Cached before the rename is even attempted: the geometrical set
-        # already exists in the model at this point, and a later retry must
-        # not call HybridBodies.Add() again on top of it.
-        self._hybrid_body = hybrid_body
         try:
             hybrid_body.Name = GEOMETRICAL_SET_NAME
         except pywintypes.com_error as error:
@@ -497,12 +531,82 @@ class PlaneCollection:
             raise PartialCreationError(
                 "Created the geometrical set that holds every plane this "
                 f"collection creates, but failed to rename it to "
-                f"{GEOMETRICAL_SET_NAME!r}; it is still usable, under its "
-                "default CATIA name, and is already cached so a retry will "
-                "not create a second one."
+                f"{GEOMETRICAL_SET_NAME!r}. It is usable under its default CATIA "
+                "name, but this collection finds its set by name, so it will not "
+                "be reused and has to be removed in the CATIA user interface."
             ) from error
         self._reclaim_main_body()
-        return self._hybrid_body
+        return hybrid_body
+
+    def _hybrid_bodies(self) -> Any:
+        """Returns the raw `Part.HybridBodies` collection.
+
+        Returns:
+            The raw CATIA `HybridBodies` COM object.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return self._part_com_object.HybridBodies
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _find_geometrical_set(self) -> Any:
+        """Finds this module's geometrical set in the live Part, by name.
+
+        Enumerating `HybridBodies` with `Count`/`Item(i)` and reading `Name` is
+        live-verified (probe 38). This is what makes the collection stateless:
+        nothing is remembered from an earlier call or an earlier process.
+
+        Returns:
+            The raw `HybridBody` named `GEOMETRICAL_SET_NAME`, or `None` when the
+            Part has no such set.
+
+        Raises:
+            AmbiguousNameError: If two or more sets share that name, which a
+                name-based lookup cannot safely resolve.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        hybrid_bodies = self._hybrid_bodies()
+        matches = []
+        try:
+            count = int(hybrid_bodies.Count)
+            for index in range(_FIRST_COM_INDEX, count + _FIRST_COM_INDEX):
+                candidate = hybrid_bodies.Item(index)
+                if candidate.Name == GEOMETRICAL_SET_NAME:
+                    matches.append(candidate)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if len(matches) > 1:
+            raise AmbiguousNameError(
+                f"{len(matches)} geometrical sets are named {GEOMETRICAL_SET_NAME!r}; "
+                "a name-based lookup cannot safely pick one. Remove the extra set in "
+                "the CATIA user interface."
+            )
+        return matches[0] if matches else None
+
+    def _shapes_in_set(self, hybrid_body: Any) -> "list[Any]":
+        """Enumerates one geometrical set's hybrid shapes, in model-tree order.
+
+        Args:
+            hybrid_body: The raw `HybridBody` to read.
+
+        Returns:
+            Every raw shape in it.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            shapes = hybrid_body.HybridShapes
+            count = int(shapes.Count)
+            return [
+                shapes.Item(index)
+                for index in range(_FIRST_COM_INDEX, count + _FIRST_COM_INDEX)
+            ]
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
 
     def _append(self, shape: Any, name: str) -> Any:
         """Names a hybrid shape and appends it to the shared geometrical set.
@@ -711,6 +815,80 @@ class PlaneCollection:
             self._append(raw, name)
         return AnglePlane(raw, self._generation)
 
+    def list(self) -> "list[Plane]":
+        """Lists the planes this SDK created, read fresh from the live Part.
+
+        The planes are found through the geometrical set named
+        `GEOMETRICAL_SET_NAME`, so they are still found after the process that
+        created them has exited. This is read-only: it does not advance the model
+        generation and does not create the set.
+
+        The axis points and line `create_angle` builds are not planes and are not
+        listed; `remove_geometrical_set` still removes them.
+
+        Returns:
+            One `OffsetPlane`/`AnglePlane` per plane in the set, in model-tree
+            order. Empty when the Part has no such set.
+
+        Raises:
+            AmbiguousNameError: If two or more geometrical sets share the name.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        hybrid_body = self._find_geometrical_set()
+        if hybrid_body is None:
+            return []
+        planes = []
+        for shape in self._shapes_in_set(hybrid_body):
+            wrapper = _PLANE_WRAPPER_BY_KIND.get(type(shape).__name__)
+            if wrapper is not None:
+                planes.append(wrapper(shape, self._generation))
+        return planes
+
+    def names(self) -> "list[str]":
+        """Lists the names of the planes this SDK created.
+
+        Returns:
+            One name per plane, in the same order as `list`. Empty when the Part
+            has no geometrical set of this module's name.
+
+        Raises:
+            AmbiguousNameError: If two or more geometrical sets share the name.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return [plane.name for plane in self.list()]
+
+    def get(self, name: str) -> Plane:
+        """Finds one plane this SDK created, by name.
+
+        Args:
+            name: The plane's name, as `names` reports it.
+
+        Returns:
+            The matching `OffsetPlane`/`AnglePlane`. It can be passed straight to
+            `sketches.create(..., support=plane)` or to `remove`.
+
+        Raises:
+            PlaneNotFoundError: If no plane in the set has that name. Raised only
+                after enumerating the set, so it means the plane is really absent.
+            AmbiguousNameError: If two planes share the name, which CATIA allows
+                and this lookup cannot resolve.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        planes = self.list()
+        matches = [plane for plane in planes if plane.name == name]
+        if not matches:
+            raise PlaneNotFoundError(
+                f"No plane named {name!r} was found in the geometrical set "
+                f"{GEOMETRICAL_SET_NAME!r}. Planes that are there: "
+                f"{[plane.name for plane in planes]}."
+            )
+        if len(matches) > 1:
+            raise AmbiguousNameError(
+                f"{len(matches)} planes are named {name!r}; a name-based lookup "
+                "cannot safely pick one."
+            )
+        return matches[0]
+
     def remove(self, plane: Plane) -> None:
         """Deletes one plane from the model.
 
@@ -757,25 +935,28 @@ class PlaneCollection:
         contents, so every plane this collection created goes with it, along
         with anything else that happens to live in a set of the same name.
 
-        Does nothing if no set has been created yet, so it is safe to call in
-        a `finally`. It does not call `Part.Update()`, and it never saves.
+        The set is found in the live Part by name, so this removes one created by
+        an earlier process or by another `PlaneCollection` just as well as one
+        created through this instance.
+
+        Does nothing if the Part has no such set, so it is safe to call in a
+        `finally`. It does not call `Part.Update()`, and it never saves.
 
         Raises:
+            AmbiguousNameError: If two or more geometrical sets share the name.
             Auto3dxError: If no editor selection is available, or the
                 deletion failed.
         """
-        if self._hybrid_body is None:
-            # Nothing was ever created, so there is nothing to touch in CATIA
-            # and no reason to advance the generation (`docs/api-design.md`
+        hybrid_body = self._find_geometrical_set()
+        if hybrid_body is None:
+            # There is no such set in the model, so there is nothing to touch in
+            # CATIA and no reason to advance the generation (`docs/api-design.md`
             # section 5.2: only a change made through the SDK advances it).
             return
         # One mutation for the whole operation, same reasoning as remove().
         with self._generation.mutation():
             delete_via_selection(
-                self._selection, self._hybrid_body, f"geometrical set {GEOMETRICAL_SET_NAME!r}"
+                self._selection, hybrid_body, f"geometrical set {GEOMETRICAL_SET_NAME!r}"
             )
-            # The cache must go too, or the next create would append to a set
-            # that no longer exists in the model.
-            self._hybrid_body = None
             self._reclaim_main_body()
 

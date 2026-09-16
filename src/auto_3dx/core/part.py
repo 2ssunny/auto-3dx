@@ -152,10 +152,11 @@ class Part:
     def planes(self) -> PlaneCollection:
         """PlaneCollection: Offset and angled planes to sketch on.
 
-        Built on first access and cached afterwards. The cache matters here
-        more than elsewhere: the collection owns the one geometrical set every
-        plane it creates is appended to, so a fresh collection would create a
-        second set.
+        Built on first access and cached afterwards, like every other namespace
+        here. The collection itself holds no state: it finds its geometrical set
+        and its planes in the live Part, so a collection built in a later process
+        sees the planes an earlier one created (``planes.list()``/``names()``/
+        ``get(name)``) and can remove them.
 
         A plane from here can be passed straight to
         ``sketches.create(name, support=plane)``; the three origin-plane

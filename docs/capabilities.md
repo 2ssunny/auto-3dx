@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **868 unit 통과**
-- 현재 라이브 검증: 이번 세션의 아키텍처 변경 이후 2026-09-15 재실행 기준 **40 integration
-  통과**(수동으로 파라미터를 추가하지 않은 Part에서는 그중 1건이 skip된다). 실행 뒤
+- 현재 정적 검증: **884 unit 통과**
+- 현재 라이브 검증: 2026-09-16 재실행 기준 **41 integration 통과**(수동으로 파라미터를
+  추가하지 않은 Part에서는 그중 1건이 skip된다). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -139,10 +139,17 @@ angled = part.planes.create_angle(
 - `remove(plane)`은 평면 하나만 지운다. 각도 평면의 축 점 2개와 축 선은 그대로 남는다.
   이것까지 함께 지우려면 `remove_geometrical_set()`으로 이 컬렉션이 만든 것 전부를
   지워야 한다.
-- `ensure_offset`/`ensure_angle`은 없다. `HybridShapes`를 `Count`/`Item(i)`로 순회해
-  이름과 타입을 읽는 것은 probe 38에서 live로 확인됐지만(2026-09-15, conventions 1.5),
-  이름으로 다시 찾은 평면이 요청과 같은지 비교하는 `ensure`는 아직 만들지 않았다.
-  재사용이 필요하면 호출자가 반환된 `Plane` 객체를 직접 들고 있어야 한다.
+- **평면은 모델에서 다시 찾는다.** `list()`/`names()`/`get(name)`이 `auto_3dx_Planes`
+  기하 세트를 Part에서 이름으로 찾아 그 안의 평면을 돌려준다. 파이썬 프로세스를 새로
+  시작하거나 `PlaneCollection`을 새로 만들어도, 이전 프로세스가 만든 평면을 찾고
+  `remove`/`remove_geometrical_set`으로 정리할 수 있다. 컬렉션은 기하 세트를 기억하지
+  않으므로 두 번째 컬렉션이 세트를 하나 더 만들지도 않는다(2026-09-15 별도 프로세스 검증,
+  conventions 1.6).
+- 각도 평면의 축 점 2개와 축 선은 평면이 아니므로 `list()`/`names()`에는 나오지 않는다.
+  `remove_geometrical_set()`은 그것들까지 지운다.
+- `ensure_offset`/`ensure_angle`은 없다. 이제 이름으로 찾는 절반(`get`)과 값을 읽는 절반
+  (`offset`/`angle`/`base_display_name`)이 모두 있으므로 정직하게 만들 수 있지만, 이번
+  변경 범위 밖이다. 재사용이 필요하면 `names()`/`get()`으로 먼저 확인하면 된다.
 - `sketches.ensure(name, support=...)`의 `support`는 여전히 원점 평면 문자열 3개만
   받는다. offset/각도 평면 위 스케치의 재사용 여부는 `create()`로 직접 관리해야 한다.
 
@@ -604,6 +611,9 @@ face.com_object / face.index / face.descriptor   # index/descriptor는 이 snaps
 part.planes.create_offset(name, support, offset, orientation=False) -> OffsetPlane
            .create_angle(name, support, angle, axis_start, axis_end,
                           orientation=False) -> AnglePlane
+           .list()                        -> [OffsetPlane | AnglePlane]  # 모델에서 다시 찾음
+           .names()                       -> [str]
+           .get(name)                     -> Plane  # 없으면 PlaneNotFoundError
            .remove(plane)                 # 평면 하나만
            .remove_geometrical_set()      # 이 컬렉션이 만든 전부(축 점·선 포함)
 
@@ -745,7 +755,8 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 사용자 정의 offset/각도 평면(스케치 + Pad까지 검증), Part당 하나의 공유 model
 generation, 예외 다섯 범주, 작은 패키지 루트, 측정 기본 대상(main body), topology 검색 전후의
 사용자 selection 복원(`SelectionNotRestoredWarning`), 같은 CATIA Part의 wrapper끼리 공유하는
-generation, `part.inspect.summary()`의 body·기하 세트·모서리와 면 개수. 이제 남은
+generation, `part.inspect.summary()`의 body·기하 세트·모서리와 면 개수,
+`part.planes`의 `list`/`names`/`get`과 프로세스를 넘는 정리. 이제 남은
 순서는 다음과 같다.
 
 1. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로

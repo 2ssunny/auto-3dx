@@ -34,6 +34,7 @@ CATEGORIES = {
         "FeatureNotFoundError",
         "FormulaNotFoundError",
         "ConstraintNotFoundError",
+        "PlaneNotFoundError",
     },
     "ConflictError": {
         "ParameterAlreadyExistsError",
