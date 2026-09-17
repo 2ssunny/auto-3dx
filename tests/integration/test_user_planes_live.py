@@ -89,8 +89,19 @@ def _cleanup(part: Any, pad_names: "list[str]", sketch_names: "list[str]") -> No
     part.update()
 
 
+def _skip_if_sdk_set_exists(part: Any) -> None:
+    """Skips when the SDK geometrical set already exists.
+
+    Cleanup here removes that whole set, so running against a Part where it already holds
+    planes, points or lines would delete work this test did not create.
+    """
+    if GEOMETRICAL_SET_NAME in [item.name for item in part.inspect.geometrical_sets()]:
+        pytest.skip(f"The Part already has a {GEOMETRICAL_SET_NAME!r} set; not ours to remove.")
+
+
 def test_offset_and_angled_planes_carry_a_sketch_and_a_pad(part: Any) -> None:
     """Both plane families work end to end, which is what the in-work fix buys."""
+    _skip_if_sdk_set_exists(part)
     token = uuid.uuid4().hex[:8].upper()
     offset_sketch = f"AUTO3DX_IT_OFFSET_SKETCH_{token}"
     offset_pad = f"AUTO3DX_IT_OFFSET_PAD_{token}"
@@ -169,8 +180,7 @@ def test_a_fresh_collection_finds_and_removes_an_existing_plane(part: Any) -> No
     process is exercised by the scratch validation): it shares nothing in memory
     with the first collection, so everything it finds it found in the model.
     """
-    if part.planes.names():
-        pytest.skip("The Part already holds SDK planes; they are not ours to remove.")
+    _skip_if_sdk_set_exists(part)
     token = uuid.uuid4().hex[:8].upper()
     plane_name = f"AUTO3DX_IT_LIFECYCLE_{token}"
 
@@ -217,8 +227,7 @@ def test_a_fresh_collection_finds_and_removes_an_existing_plane(part: Any) -> No
 
 def test_a_rediscovered_sketch_reports_its_user_plane_support(part: Any) -> None:
     """The acceptance-test gap: support() used to be None for a user-defined plane."""
-    if part.planes.names():
-        pytest.skip("The Part already holds SDK planes; they are not ours to remove.")
+    _skip_if_sdk_set_exists(part)
     token = uuid.uuid4().hex[:8].upper()
     plane_name = f"AUTO3DX_IT_SUPPORT_PLANE_{token}"
     sketch_name = f"AUTO3DX_IT_SUPPORT_SKETCH_{token}"

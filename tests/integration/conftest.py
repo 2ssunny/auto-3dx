@@ -9,16 +9,25 @@ starts from the empty selection several tests require, and restores both when th
 session ends. CATIA can silently refuse a restore (see `geometry._topology_search`), so
 the result is read back and a mismatch is reported as a warning in the test summary.
 
+The session also refuses to run unless `AUTO3DX_LIVE_PART` names the active Part. The
+tests create and remove geometry in whatever Part is active, and on 2026-09-17 a probe
+run against the wrong Part deleted a plane another workflow depended on. Naming a
+disposable test Part explicitly makes that impossible to do by accident.
+
 The fixture is inert when integration tests are deselected (the default) or no session
 is running.
 """
 
+import os
 import sys
 import warnings
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
+
+LIVE_PART_ENV_VAR = "AUTO3DX_LIVE_PART"
+"""Names the disposable Part live tests may change; the session refuses any other."""
 
 
 def _live_session() -> "tuple[Any, Any] | None":
@@ -84,6 +93,20 @@ def preserve_user_session_state() -> Iterator[None]:
     import pywintypes
 
     selection, raw_part = session
+    target = os.environ.get(LIVE_PART_ENV_VAR, "").strip()
+    active = str(raw_part.Name)
+    if not target:
+        pytest.exit(
+            f"Refusing to run live tests: set {LIVE_PART_ENV_VAR} to the name of a "
+            f"disposable test Part (the active Part is {active!r}).",
+            returncode=1,
+        )
+    if active != target:
+        pytest.exit(
+            f"Refusing to run live tests: the active Part is {active!r}, but "
+            f"{LIVE_PART_ENV_VAR} names {target!r}. Activate the test Part first.",
+            returncode=1,
+        )
     try:
         captured = [selection.Item(i).Value for i in range(1, int(selection.Count) + 1)]
         in_work_object = raw_part.InWorkObject
