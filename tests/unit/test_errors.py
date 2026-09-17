@@ -19,6 +19,7 @@ CATEGORIES = {
         "CatiaConnectionError",
         "NoActiveEditorError",
         "NoActivePartError",
+        "InactivePartError",
     },
     "ValidationError": {
         "ParameterNameError",
@@ -35,6 +36,7 @@ CATEGORIES = {
         "FormulaNotFoundError",
         "ConstraintNotFoundError",
         "PlaneNotFoundError",
+        "BodyNotFoundError",
     },
     "ConflictError": {
         "ParameterAlreadyExistsError",
@@ -43,6 +45,8 @@ CATEGORIES = {
         "FeatureConflictError",
         "SketchSupportMismatchError",
         "AmbiguousNameError",
+        "BodyAlreadyExistsError",
+        "BodyRemovalError",
     },
     "AutomationError": {
         "PartUpdateError",

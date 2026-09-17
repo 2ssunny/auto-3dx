@@ -244,7 +244,7 @@ def test_features_keep_model_tree_order_and_their_real_kind(
 def test_bodies_mark_the_main_body_by_identity(
     parameters_collection_factory: Any, length_parameter_factory: Any
 ) -> None:
-    """Every body is listed; `part_design` handles only the main body's features."""
+    """Every body is listed; `part_design` handles other bodies inside `work_in`."""
     part = _part(parameters_collection_factory, length_parameter_factory)
 
     main, tool = part.inspect.bodies()
@@ -258,7 +258,7 @@ def test_bodies_mark_the_main_body_by_identity(
     assert tool == BodyInfo(
         name="Tool",
         is_main=False,
-        features=(FeatureInfo(name="ToolPad", kind="Pad", supported=False),),
+        features=(FeatureInfo(name="ToolPad", kind="Pad", supported=True),),
         sketches=(),
     )
 

@@ -95,15 +95,22 @@ def preserve_user_session_state() -> Iterator[None]:
     selection, raw_part = session
     target = os.environ.get(LIVE_PART_ENV_VAR, "").strip()
     active = str(raw_part.Name)
+    try:
+        # A 3DEXPERIENCE title (for example AUTO3DX_MULTIBODY_TEST) is not Part.Name
+        # ("3D Shape00422557"); it is readable only as the active window's caption, and
+        # this Part is the active one, so the two identify the same Part.
+        caption = str(raw_part.Application.ActiveWindow.Caption)
+    except pywintypes.com_error:
+        caption = ""
     if not target:
         pytest.exit(
             f"Refusing to run live tests: set {LIVE_PART_ENV_VAR} to the name of a "
             f"disposable test Part (the active Part is {active!r}).",
             returncode=1,
         )
-    if active != target:
+    if target not in (active, caption):
         pytest.exit(
-            f"Refusing to run live tests: the active Part is {active!r}, but "
+            f"Refusing to run live tests: the active Part is {active!r} titled {caption!r}, but "
             f"{LIVE_PART_ENV_VAR} names {target!r}. Activate the test Part first.",
             returncode=1,
         )

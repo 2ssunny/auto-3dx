@@ -117,6 +117,17 @@ class NoActivePartError(SessionError):
     """Raised when the ActiveEditor's ActiveObject is missing or not a Part."""
 
 
+class InactivePartError(SessionError):
+    """Raised when a Selection-based operation targets a Part that is not the active one.
+
+    Deletion, topology search and visibility go through an editor's `Selection`, and
+    `Selection.Search` was observed to act on the active editor even through another
+    Part's selection (2026-09-17). Until a verified per-editor path exists, these
+    operations refuse a Part unless `ActiveEditor.ActiveObject` is that Part. Nothing was
+    changed; activate the Part in CATIA and retry.
+    """
+
+
 # --- Validation ------------------------------------------------------------------
 
 
@@ -192,6 +203,10 @@ class FormulaNotFoundError(NotFoundError):
     """Raised when a formula cannot be found by name in a Relations collection."""
 
 
+class BodyNotFoundError(NotFoundError):
+    """Raised when a body cannot be found by name in a Part's `Bodies`."""
+
+
 class PlaneNotFoundError(NotFoundError):
     """Raised when a plane cannot be found by name in this SDK's geometrical set."""
 
@@ -222,6 +237,18 @@ class SketchAlreadyExistsError(ConflictError):
 
 class FormulaAlreadyExistsError(ConflictError):
     """Raised when creating a formula whose name is already taken."""
+
+
+class BodyAlreadyExistsError(ConflictError):
+    """Raised when creating a body whose name is already taken."""
+
+
+class BodyRemovalError(ConflictError):
+    """Raised when removing a body is refused: the main body, or a non-empty body.
+
+    Deleting a body deletes every feature and sketch in it, so a body that still holds
+    content is removed only when the caller says so. Nothing was changed.
+    """
 
 
 class SketchSupportMismatchError(ConflictError):

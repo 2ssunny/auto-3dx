@@ -1345,6 +1345,7 @@ class SketchCollection:
         part_com_object: Any,
         selection: Any = None,
         generation: ModelGeneration | None = None,
+        body_target: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -1360,9 +1361,13 @@ class SketchCollection:
                 instance gets its own, which no other wrapper shares; obtain
                 `SketchCollection` from a `Part` instead. Shared with every
                 `Sketch` this collection returns.
+            body_target: A callable returning the raw `Body` of an enclosing
+                `part.work_in(body)`, or `None` outside one. Supplied by `Part`; without
+                it everything works on the main body exactly as before.
         """
         self._part_com_object = part_com_object
         self._selection = selection
+        self._body_target = body_target
         # Shared with the owning Part and everything else reachable from it
         # (`docs/api-design.md` section 5). Every mutation here advances it.
         self._generation = generation if generation is not None else ModelGeneration()
@@ -1377,7 +1382,12 @@ class SketchCollection:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return self._part_com_object.MainBody.Sketches
+            # `Body.Sketches.Add` lands in that body, while `MainBody.Sketches.Add` lands
+            # in the main body even with another body in work (probe 41), so the
+            # target body's own collection is used.
+            target = self._body_target() if self._body_target is not None else None
+            body = target if target is not None else self._part_com_object.MainBody
+            return body.Sketches
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -1693,7 +1703,7 @@ class SketchCollection:
         target = self.get(name)
         with self._generation.mutation():
             delete_via_selection(
-                self._selection, target.com_object, f"sketch {name!r}"
+                self._selection, target.com_object, f"sketch {name!r}", self._part_com_object
             )
 
     def __len__(self) -> int:

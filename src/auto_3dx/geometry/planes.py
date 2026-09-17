@@ -418,6 +418,7 @@ class PlaneCollection:
         part_com_object: Any,
         selection: Any = None,
         generation: ModelGeneration | None = None,
+        body_target: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -436,9 +437,13 @@ class PlaneCollection:
             generation: The owning Part's model generation. A standalone
                 instance gets its own, which no other wrapper shares; obtain
                 `PlaneCollection` from a `Part` instead.
+            body_target: A callable returning the raw `Body` of an enclosing
+                `part.work_in(body)`, or `None` outside one. Supplied by `Part`; without
+                it everything works on the main body exactly as before.
         """
         self._part_com_object = part_com_object
         self._selection = selection
+        self._body_target = body_target
         # Shared with the owning Part and everything else reachable from it
         # (`docs/api-design.md` section 5). create_offset/create_angle/remove/
         # remove_geometrical_set each advance it exactly once per call.
@@ -475,7 +480,12 @@ class PlaneCollection:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            self._part_com_object.InWorkObject = self._main_body()
+            target = self._body_target() if self._body_target is not None else None
+            # Inside `part.work_in(body)` the work body is reclaimed instead, so a plane
+            # made there does not send later features to the main body.
+            self._part_com_object.InWorkObject = (
+                target if target is not None else self._main_body()
+            )
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -924,7 +934,9 @@ class PlaneCollection:
         # advances exactly once, even if the missing-selection check inside
         # delete_via_selection is what actually raises.
         with self._generation.mutation():
-            delete_via_selection(self._selection, plane.com_object, f"plane {plane.name!r}")
+            delete_via_selection(
+                self._selection, plane.com_object, f"plane {plane.name!r}", self._part_com_object
+            )
             self._reclaim_main_body()
 
     def remove_geometrical_set(self) -> None:
@@ -956,7 +968,10 @@ class PlaneCollection:
         # One mutation for the whole operation, same reasoning as remove().
         with self._generation.mutation():
             delete_via_selection(
-                self._selection, hybrid_body, f"geometrical set {GEOMETRICAL_SET_NAME!r}"
+                self._selection,
+                hybrid_body,
+                f"geometrical set {GEOMETRICAL_SET_NAME!r}",
+                self._part_com_object,
             )
             self._reclaim_main_body()
 

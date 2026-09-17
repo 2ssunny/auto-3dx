@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **919 unit 통과**
-- 현재 라이브 검증: 2026-09-16 재실행 기준 **42 integration 통과**(수동으로 파라미터를
-  추가하지 않은 Part에서는 그중 1건이 skip된다). 실행 뒤
+- 현재 정적 검증: **957 unit 통과**
+- 현재 라이브 검증: 2026-09-17 빈 테스트 Part `AUTO3DX_MULTIBODY_TEST`에서 재실행 기준
+  **46 integration 중 40 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -27,11 +27,13 @@
 [사람]  3DEXPERIENCE UI에서 Part 생성          <- 자동화 불가 (아래 5.1)
    |
 [auto-3dx]  attach -> 파라미터 생성/수정
+                   -> body 생성 / work_in(body)으로 작업 body 선택
                    -> 스케치 생성 -> 직선·곡선 프로파일 그리기
                       (원점 평면 또는 offset/각도 평면 위)
                    -> 패드 / 포켓 / 회전 / Rib·Slot / 사각 패턴 생성
                    -> 모서리 필렛 / 챔퍼, Shell / Thickness / Hole 생성
                    -> formula로 치수 연동
+                   -> body 숨김 / 표시
                    -> 결과 측정
                    -> update
    |
@@ -414,6 +416,27 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심 조회. bounding box는 제공 안 함 |
 | **모델 검사** | 동작 | `part.inspect.summary()`: feature·스케치·사용자 파라미터·body·기하 세트·모서리/면 개수·In-Work Object(`InWorkObjectInfo(name, kind, is_main_body)`). 읽기 전용, COM 객체를 돌려주지 않음 |
 
+### 3.6.1 Multi-Body
+
+| 기능 | 상태 | 비고 |
+|---|---|---|
+| body 목록·이름·조회 | 동작 | `part.bodies.list()`/`names()`/`get(name)`/`main`. 모델에서 찾으므로 새 프로세스에서도 같다. main body는 COM 동일성 |
+| body 생성 | 동작 | `part.bodies.create(name)`. `Bodies.Add`가 옮긴 In-Work Object를 되돌린다 |
+| 작업 body 지정 | 동작 | `with part.work_in(body):` 안에서 스케치·Pad·Pocket 등 Part Design feature가 그 body에 만들어지고 그 body에서 조회된다. 예외가 나도 이전 In-Work Object를 되돌린다. main body로 조용히 돌아가지 않는다 |
+| body feature·스케치 조회 | 동작 | `body.features`, `body.sketch_names`, `part.inspect.bodies()` |
+| 숨김 / 표시 | 동작 | `body.hide()`/`show()`/`is_visible`, `Selection.VisProperties`. read-back 검증. 활성 Part만 |
+| body 삭제 | 동작 (가드) | `part.bodies.remove(name, delete_contents=False)`. main body는 거부, 내용이 있으면 `delete_contents=True`가 있어야 지운다. 활성 Part만 |
+| boolean 연산 (Add/Remove/Intersect/Assemble) | 미지원 | 미검증 |
+| body 이름 변경·순서, body 안의 기하 세트 | 미지원 | |
+
+live 근거: probe 41, `test_multi_body_live.py`, `scripts/acceptance/multi_body_lifecycle.py`(A→B),
+`scripts/acceptance/multi_body_enclosure.py`(다섯 body, 바깥 하우징 숨김). conventions 1.9.
+
+**활성 Part 가드.** 비활성 Part의 editor로 `Selection.Search`를 하면 활성 Part가 검색됐다. 그래서
+selection을 거치는 동작(topology 검색, `remove_*` 삭제, body 숨김/표시와 삭제)은 대상 Part가 활성
+Part가 아니면 CATIA를 건드리기 전에 `InactivePartError`로 거부한다. `part.inspect`의 topology 개수는
+이 경우 `None`이다.
+
 ### 3.7 손대지 않은 영역
 
 `Part`가 노출하지만 라이브러리가 쓰지 않는 것:
@@ -421,7 +444,8 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 ```text
 HybridShapeFactory     평면(AddNewPlaneOffset/AddNewPlaneAngle)과 그 축용 점/선만 사용.
                        그 외 GSD surface geometry는 쓰지 않음
-Bodies / HybridBodies  MainBody 외 body. HybridBodies는 평면을 담는 기하 세트 하나(3.3.1)에만 사용
+Bodies                 boolean 연산, 이름 변경, 순서 (목록·생성·작업 body·숨김·삭제는 3.6.1)
+HybridBodies           평면을 담는 기하 세트 하나(3.3.1)에만 사용
 Part.Constraints       어셈블리 구속 (스케치 구속은 3.4.1에서 지원)
 AxisSystems            축 시스템
 OrderedGeometricalSets / UserSurfaces / AnnotationSets
@@ -456,10 +480,33 @@ Catia.attach(com3dx_path=None) -> Catia
 .part_design     -> PartDesign
 .planes          -> PlaneCollection   # offset/각도 평면
 .formulas        -> FormulaCollection
+.bodies          -> BodyCollection    # list/names/get/main/create/remove
+.work_in(body)   # context manager: 그 body에서 스케치·feature 생성/조회, In-Work Object 복원
 .update()        # 실패 시 PartUpdateError
 .measurement     -> SolidMeasurement  # editor 기반 read-only 측정
 .topology        -> Topology          # edges() / faces() 스냅샷
 .inspect         -> Inspector         # summary(), in_work_object() 등 read-only 검사
+```
+
+### BodyCollection / Body
+
+```python
+bodies = part.bodies
+bodies.list()    -> list[Body]
+bodies.names()   -> list[str]
+bodies.get(name) -> Body          # BodyNotFoundError / AmbiguousNameError
+bodies.main      -> Body
+bodies.create(name) -> Body       # BodyAlreadyExistsError, PartialCreationError
+bodies.remove(name, *, delete_contents=False)   # BodyRemovalError, InactivePartError
+
+body.name / body.is_main / body.com_object
+body.features       -> tuple[FeatureInfo, ...]
+body.sketch_names   -> tuple[str, ...]
+body.is_visible     -> bool       # 활성 Part만
+body.hide() / body.show()         # 활성 Part만, selection 복원
+
+with part.work_in(body_or_name) as body:
+    ...                             # 블록 밖에서는 In-Work Object를 건드리지 않는다
 ```
 
 ### SolidMeasurement / 측정 결과
@@ -706,7 +753,8 @@ Auto3dxError
 │   ├── Com3dxNotFoundError        com3dx.py 헬퍼를 못 찾음
 │   ├── CatiaConnectionError       세션 attach 실패
 │   ├── NoActiveEditorError        열린 editor 없음
-│   └── NoActivePartError          현재 편집 대상이 Part가 아님 (Assembly 등)
+│   ├── NoActivePartError          현재 편집 대상이 Part가 아님 (Assembly 등)
+│   └── InactivePartError          selection 기반 동작의 대상 Part가 활성 Part가 아님
 ├── ValidationError          COM 호출 전에 거부됨. 모델은 그대로다
 │   ├── ParameterNameError         쓸 수 없는 이름 (빈 문자열, "\" 포함 등)
 │   ├── ParameterTypeError         지원하지 않는 파라미터/값 타입, 또는 edge·radius 등
@@ -721,13 +769,16 @@ Auto3dxError
 │   ├── SketchNotFoundError        이름으로 스케치를 못 찾음
 │   ├── FeatureNotFoundError       이름으로 feature를 못 찾음
 │   ├── FormulaNotFoundError       이름으로 formula를 못 찾음
-│   └── ConstraintNotFoundError    이름으로 제약을 못 찾음
+│   ├── ConstraintNotFoundError    이름으로 제약을 못 찾음
+│   └── BodyNotFoundError          이름으로 body를 못 찾음
 ├── ConflictError            모델의 이름·상태가 요청을 막음. 아무것도 만들지 않았다
 │   ├── ParameterAlreadyExistsError  이미 있는 이름으로 생성 시도
 │   ├── SketchAlreadyExistsError     이미 있는 이름으로 생성 시도
 │   ├── FormulaAlreadyExistsError    이미 있는 이름으로 생성 시도
 │   ├── FeatureConflictError         같은 이름인데 다른 스케치 기반, 또는 패턴 방향이 같은 축
 │   ├── SketchSupportMismatchError   같은 이름인데 다른 평면
+│   ├── BodyAlreadyExistsError       이미 있는 이름으로 body 생성 시도
+│   ├── BodyRemovalError             main body, 또는 delete_contents 없이 내용 있는 body 삭제
 │   └── AmbiguousNameError           같은 이름이 둘 이상
 └── AutomationError          CATIA가 COM 호출을 거부하거나 실패함. hresult 속성을 가짐
     ├── PartUpdateError            Part.Update() 실패
@@ -798,7 +849,8 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 완료: 모서리·면 선택 레이어(`part.topology.edges()`/`faces()`, `EdgeSnapshot`/
 `FaceSnapshot`), Chamfer 인자 확정(mode=1 고정), Shell/Thickness/Hole(면 참조),
-사용자 정의 offset/각도 평면(스케치 + Pad까지 검증), Part당 하나의 공유 model
+사용자 정의 offset/각도 평면(스케치 + Pad까지 검증), Multi-Body(생성·작업 body·숨김·가드 삭제,
+selection 기반 동작의 활성 Part 가드), Part당 하나의 공유 model
 generation, 예외 다섯 범주, 작은 패키지 루트, 측정 기본 대상(main body), topology 검색 전후의
 사용자 selection 복원(`SelectionNotRestoredWarning`), 같은 CATIA Part의 wrapper끼리 공유하는
 generation, `part.inspect.summary()`의 body·기하 세트·모서리와 면 개수,

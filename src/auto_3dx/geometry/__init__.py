@@ -29,6 +29,7 @@ from auto_3dx.geometry.constraint import (
     Constraint,
     ConstraintCollection,
 )
+from auto_3dx.geometry.bodies import Body, BodyCollection
 from auto_3dx.geometry.edges import EDGE_SEARCH_QUERY, Edge, EdgeSnapshot
 from auto_3dx.geometry.faces import FACE_SEARCH_QUERY, Face, FaceSnapshot
 from auto_3dx.geometry.part_design import (
@@ -133,6 +134,8 @@ __all__ = [
     "Groove",
     "Mirror",
     "MultiSectionSolid",
+    "Body",
+    "BodyCollection",
     "Rib",
     "Slot",
     "RectangularPattern",

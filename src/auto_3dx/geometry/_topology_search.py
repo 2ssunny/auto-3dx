@@ -31,7 +31,7 @@ import pywintypes
 
 from auto_3dx._com import automation_error, format_hresult, hresult_of
 from auto_3dx.errors import AutomationError, SelectionNotRestoredWarning
-from auto_3dx.geometry.deletion import require_selection
+from auto_3dx.geometry.deletion import require_active_part, require_selection
 
 _FIRST_COM_INDEX = 1
 _WARNING_STACKLEVEL = 4
@@ -96,12 +96,16 @@ def _restore_selection(selection: Any, captured: "list[Any]") -> "str | None":
     return None
 
 
-def search_references(selection: Any, query: str) -> "list[Any]":
+def search_references(
+    selection: Any, query: str, part_com_object: Any = None
+) -> "list[Any]":
     """Runs one topology search and returns its references, preserving the selection.
 
     Args:
         selection: The raw CATIA `Selection` COM object of the editor editing the Part.
         query: The exact `Selection.Search` query, for example `"Topology.Edge,all"`.
+        part_com_object: The raw Part being searched. When given, the search is refused
+            unless that Part is the active one (`geometry.deletion.require_active_part`).
 
     Returns:
         One raw `Reference` per hit, in search order.
@@ -116,6 +120,7 @@ def search_references(selection: Any, query: str) -> "list[Any]":
             come back exactly. The returned references are still valid.
     """
     require_selection(selection)
+    require_active_part(part_com_object)
     captured = _capture_selection(selection)
     try:
         selection.Clear()

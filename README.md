@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 919 통과 | 42 통과 (Multi-sections Solid 추가 전 전체), Multi-sections Solid 2 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 957 통과 | 40 통과, 6 skip (2026-09-17, 빈 테스트 Part, Multi-Body 포함) |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -629,6 +629,60 @@ snapshot의 재사용 실패를 반복 실험으로 재현하지는 않았습니
 적용했습니다. `ensure_shell`/`ensure_thickness`/`ensure_hole`은 없습니다. 면에는
 기존 feature와 비교할 안정적인 핸들이 없기 때문입니다.
 
+## Multi-Body
+
+Part 안에 body를 여러 개 두고, 원하는 body에 스케치와 feature를 만듭니다.
+
+```python
+tray = part.bodies.create("LEDTray")        # In-Work Object는 원래 자리로 돌아온다
+part.bodies.names()                         # ["PartBody", "LEDTray"]
+part.bodies.get("LEDTray")                  # 없으면 BodyNotFoundError
+
+with part.work_in(tray):                    # 이름 "LEDTray"도 된다
+    sketch = part.sketches.create("TRAY_SKETCH", support="XY")
+    with sketch.edit() as editor:
+        editor.rectangle(60, 40)
+    part.part_design.create_pad("TRAY_PAD", sketch, 5)
+    part.part_design.get_pad("TRAY_PAD")    # 블록 안의 조회도 그 body에서 한다
+part.update()
+
+tray.features                               # (FeatureInfo(name='TRAY_PAD', kind='Pad', ...),)
+tray.sketch_names                           # ('TRAY_SKETCH',)
+```
+
+- `work_in` 블록 안에서만 스케치·Part Design feature가 그 body로 갑니다. 블록 밖의 동작은
+  main body에서 하던 그대로입니다.
+- 블록을 정상으로 나가든 예외로 나가든 이전 In-Work Object로 되돌립니다. 되돌리기가 실패하면
+  예외에 note로 붙이거나(블록이 이미 예외를 냈을 때) `AutomationError`를 냅니다.
+- 다른 Part의 body나 없는 body는 거부합니다. main body로 조용히 바꾸지 않습니다.
+
+숨김과 표시는 `Selection.VisProperties`로 하고, 사용자 selection을 복원합니다.
+
+```python
+housing = part.bodies.get("OuterHousing")
+housing.hide()
+housing.is_visible                          # False
+housing.show()
+```
+
+삭제는 보호됩니다. main body는 지우지 않고, feature·스케치·기하 세트가 든 body는
+`delete_contents=True`일 때만 내용과 함께 지웁니다. 숨긴 body와 빈 body는 CATIA가 측정하지
+못합니다(`AutomationError`).
+
+```python
+part.bodies.remove("LEDTray", delete_contents=True)
+part.update()
+```
+
+**활성 Part만.** 비활성 Part의 editor로 `Selection.Search`를 하면 활성 Part가 검색되는 것이
+확인되어, selection을 거치는 동작(`part.topology`, `remove_*` 삭제, body 숨김·표시·삭제)은 대상
+Part가 3DEXPERIENCE에서 활성 Part가 아니면 아무것도 건드리지 않고 `InactivePartError`를 냅니다.
+`part_named()`로 고른 비활성 Part에서도 파라미터, 생성, 측정은 됩니다. 검사 결과의 topology
+개수는 `None`입니다.
+
+boolean 연산(Add/Remove/Intersect/Assemble), body 이름 변경과 순서, body 안의 기하 세트,
+Product/Assembly는 지원하지 않습니다.
+
 ## 측정
 
 `part.measurement`는 Part가 속한 Editor의 CATIA 측정 서비스에 연결된
@@ -674,9 +728,9 @@ print(summary.render())
 summary.features          # FeatureInfo(name, kind, supported), main body, 트리 순서
 summary.sketches          # main body 스케치 이름
 summary.parameters        # 사용자 파라미터
-summary.bodies            # BodyInfo(name, is_main, features, sketches)
+summary.bodies            # BodyInfo(name, is_main, features, sketches), render()가 body별 feature 표시
 summary.geometrical_sets  # GeometricalSetInfo(name, elements, nested_set_count)
-summary.topology          # TopologyCounts(edges, faces), selection이 없는 Part면 None
+summary.topology          # TopologyCounts(edges, faces), selection이 없거나 활성 Part가 아니면 None
 summary.in_work_object    # InWorkObjectInfo(name, kind, is_main_body), 없으면 None
 
 iwo = part.inspect.in_work_object()
@@ -732,8 +786,8 @@ feature는 아직 제공하지 않습니다.
 Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더라도
 follow-up `Part.Update()`에서 실패한 사례가 있어 검증된 API로 승격하지
 않았습니다. GSD surface(평면 생성에 쓰는 것 외의 HybridShape), assembly
-constraint, 축 시스템, 다른 Body/HybridBody도 현재 public wrapper 범위
-밖입니다.
+constraint, 축 시스템, body boolean 연산, 평면용 세트 외의 HybridBody도 현재 public
+wrapper 범위 밖입니다.
 
 ## 테스트
 
@@ -762,15 +816,18 @@ python -m pytest tests/integration -m integration -q
 라이브러리 모두 `Save()`와 `PLMPropagate()`를 호출하지 않습니다.
 
 통합 테스트는 버려도 되는 테스트 Part에서만 실행합니다. 세션은 `AUTO3DX_LIVE_PART`가
-활성 Part 이름과 일치할 때만 시작하고, 그렇지 않으면 아무것도 건드리지 않고 멈춥니다.
+활성 Part의 `Part.Name`(`3D Shape…`) 또는 3DEXPERIENCE 제목(활성 창 제목)과 일치할 때만
+시작하고, 그렇지 않으면 아무것도 건드리지 않고 멈춥니다. 삭제와 topology가 활성 Part를
+요구하므로 테스트 Part를 활성으로 둔 채 실행합니다.
 
 ```powershell
-$env:AUTO3DX_LIVE_PART = '3D Shape00422533'
+$env:AUTO3DX_LIVE_PART = 'AUTO3DX_MULTIBODY_TEST'
 python -m pytest tests/integration -m integration -q
 ```
 
-`scripts/acceptance/`의 Multi-sections Solid 수명 주기와 NACA 날개 acceptance 스크립트도 같은
-변수로 Part를 이름으로 골라 공개 API만 사용합니다.
+`scripts/acceptance/`의 Multi-sections Solid 수명 주기, NACA 날개, Multi-Body A→B 수명 주기,
+다섯 body enclosure 스크립트도 같은 변수로 Part를 골라 공개 API만 사용합니다. 빈 main body가
+필요 없는 테스트는 빈 Part에서도 돌고, 이미 solid가 있어야 하는 측정·Mirror 테스트는 skip됩니다.
 
 통합 테스트 세션은 시작할 때 사용자의 CATIA selection을 저장하고 비운 뒤, 끝날 때
 되돌리고 개수로 확인합니다(`tests/integration/conftest.py`). `remove_*`가 selection을
@@ -781,9 +838,9 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 919개입니다. B428_Cloud
-live 통합 테스트는 42개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
-중 1건은 skip됩니다. 최근 실행한 Part에는 그 파라미터가 있어 40개가 모두 통과했습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 957개입니다. B428_Cloud
+live 통합 테스트는 46개이고, 2026-09-17 빈 테스트 Part에서 40개 통과, 6개 skip(빈 main body나
+수동 파라미터가 필요한 테스트)이었으며 실행 뒤 Part가 실행 전과 같았습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 
 ## 저장소 문서

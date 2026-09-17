@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import pywintypes
 
 from auto_3dx._com import automation_error
-from auto_3dx.errors import ValidationError
+from auto_3dx.errors import InactivePartError, ValidationError
 from auto_3dx.geometry.part_design import (
     CHAMFER_KIND,
     EDGE_FILLET_KIND,
@@ -95,9 +95,9 @@ class FeatureInfo:
         kind: The CATIA wrapper type name, such as ``"Pad"`` or ``"ConstRadEdgeFillet"``.
             A feature created in the CATIA user interface can be of a kind the SDK
             does not wrap; it is still listed, with its real kind.
-        supported: Whether `part.part_design` can create, list and remove this feature.
-            It works on the main body only, so a feature in any other body is `False`
-            whatever its kind.
+        supported: Whether `part.part_design` can create, list and remove this kind of
+            feature. In a body other than the main one it does so inside
+            `part.work_in(body)`.
     """
 
     name: str
@@ -112,7 +112,7 @@ class BodyInfo:
     Attributes:
         name: The body's name.
         is_main: Whether this is the Part's main body, the one `part.part_design` and
-            `part.sketches` work on.
+            `part.sketches` work on outside a `part.work_in(body)` block.
         features: The body's solid features, in model-tree order.
         sketches: The body's sketch names, in model-tree order.
     """
@@ -200,7 +200,7 @@ class PartSummary:
         bodies: Every body, including the main body, in `Part.Bodies` order.
         geometrical_sets: The geometrical sets directly under the Part.
         topology: Edge and face counts, or `None` when this Part has no editor
-            selection to search with.
+            selection to search with or is not the active Part.
         in_work_object: The In-Work Object, or `None` when CATIA reports none.
     """
 
@@ -244,6 +244,7 @@ class PartSummary:
                 f"- {body.name} ({role}{len(body.features)} features, "
                 f"{len(body.sketches)} sketches)"
             )
+            lines.extend(f"  - {feature.name} ({feature.kind})" for feature in body.features)
         lines.append(f"Geometrical sets ({len(self.geometrical_sets)})")
         for geometrical_set in self.geometrical_sets:
             nested = (
@@ -363,7 +364,7 @@ class Inspector:
             AutomationError: If enumerating the shapes or reading a name fails.
         """
         main_body = _read("Part.MainBody", lambda: self._part.com_object.MainBody)
-        return self._features_of(main_body, "MainBody", is_main=True)
+        return self._features_of(main_body, "MainBody")
 
     def sketches(self) -> "tuple[str, ...]":
         """Lists the main body's sketch names, in model-tree order.
@@ -415,7 +416,7 @@ class Inspector:
                 BodyInfo(
                     name=_read(f"{label}.Name", lambda body=body: body.Name),
                     is_main=is_main,
-                    features=self._features_of(body, label, is_main=is_main),
+                    features=self._features_of(body, label),
                     sketches=tuple(
                         _read(f"{label}.Sketches name", lambda sketch=sketch: sketch.Name)
                         for sketch in sketches
@@ -471,7 +472,10 @@ class Inspector:
 
         Returns:
             The counts, or `None` when this Part has no editor selection, as happens
-            for a Part built directly from a raw COM object.
+            for a Part built directly from a raw COM object, or when it is not the
+            active Part: a search through its editor would count the active Part's
+            topology instead (`InactivePartError`), so no number is better than a
+            wrong one.
 
         Raises:
             AutomationError: If the selection cannot be read or a search fails.
@@ -481,8 +485,9 @@ class Inspector:
         """
         try:
             edges = self._part.topology.edges()
-        except ValidationError:
-            # The only refusal before COM is a missing selection: nothing to search with.
+        except (ValidationError, InactivePartError):
+            # Both refusals happen before COM: no selection to search with, or a
+            # selection that would search another Part.
             return None
         faces = self._part.topology.faces()
         return TopologyCounts(edges=len(edges), faces=len(faces))
@@ -513,13 +518,12 @@ class Inspector:
         )
 
     @staticmethod
-    def _features_of(body: Any, label: str, is_main: bool) -> "tuple[FeatureInfo, ...]":
+    def _features_of(body: Any, label: str) -> "tuple[FeatureInfo, ...]":
         """Reads one body's solid features.
 
         Args:
             body: The raw CATIA `Body`.
             label: How to name the body in error messages.
-            is_main: Whether it is the main body, the only one `part_design` handles.
 
         Returns:
             One `FeatureInfo` per item in the body's `Shapes`.
@@ -537,7 +541,7 @@ class Inspector:
                         f"{label}.Shapes.Item({index}).Name", lambda shape=shape: shape.Name
                     ),
                     kind=kind,
-                    supported=is_main and kind in SUPPORTED_FEATURE_KINDS,
+                    supported=kind in SUPPORTED_FEATURE_KINDS,
                 )
             )
         return tuple(features)

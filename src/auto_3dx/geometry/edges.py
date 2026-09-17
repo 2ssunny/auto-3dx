@@ -295,7 +295,9 @@ class EdgeSnapshot:
         return f"EdgeSnapshot(count={len(self._edges)}, generation={self._generation})"
 
 
-def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
+def take_edge_snapshot(
+    selection: Any, generation: int = 0, part_com_object: Any = None
+) -> EdgeSnapshot:
     """Runs the one verified edge search and returns a fresh `EdgeSnapshot`.
 
     This is the only verified route from CATIA topology to a feature-usable
@@ -313,6 +315,8 @@ def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
         generation: The model generation to stamp the snapshot with, so a
             later change can mark it stale. Defaults to 0 for a snapshot with
             no owning `PartDesign`.
+        part_com_object: The raw Part being searched; the search is refused unless it
+            is the active Part.
 
     Returns:
         A fresh `EdgeSnapshot` describing every edge of the solid as it
@@ -328,7 +332,7 @@ def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
         SelectionNotRestoredWarning: If the selection did not fully come back.
             The snapshot is still valid.
     """
-    references = search_references(selection, EDGE_SEARCH_QUERY)
+    references = search_references(selection, EDGE_SEARCH_QUERY, part_com_object)
     edges = [
         Edge(reference, position, generation)
         for position, reference in enumerate(references, start=1)

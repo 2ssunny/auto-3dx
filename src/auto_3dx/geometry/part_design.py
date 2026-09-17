@@ -1148,6 +1148,7 @@ class PartDesign:
         part_com_object: Any,
         selection: Any = None,
         generation: ModelGeneration | None = None,
+        body_target: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -1163,9 +1164,13 @@ class PartDesign:
             generation: The owning Part's model generation. A standalone
                 instance gets its own, which no other wrapper shares; obtain
                 `PartDesign` from a `Part` instead.
+            body_target: A callable returning the raw `Body` of an enclosing
+                `part.work_in(body)`, or `None` outside one. Supplied by `Part`; without
+                it everything works on the main body exactly as before.
         """
         self._part_com_object = part_com_object
         self._selection = selection
+        self._body_target = body_target
         # Shared with the owning Part and everything else reachable from it
         # (`docs/api-design.md` section 5). Every mutation here advances it, and
         # every edge or face handle is checked against it before reaching CATIA.
@@ -1216,6 +1221,39 @@ class PartDesign:
         """
         self._generation.require_current(face.generation, "face", "part.topology.faces()")
 
+    def _body(self) -> Any:
+        """Returns the raw body features are listed in: the work body, or `MainBody`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        target = self._body_target() if self._body_target is not None else None
+        if target is not None:
+            return target
+        try:
+            return self._part_com_object.MainBody
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _target_in_work(self) -> None:
+        """Makes the work body the In-Work Object before a feature is created in it.
+
+        Only inside `part.work_in(body)`. `ShapeFactory` builds a feature in the In-Work
+        Body (probe 41), but creating a feature or a plane moves the In-Work Object, so it
+        is set again before every creation rather than once when the context opens.
+        Outside a context nothing is touched, exactly as before.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        target = self._body_target() if self._body_target is not None else None
+        if target is None:
+            return
+        try:
+            self._part_com_object.InWorkObject = target
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
     def _shapes(self) -> Any:
         """Returns the raw `MainBody.Shapes` collection.
 
@@ -1226,7 +1264,7 @@ class PartDesign:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return self._part_com_object.MainBody.Shapes
+            return self._body().Shapes
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -1398,6 +1436,7 @@ class PartDesign:
         # raises: AddNew* can create the feature and then fail the rename, which
         # leaves it in the tree (`docs/api-design.md` section 5.3).
         with self._generation.mutation():
+            self._target_in_work()
             try:
                 factory = getattr(self._part_com_object.ShapeFactory, factory_method)
                 com_object = factory(*factory_args)
@@ -1605,7 +1644,9 @@ class PartDesign:
         """
         target = get_method(name)
         with self._generation.mutation():
-            delete_via_selection(self._selection, target.com_object, f"{noun} {name!r}")
+            delete_via_selection(
+                self._selection, target.com_object, f"{noun} {name!r}", self._part_com_object
+            )
 
     @property
     def pads(self) -> "list[Pad]":
@@ -2658,7 +2699,9 @@ class PartDesign:
             DeprecationWarning,
             stacklevel=2,
         )
-        return take_edge_snapshot(self._selection, self._generation.value)
+        return take_edge_snapshot(
+            self._selection, self._generation.value, self._part_com_object
+        )
 
     @property
     def edge_fillets(self) -> "list[ConstRadEdgeFillet]":
@@ -2956,7 +2999,9 @@ class PartDesign:
             DeprecationWarning,
             stacklevel=2,
         )
-        return take_face_snapshot(self._selection, self._generation.value)
+        return take_face_snapshot(
+            self._selection, self._generation.value, self._part_com_object
+        )
 
     @property
     def shells(self) -> "list[Shell]":
@@ -3369,6 +3414,7 @@ class PartDesign:
             direction_2, 2
         )
         with self._generation.mutation():
+            self._target_in_work()
             try:
                 com_object = self._part_com_object.ShapeFactory.AddNewRectPattern(
                     pad.com_object,
@@ -3414,4 +3460,5 @@ class PartDesign:
                 self._selection,
                 pattern.com_object,
                 "rectangular pattern",
+                self._part_com_object,
             )

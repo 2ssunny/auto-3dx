@@ -32,7 +32,12 @@ class Topology:
     Obtain it as `part.topology`, so its snapshots share the Part's generation.
     """
 
-    def __init__(self, selection: Any, generation: ModelGeneration | None = None) -> None:
+    def __init__(
+        self,
+        selection: Any,
+        generation: ModelGeneration | None = None,
+        part_com_object: Any = None,
+    ) -> None:
         """Initializes the namespace.
 
         Args:
@@ -41,8 +46,11 @@ class Topology:
             generation: The owning Part's model generation. A standalone instance
                 gets its own, which no other wrapper shares, so its snapshots are
                 never refused by anything; obtain `Topology` from a `Part` instead.
+            part_com_object: The raw Part being searched. Searches are refused unless it
+                is the active Part, because `Selection.Search` acts on the active editor.
         """
         self._selection = selection
+        self._part_com_object = part_com_object
         self._generation = generation if generation is not None else ModelGeneration()
 
     def edges(self) -> EdgeSnapshot:
@@ -63,7 +71,9 @@ class Topology:
             SelectionNotRestoredWarning: If the selection did not fully come back.
                 The snapshot is still valid.
         """
-        return take_edge_snapshot(self._selection, self._generation.value)
+        return take_edge_snapshot(
+            self._selection, self._generation.value, self._part_com_object
+        )
 
     def faces(self) -> FaceSnapshot:
         """Takes a fresh snapshot of every face of the solid.
@@ -83,7 +93,9 @@ class Topology:
             SelectionNotRestoredWarning: If the selection did not fully come back.
                 The snapshot is still valid.
         """
-        return take_face_snapshot(self._selection, self._generation.value)
+        return take_face_snapshot(
+            self._selection, self._generation.value, self._part_com_object
+        )
 
     def __repr__(self) -> str:
         """str: Debug representation; does not contact CATIA."""

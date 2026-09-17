@@ -1166,6 +1166,98 @@ Surface(GSD loft).
 이후 probe와 acceptance 스크립트는 `AUTO3DX_LIVE_PART`로 이름을 지정한 Part에서만 돌고, 자기가 만든
 평면 하나만 지운다. live 통합 테스트 세션도 같은 환경 변수가 활성 Part와 일치해야만 시작한다.
 
+### 1.9 Multi-Body와 활성 Part 가드 (probe 41, 실측 2026-09-17)
+
+모든 live 실행은 사용자가 연 빈 테스트 Part `AUTO3DX_MULTIBODY_TEST`에서만 했다.
+
+**Part 이름.** 이 Part의 Automation `Part.Name`은 `3D Shape00422557`이고, 3DEXPERIENCE 제목
+`AUTO3DX_MULTIBODY_TEST`는 `Application.ActiveWindow.Caption`으로만 읽혔다. 그래서 통합 테스트 세션,
+probe, acceptance 스크립트는 `AUTO3DX_LIVE_PART`가 활성 Part의 `Part.Name` **또는** 활성 창 제목과
+같을 때만 돈다. 창 제목은 활성 Part에만 쓸 수 있다.
+
+**비활성 Part의 `Selection.Search`.** 열린 Part 다섯 개에서 각자 editor의 Selection으로
+`Topology.Edge,all`/`Topology.Face,all`을 검색했더니 모두 활성 Part의 개수(모서리 198, 면 53)를
+돌려줬다. 측정 service는 editor마다 맞는 값을 줬다. 즉 비활성 Part에 대한 Selection 기반 검색은
+다른 Part를 가리키고, 같은 경로의 삭제도 안전하다고 볼 수 없다.
+
+```text
+Part.Application.ActiveEditor.ActiveObject == Part   -> 활성 Part에서만 True (세 번 연속 읽기)
+ActiveEditor.Selection == 그 editor의 selection      -> 활성 Part에서도 False, 판정에 못 씀
+```
+
+이 사실로 `geometry.deletion.require_active_part`를 만들었다. Selection을 거치는 모든 동작
+(`remove_*` 삭제, `part.topology` 검색, body 표시/숨김, `bodies.remove`)이 COM을 건드리기 전에
+`ActiveEditor.ActiveObject`가 대상 Part인지 확인하고, 아니거나 확인할 수 없으면
+`InactivePartError`(`SessionError`)로 거부한다. `part.inspect.topology()`는 이 경우 틀린 숫자 대신
+`None`을 돌려준다. 검증된 per-editor 경로가 생길 때까지 유지한다.
+
+**Body (probe 41).**
+
+```text
+Part.Bodies.Add()                    -> Body, 기본 이름 'Body.N', 새 body가 In-Work Object가 됨
+body.Name = 'X'                      -> 동작, Bodies.Item(i) == Add 반환 객체 -> True
+Part.InWorkObject = body             -> 동작, 읽으면 그 body
+body.Sketches.Add(plane)             -> 그 body에 들어감
+MainBody.Sketches.Add(plane)         -> 다른 body가 In-Work여도 PartBody에 들어감
+ShapeFactory.AddNewPad / AddNewPocket -> In-Work Object인 body에 들어가고, 새 feature가 In-Work Object가 됨
+body.InBooleanOperation              -> False
+body.HybridBodies                    -> 기하 세트가 없는 body에서는 None (Count를 읽으면 AttributeError)
+Selection.Add(body); VisProperties.GetShow()  -> (0, state), 0 = 보임, 1 = 숨김
+VisProperties.SetShow(1)             -> 숨김. 다시 선택해 읽어도 1, 다른 body는 영향 없음
+VisProperties.SetShow(0)             -> 다시 보임, 부피 그대로
+Selection으로 body 삭제                -> body와 그 안의 feature, 스케치가 함께 사라짐
+빈 body나 숨긴 body 측정               -> GetArea E_FAIL (AutomationError)
+```
+
+이 사실로 `part.bodies`(`list`/`names`/`get`/`main`/`create`/`remove`)와 `Body`
+(`name`/`is_main`/`features`/`sketch_names`/`is_visible`/`hide()`/`show()`), `part.work_in(body)`를
+만들었다.
+
+- **body 찾기**는 이름으로, main body 판정은 `MainBody`와의 COM 동일성으로 한다.
+- **`bodies.create`**는 `Bodies.Add`가 옮긴 In-Work Object를 원래 값으로 되돌린다. 이름을 붙이지
+  못하면 `PartialCreationError`.
+- **`work_in(body)`**는 이전 In-Work Object를 저장하고 body를 In-Work Object로 둔 뒤, 블록 안의
+  스케치는 `body.Sketches`에, Part Design feature는 그 body에 만든다. Pad가 In-Work Object를 새
+  feature로 옮기므로 **factory 호출마다 직전에** body를 다시 In-Work Object로 둔다. 평면 생성이
+  In-Work Object를 되찾을 때도 main body가 아니라 이 body로 돌린다. 블록을 나가면 예외든 아니든
+  이전 값으로 되돌린다. 예외 중 복원이 실패하면 원래 예외에 note로 붙이고, 정상 종료 중 실패하면
+  `AutomationError`를 낸다. 중첩할 수 있다. `work_in` 밖의 동작은 이전과 같다(In-Work Object를
+  건드리지 않는다). main body로 조용히 돌아가는 경로는 없다: 다른 Part의 body는 `ParameterTypeError`,
+  없는 이름은 `BodyNotFoundError`다.
+- **`get_pad`/`pads` 등 조회**는 `work_in` 안에서 그 body의 `Shapes`를 본다.
+- **표시/숨김**은 selection을 캡처하고 body만 선택해 `VisProperties`를 부른 뒤 복원한다
+  (`SelectionNotRestoredWarning`). `is_visible`은 위의 read-back이 검증되어 노출했다. 형상이 그대로라도
+  보수적으로 model generation을 올린다.
+- **`bodies.remove(name, delete_contents=False)`**는 main body와, `delete_contents=True` 없이 내용이
+  있는 body를 `BodyRemovalError`로 거부한다. 지운 body 안에 In-Work Object가 있었으면 main body로,
+  아니면 원래 값으로 둔다.
+
+**공개 API live 검증.**
+
+```text
+통합 테스트 (test_multi_body_live.py, 2 통과)
+  body A: pad 20x20x10, body B: pad 30x30x12 + work_in 안에서 만든 offset 평면 위 pocket 10x10x5
+  블록 뒤 In-Work Object 복원, 새 wrapper에서 두 body의 feature·스케치 재발견
+  부피 A 4000, B 10300, main body의 feature 불변, A 숨김/B 보임 read-back, 다시 보임 후 부피 동일
+  내용 있는 body 삭제 거부, work_in 안의 예외 뒤 In-Work Object 복원
+A->B 수명 주기 (scripts/acceptance/multi_body_lifecycle.py create / verify-and-remove)
+  프로세스 A: AUTO3DX_BODY_A/B 생성, 부피 4000 / 10800, 숨김/보임, 정리 없이 종료
+  프로세스 B: 이름으로 재발견, 내용·부피·숨김/보임 확인, 두 body만 삭제, 기준 상태와 정확히 같음
+enclosure (scripts/acceptance/multi_body_enclosure.py create / verify / remove, 각각 새 프로세스)
+  OuterHousing / LEDTray / ElectronicsFloor / SpeakerMounts / MountingBosses, body마다 pad 하나
+  create에서 OuterHousing 숨김 -> verify(새 프로세스)에서 OuterHousing 숨김, 나머지 네 개 보임과
+  부피 12000 / 14400 / 9000 / 1500 확인, OuterHousing 다시 보임 -> remove 후 기준 상태와 같음
+전체 통합 테스트 (같은 Part): 40 통과, 6 skip, 실행 뒤 기준 상태와 같음
+```
+
+**정리 중 발견.** `planes.remove(plane)`은 평면만 지우고 `auto_3dx_Planes` 세트는 남긴다. 테스트가
+그 세트를 새로 만들었고 비어 있을 때만 세트를 지우도록 Multi-Body와 Multi-sections Solid 통합 테스트의
+정리를 고쳤다. 빈 main body를 측정할 수 없으므로 측정·Mirror 통합 테스트는 main body가 비어 있으면
+skip한다.
+
+지원하지 않는 것: boolean 연산(Add/Remove/Intersect/Assemble), body 이름 바꾸기와 순서, body 안의 기하
+세트, Product/Assembly, In-Work Object의 공개 setter(`work_in` 밖), 비활성 Part의 topology·삭제·표시.
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

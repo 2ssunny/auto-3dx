@@ -226,6 +226,9 @@ class SolidMeasurement:
         """
         if item is None:
             item = self._read_default_target()
+        else:
+            # An SDK wrapper such as `Body` is measured through its COM object.
+            item = getattr(item, "com_object", item)
         service = self._inertia_service_com_object()
         try:
             inertia = service.GetInertiaElement(item)

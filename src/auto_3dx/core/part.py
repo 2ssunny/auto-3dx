@@ -11,6 +11,8 @@ to every collection it builds. A mutation made through any of them, or through a
 wrapper of the same Part, makes every outstanding topology snapshot stale.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pywintypes
@@ -20,10 +22,13 @@ from auto_3dx._generation import shared_generation
 from auto_3dx.errors import (
     Auto3dxError,
     AutomationError,
+    BodyNotFoundError,
     NoActiveEditorError,
+    ParameterTypeError,
     PartUpdateError,
 )
 from auto_3dx.formulas.collection import FormulaCollection
+from auto_3dx.geometry.bodies import Body, BodyCollection
 from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
 from auto_3dx.geometry.sketch import SketchCollection
@@ -70,6 +75,10 @@ class Part:
         self._formulas: FormulaCollection | None = None
         self._measurement: SolidMeasurement | None = None
         self._inspector: Inspector | None = None
+        self._bodies: BodyCollection | None = None
+        # Raw bodies of the enclosing `work_in` blocks, innermost last. Transient: it
+        # exists only while a `with` block runs, never across calls or processes.
+        self._work_bodies: list[Any] = []
 
     @property
     def com_object(self) -> Any:
@@ -120,7 +129,10 @@ class Part:
         """
         if self._sketches is None:
             self._sketches = SketchCollection(
-                self._com_object, self._selection, generation=self._generation
+                self._com_object,
+                self._selection,
+                generation=self._generation,
+                body_target=self._target_body,
             )
         return self._sketches
 
@@ -132,7 +144,7 @@ class Part:
         """
         if self._part_design is None:
             self._part_design = PartDesign(
-                self._com_object, self._selection, self._generation
+                self._com_object, self._selection, self._generation, self._target_body
             )
         return self._part_design
 
@@ -145,7 +157,7 @@ class Part:
         from this Part changes the model (``docs/api-design.md`` section 7).
         """
         if self._topology is None:
-            self._topology = Topology(self._selection, self._generation)
+            self._topology = Topology(self._selection, self._generation, self._com_object)
         return self._topology
 
     @property
@@ -164,7 +176,7 @@ class Part:
         """
         if self._planes is None:
             self._planes = PlaneCollection(
-                self._com_object, self._selection, self._generation
+                self._com_object, self._selection, self._generation, self._target_body
             )
         return self._planes
 
@@ -222,6 +234,105 @@ class Part:
         if self._inspector is None:
             self._inspector = Inspector(self)
         return self._inspector
+
+    @property
+    def bodies(self) -> BodyCollection:
+        """BodyCollection: The Part's bodies, read from the live model.
+
+        Built on first access and cached; the collection itself holds no state, so a
+        body created by another process is found by name.
+        """
+        if self._bodies is None:
+            self._bodies = BodyCollection(self._com_object, self._selection, self._generation)
+        return self._bodies
+
+    @contextmanager
+    def work_in(self, body: "Body | str") -> Iterator[Body]:
+        """Models in one body for the duration of a `with` block.
+
+        Inside the block `part.sketches` and `part.part_design` create, list, get and
+        remove in that body, and every feature is created with that body as the
+        In-Work Object (probe 41: `ShapeFactory` builds in the In-Work Body, while
+        sketches must be added through the body's own `Sketches`). Planes made inside the
+        block hand the In-Work Object back to that body rather than the main body.
+
+        On leaving the block, normally or through an exception, the In-Work Object that
+        was current before is put back and read back to confirm it. Blocks nest. Nothing
+        is remembered after the block ends.
+
+        Args:
+            body: A `Body` of this Part, or the name of one.
+
+        Yields:
+            The target `Body`.
+
+        Raises:
+            ParameterTypeError: If `body` is neither a `Body` nor a name, or belongs to
+                another Part.
+            BodyNotFoundError: If the body is not in this Part now.
+            AutomationError: If the In-Work Object cannot be read, set, or restored. When
+                the block itself raised, a failed restore is added to that exception as a
+                note instead of replacing it.
+        """
+        target = self._resolve_work_body(body)
+        try:
+            previous = self._com_object.InWorkObject
+        except pywintypes.com_error as error:
+            raise automation_error(error, "reading Part.InWorkObject") from error
+        self._work_bodies.append(target.com_object)
+        try:
+            try:
+                self._com_object.InWorkObject = target.com_object
+            except pywintypes.com_error as error:
+                raise automation_error(error, "making the body the In-Work Object") from error
+            yield target
+        except BaseException as error:
+            self._work_bodies.pop()
+            problem = self._put_back_in_work(previous)
+            if problem is not None:
+                error.add_note(problem)
+            raise
+        else:
+            self._work_bodies.pop()
+            problem = self._put_back_in_work(previous)
+            if problem is not None:
+                raise AutomationError(problem)
+
+    def _target_body(self) -> Any:
+        """Returns the raw body of the innermost `work_in` block, or `None` outside one."""
+        return self._work_bodies[-1] if self._work_bodies else None
+
+    def _resolve_work_body(self, body: "Body | str") -> Body:
+        """Turns a `Body` or a body name into a `Body` found in this Part now."""
+        if isinstance(body, str):
+            return self.bodies.get(body)
+        if not isinstance(body, Body):
+            raise ParameterTypeError(
+                f"work_in() takes a Body or a body name, not {type(body).__name__}."
+            )
+        for candidate in self.bodies.list():
+            try:
+                if bool(candidate.com_object == body.com_object):
+                    return candidate
+            except pywintypes.com_error:
+                continue
+        if not bool(body._part_com_object == self._com_object):
+            raise ParameterTypeError("work_in() was given a body that belongs to another Part.")
+        raise BodyNotFoundError("The body passed to work_in() is no longer in this Part.")
+
+    def _put_back_in_work(self, previous: Any) -> "str | None":
+        """Restores the captured In-Work Object; returns a problem description or `None`."""
+        try:
+            self._com_object.InWorkObject = previous
+            restored = bool(self._com_object.InWorkObject == previous)
+        except pywintypes.com_error as error:
+            return (
+                "The In-Work Object from before work_in() could not be restored "
+                f"(HRESULT={format_hresult(hresult_of(error))})."
+            )
+        if not restored:
+            return "The In-Work Object did not return to the object it was before work_in()."
+        return None
 
     def _main_body(self) -> Any:
         """Returns the raw ``MainBody``, the default thing to measure.

@@ -66,6 +66,8 @@ HOMES = {
         "Mirror",
         "Rib",
         "MultiSectionSolid",
+        "Body",
+        "BodyCollection",
         "Slot",
         "RectangularPattern",
         "ConstRadEdgeFillet",

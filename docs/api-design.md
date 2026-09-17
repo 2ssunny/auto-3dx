@@ -271,6 +271,14 @@ part.part_design.create_shell("S1", faces[0], 2.0, 0.0)
   snapshot is still returned and `SelectionNotRestoredWarning` is emitted: the selection is
   already lost by then, so raising would only discard a valid snapshot.
 
+**Only the active Part.** `Selection.Search` through a non-active Part's editor searched the
+active Part (live, 2026-09-17: five open Parts all reported the active Part's counts). Every
+Selection-based operation, which is topology search, deletion through `remove_*` and body
+visibility, therefore checks `Part.Application.ActiveEditor.ActiveObject == Part` before touching
+CATIA and raises `InactivePartError` (a `SessionError`) otherwise. The guard stays until a
+per-editor path is verified. Parameters, formulas, creation and measurement do not use the
+selection and are not guarded.
+
 **Persistent semantic identity is not solved.** A future selector may choose an edge or face by
 measurable properties such as geometry type, normal, radius, area or position. No such selector
 is public until the properties it depends on are live-verified and the choice is deterministic.
@@ -424,10 +432,14 @@ interface that the SDK does not wrap; `supported` says whether `part.part_design
 that kind. Nothing in the model is hidden because the SDK cannot create it.
 
 `bodies` includes the main body, recognised by COM identity rather than by name. A feature in
-any other body has `supported=False`, because `part.part_design` works on the main body only.
+any body reports `supported` by its kind alone, because `part.work_in(body)` lets
+`part.part_design` create and find features in any body (section 16). The top-level
+`features` and `sketches` fields still describe the main body only; each `BodyInfo` carries its
+own, and `render()` lists every body's features.
 `geometrical_sets` lists the sets directly under the Part with their elements' names and kinds.
 `topology` counts come from `part.topology`, so the user's selection is restored (section 7)
-and the generation does not advance.
+and the generation does not advance. It is `None` for a Part that is not the active one, whose
+search would count the active Part instead (section 7).
 
 `in_work_object` reports where CATIA puts the next feature: its `name`, its `kind` (the CATIA
 wrapper type name) and `is_main_body` (COM identity with `MainBody`, not a name comparison).
@@ -540,6 +552,69 @@ Status: Enforced by review.
   test created: never a whole shared container such as the `auto_3dx_Planes` set when it
   existed before the test (conventions 1.8 records the incident that made this a rule).
 - Verify cleanup by counting what remains, not by trusting that removal did not throw.
+- `AUTO3DX_LIVE_PART` matches the active Part's `Part.Name` or its 3DEXPERIENCE title, which
+  Automation exposes only as the active window caption (`Part.Name` of a titled Part is still
+  `3D Shape…`).
+- A test that makes a plane records whether `auto_3dx_Planes` existed and removes the set
+  only if the test created it and it is empty again.
+
+---
+
+## 16. Bodies and the In-Work Body
+
+Status: Implemented, pinned by `tests/unit/test_multi_body.py`, live by
+`tests/integration/test_multi_body_live.py` and the two `scripts/acceptance/multi_body_*`
+scripts (conventions 1.9).
+
+```python
+housing = part.bodies.create("OuterHousing")   # the In-Work Object is put back afterwards
+part.bodies.names()                            # ["PartBody", "OuterHousing"]
+part.bodies.get("OuterHousing")                # Body; BodyNotFoundError / AmbiguousNameError
+part.bodies.main                               # the main body, by COM identity
+
+with part.work_in(housing):                    # or part.work_in("OuterHousing")
+    sketch = part.sketches.create("SHELL_SKETCH", support="XY")
+    ...
+    part.part_design.create_pad("SHELL_PAD", sketch, 40)
+part.update()
+
+housing.features                               # FeatureInfo tuple, tree order
+housing.sketch_names
+housing.hide(); housing.is_visible             # False
+housing.show()
+part.bodies.remove("OuterHousing", delete_contents=True)
+```
+
+- **Bodies are found in the model, never remembered.** A new process finds the same bodies by
+  name. `Body.is_main` is COM identity with `MainBody`, not the name `PartBody`.
+- **`work_in` is the only way to model in another body.** Inside the block, `part.sketches`
+  adds to the body's own `Sketches`, `part.part_design` creates and looks up features in that
+  body, and the body is made the In-Work Object immediately before every factory call,
+  because a new feature takes the In-Work Object over. A plane made inside the block hands the
+  In-Work Object back to the work body, not the main body. Outside any block nothing touches
+  the In-Work Object, exactly as before.
+- **Restoration is guaranteed on every exit.** The previous In-Work Object is put back and
+  read back whether the block ends normally or raises. A failed restore after an exception is
+  added to that exception as a note rather than replacing it; after a clean block it raises
+  `AutomationError`. Blocks nest and restore in order. The target stack is transient and is
+  empty after the block.
+- **No silent fallback.** Something that is not a `Body` or a name, or a body of another Part,
+  raises `ParameterTypeError`; a body not in the Part raises `BodyNotFoundError`. Nothing ever
+  falls back to the main body.
+- **`create` leaves the In-Work Object where it was.** `Bodies.Add` moves it to the new body;
+  `create` puts it back, including when naming fails (`PartialCreationError`).
+- **Visibility goes through `Selection.VisProperties`**, so it follows the selection rules of
+  section 7: the user's selection is restored, and the Part must be active. `is_visible` is
+  exposed because `GetShow` read-back was verified live; an unknown state raises
+  `AutomationError` rather than being guessed. Hiding or showing advances the generation.
+- **Removal is guarded.** The main body is never removed (`BodyRemovalError`). A body with
+  features, sketches or geometrical sets is removed only with `delete_contents=True`, and everything in it goes
+  with it. If the In-Work Object was inside the removed body it becomes the main body;
+  otherwise it is kept. A hidden or empty body cannot be measured (CATIA E_FAIL).
+
+Not supported: boolean operations (Add, Remove, Intersect, Assemble), renaming or reordering
+bodies, geometrical sets inside a body, a public In-Work Object setter outside `work_in`,
+Products and assemblies, and any Selection-based operation on a non-active Part.
 
 ---
 
@@ -565,4 +640,8 @@ Status: Enforced by review.
 | `part.planes`: `list`/`names`/`get`, and cleanup without in-memory state | 4 | Done |
 | `sketch.support()` resolving user-defined planes, not only origin planes | 4 | Done |
 | `part_design`: Multi-sections Solid (`MultiSectionSolid`, sections only) | 4 | Done; builds live for corner-free sections, no closing-point support |
+| `part.bodies`: `list`/`names`/`get`/`main`/`create`/guarded `remove` | 16 | Done |
+| `part.work_in(body)`: sketches and Part Design in a chosen body, In-Work Object restored | 16 | Done |
+| `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |
+| Selection-based operations refuse a non-active Part (`InactivePartError`) | 7 | Done; per-editor search unsolved |
 | File export | 12 | Probed: unavailable for PLM-backed documents |
