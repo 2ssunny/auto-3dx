@@ -1061,6 +1061,111 @@ sketch.GetAbsoluteAxisData   -> (0,0,35, 1,0,0, 0,1,0)   # 평면 프레임과 �
 `sketches.create(support=plane)`를 부르면 `Sketches.Add`가 `The method Add failed`(0x80004005)로
 거부한다. 기존 live 테스트가 평면 생성 뒤 update를 부르고 있어 그동안 드러나지 않았다.
 
+### 1.8 Multi-sections Solid (probe 40, 실측 2026-09-17)
+
+타입 라이브러리에서 확인한 시그니처:
+
+```text
+ShapeFactory.AddNewLoft() -> Loft                         (인자 없음)
+Loft: Name (r/w), HybridShape -> HybridShape, Parent, GetItem
+HybridShapeLoft.AddSectionToLoft(iCrv, iOri, iPoint)
+HybridShapeLoft.GetSectionFromLoft(iRank, oCrv, oOri, oPoint)
+HybridShapeLoft.RemoveSection(iSection), GetNbOfGuides()  -- 섹션 개수 멤버는 없다
+```
+
+live 결과 (공개 API로 XY의 40x20 사각형 스케치, +30mm offset 평면, 그 위 30x15 사각형 스케치를
+만든 뒤 Loft만 raw로 호출):
+
+```text
+AddNewLoft()                         -> type 'Loft', 기본 이름 'Multi-sections Solid.1'
+In-Work Object                       -> PartBody에서 HybridShapeLoft 'Multi-sections Solid.1'로 바뀜
+loft.HybridShape                     -> HybridShapeLoft
+CreateReferenceFromObject(sketch)    -> Reference
+AddSectionToLoft(reference, 1, None) -> 예외 없음 (두 섹션 모두)
+loft.Name = 'AUTO3DX_P40_LOFT'       -> 동작
+Part.Update()                        -> 실패 (E_FAIL)  <- 사각형 두 개로는 solid가 만들어지지 않았다
+MainBody.Shapes.Item(i)              -> type 'Loft', 바뀐 이름으로 다시 찾음
+Shapes 항목 == AddNewLoft 반환 객체    -> False   (COM 동일성으로 같은 feature를 판정할 수 없다)
+GetSectionFromLoft(0)                -> 실패 E_FAIL
+GetSectionFromLoft(1) / (2)          -> (Reference, 1, None), Reference.DisplayName == 스케치 이름
+                                        Reference == Sketch 객체 -> False
+GetSectionFromLoft(3)                -> 실패 E_FAIL (섹션 2개일 때 마지막 다음 순위)
+Selection으로 Loft 삭제                -> 섹션 스케치 두 개도 함께 삭제됨 (Pad가 스케치를 지우는 것과 같다)
+```
+
+그 전에 사용자가 raw로 같은 경로(`AddNewLoft` + `AddSectionToLoft(reference, 1, None)` 두 번 +
+`Part.Update()`)를 돌려 NACA 2415(root, chord 150mm, XY)와 NACA 2412(tip, chord 100mm, +300mm)
+사이의 날개 solid를 만들고 측정까지 했다. SDK로는 아직 재현하지 않았다.
+
+이 사실로 `part_design.create_multi_section_solid`/`get_`/`remove_`/`multi_section_solids`와
+`MultiSectionSolid.section_names()`를 만들었다.
+
+- 섹션은 스케치에서 만든 `Reference`로 넘기고 `iOri`는 1, 닫힘점은 `None`이다. 시도한 조합이 이것뿐이다.
+- 섹션 개수 멤버가 없으므로 `section_names()`는 1순위부터 읽다가 **E_FAIL**이 나오면 멈춘다. 다른
+  오류는 끝으로 보지 않고 그대로 올린다. 이름은 `Reference.DisplayName`이다.
+- feature를 찾는 것은 이름과 타입(`Loft`)으로 한다. COM 동일성은 위에서처럼 믿을 수 없다.
+- In-Work Object가 Loft의 `HybridShape`로 바뀌는 것은 그대로 둔다. 되돌리지 않는다.
+
+**공개 API live 검증 (2026-09-17, 표준 CPython 3.14.2, Part `3D Shape00422533`).**
+
+사용자가 raw로 만든 날개가 들어 있는 Part에서 돌렸다. 그 날개는 읽기만 했고, 검증이 만든 것만
+지웠으며, 평면 생성이 옮긴 In-Work Object는 매번 원래 값으로 되돌렸다. 모든 실행 뒤 전체 Part
+(In-Work Object와 selection 포함)가 실행 전 기준과 같았다.
+
+```text
+사용자의 raw 날개를 새 프로세스에서 SDK로 읽기(읽기 전용)
+  get_multi_section_solid('WING_SOLID_LOFT')     -> kind Loft, supported
+  section_names()                                -> ['WING_ROOT_NACA2415', 'WING_TIP_NACA2412']
+  두 섹션 스케치의 support()                        -> 'XY' / OffsetPlane('WING_TIP_PLANE', 300.0)
+  부피 449699.966 mm3, 면적 80076.347 mm2
+  섹션 구성                                       -> 스케치마다 닫힌 Spline2D 하나, 제어점 49개,
+                                                   시작점 = 끝점 = 날카로운 뒷전, 제약 0개
+
+섹션 모양별 Part.Update() (AddSectionToLoft(reference, 1, None), 닫힘점 없음)
+  사각형 40x20 -> 30x15                  실패 (probe 40, acceptance, 통합 테스트 세 번)
+  NACA, 열린 뒷전 spline + 선            실패
+  원 R20 -> R12                          성공
+  NACA, 닫힌 spline 하나                  성공
+```
+
+즉 모서리가 있는 섹션은 닫힘점 없이는 만들어지지 않았고, 모서리 없는 섹션은 만들어졌다. 닫힘점을
+설정하는 API는 범위 밖이므로 원인을 닫힘점으로 확정하지는 않았고, 관찰된 규칙으로만 기록한다.
+
+```text
+원 두 개 (통합 테스트, 새 wrapper에서 재발견)
+  update, kind Loft, topology 변화, 부피 증가 = 원뿔대 부피 +-1%
+  section_names() == [root, tip], 삭제하면 섹션 스케치도 사라짐
+사각형 두 개 (통합 테스트)
+  update -> PartUpdateError, is_up_to_date False
+  remove_multi_section_solid -> update 성공, is_up_to_date True
+원 두 개 수명 주기 (scripts/acceptance/multi_section_solid_lifecycle.py create circle / verify-and-remove)
+  프로세스 A: 생성, update, 검증 후 정리 없이 종료
+  프로세스 B: get_multi_section_solid로 재발견, section_names 확인, 삭제, 기준 복원
+NACA 날개 (scripts/acceptance/naca_wing_multi_section_solid.py create / verify / remove, 공개 API만)
+  root NACA 2415 chord 150 (XY), tip NACA 2412 chord 100 (+300mm 평면), X로 400mm 옮김
+  A: update 성공, 부피 +449702.881 mm3 (raw 날개 449699.966), 면적 +80076.4, topology 8/4 -> 16/8
+  B: 새 프로세스에서 root/tip 스케치·tip 평면·날개를 이름으로 찾음, section_names, is_up_to_date,
+     topology, 부피, 면적, 무게중심 x 253.95 (두 날개 중간)
+  C: 새 프로세스에서 삭제, 기준 복원
+```
+
+**B에서 드러난 한계.** 사용자의 `WING_TIP_PLANE`과 검증용 평면이 둘 다 XY에서 +300mm라 프레임이
+같았고, 검증용 tip 스케치의 `support()`는 설계대로 `None`이었다(1.7). 스케치에 support 멤버가 없으니
+프레임이 같은 평면은 구분할 수 없다.
+
+**`part.planes`와 In-Work Object.** 섹션 스케치를 위한 평면을 만들면 `geometry.planes`가 In-Work
+Object를 main body로 되찾는다. Loft가 In-Work Object였던 Part라면 그 값이 바뀐다. 통합 테스트
+세션은 끝날 때 되돌리고, 수동 검증에서는 되돌리는 단계를 따로 뒀다.
+
+지원하지 않는 것: guide 곡선, spine, 닫힘점, coupling 설정, tangency, relimitation, Multi-Section
+Surface(GSD loft).
+
+**사고 기록.** probe 40의 첫 실행은 활성 Part가 테스트 Part가 아니었는데 그대로 돌았고, 정리 단계의
+`remove_geometrical_set()`이 `auto_3dx_Planes` 세트를 통째로 지워 다른 작업의 `GEAR_TOP_PLANE`을
+삭제했다. 그 평면 위의 스케치가 support를 잃어 `Part.Update()`가 실패하는 상태가 됐다(저장은 없음).
+이후 probe와 acceptance 스크립트는 `AUTO3DX_LIVE_PART`로 이름을 지정한 Part에서만 돌고, 자기가 만든
+평면 하나만 지운다. live 통합 테스트 세션도 같은 환경 변수가 활성 Part와 일치해야만 시작한다.
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

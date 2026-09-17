@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 896 통과 | 42 통과 |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 919 통과 | 42 통과 (Multi-sections Solid 추가 전 전체), Multi-sections Solid 2 통과 |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -454,6 +454,7 @@ assert part.is_up_to_date()
 | Mirror | `mirrors`, `get_mirror`, `create_mirror`, `ensure_mirror`, `remove_mirror` | `XY`/`YZ`/`ZX` 평면 |
 | Rib | `ribs`, `get_rib`, `create_rib`, `ensure_rib`, `remove_rib` | profile Sketch + path Sketch |
 | Slot | `slots`, `get_slot`, `create_slot`, `ensure_slot`, `remove_slot` | profile Sketch + path Sketch |
+| Multi-sections Solid | `multi_section_solids`, `get_multi_section_solid`, `create_multi_section_solid`, `remove_multi_section_solid` | 닫힌 Sketch 2개 이상 (`ensure_*` 없음) |
 | Edge Fillet | `edge_fillets`, `get_edge_fillet`, `create_edge_fillet`, `remove_edge_fillet` | `Edge` (`ensure_*` 없음) |
 | Chamfer | `chamfers`, `get_chamfer`, `create_chamfer`, `remove_chamfer` | `Edge` (`ensure_*` 없음) |
 | Shell | `shells`, `get_shell`, `create_shell`, `remove_shell` | `Face` (`ensure_*` 없음) |
@@ -468,6 +469,28 @@ shaft.set_first_angle(180, unit="deg")
 shaft.set_second_angle(0, unit="deg")
 part.update()
 ```
+
+Multi-sections Solid(CATIA Loft)는 닫힌 프로파일 스케치를 두 개 이상 순서대로 받습니다.
+
+```python
+solid = part.part_design.create_multi_section_solid(
+    "WING_SOLID_LOFT",
+    sections=[root_sketch, tip_sketch],
+)
+part.update()
+
+part.part_design.get_multi_section_solid("WING_SOLID_LOFT").section_names()
+# ['WING_ROOT', 'WING_TIP'] -- 모델에서 다시 읽은 섹션 스케치 이름
+part.part_design.remove_multi_section_solid("WING_SOLID_LOFT")
+# 섹션 스케치도 함께 지워집니다. 평면은 남습니다.
+```
+
+guide 곡선, spine, 닫힘점, coupling, tangency, relimitation은 지원하지 않습니다. 닫힘점을
+주지 않으므로 **섹션은 모서리 없는 닫힌 곡선 하나로** 그려야 합니다. live에서 원 두 개와,
+뒷전이 날카로운 닫힌 spline 하나로 그린 NACA 2415/2412 날개는 만들어졌고, 사각형이나 열린
+뒷전을 선으로 닫은 에어포일은 update에 실패했습니다. 이 경우 `PartUpdateError`가 나고
+`remove_multi_section_solid`로 지우면 복구됩니다. 생성, 새 프로세스에서의 재발견과 섹션 읽기,
+삭제까지 live로 확인했습니다. 자세한 상태는 [기능 현황](docs/capabilities.md) 3.4.4에 있습니다.
 
 Rib와 Slot은 profile과 path 두 `Sketch` wrapper를 받습니다. 각 스케치의 COM 객체를
 `AddNewRib`/`AddNewSlot`에 넘기는 일은 SDK가 내부에서 합니다. 같은 이름의
@@ -738,6 +761,17 @@ python -m pytest tests/integration -m integration -q
 정리하므로, 저장하지 않은 별도 작업 세션에서 실행하는 것이 좋습니다. 테스트와
 라이브러리 모두 `Save()`와 `PLMPropagate()`를 호출하지 않습니다.
 
+통합 테스트는 버려도 되는 테스트 Part에서만 실행합니다. 세션은 `AUTO3DX_LIVE_PART`가
+활성 Part 이름과 일치할 때만 시작하고, 그렇지 않으면 아무것도 건드리지 않고 멈춥니다.
+
+```powershell
+$env:AUTO3DX_LIVE_PART = '3D Shape00422533'
+python -m pytest tests/integration -m integration -q
+```
+
+`scripts/acceptance/`의 Multi-sections Solid 수명 주기와 NACA 날개 acceptance 스크립트도 같은
+변수로 Part를 이름으로 골라 공개 API만 사용합니다.
+
 통합 테스트 세션은 시작할 때 사용자의 CATIA selection을 저장하고 비운 뒤, 끝날 때
 되돌리고 개수로 확인합니다(`tests/integration/conftest.py`). `remove_*`가 selection을
 거쳐 지우므로 이 장치가 없으면 실행 뒤 selection이 비어 있었습니다.
@@ -747,7 +781,7 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 896개입니다. B428_Cloud
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 919개입니다. B428_Cloud
 live 통합 테스트는 42개이고, 열려 있는 Part에 수동으로 파라미터를 추가해 두지 않았다면 그
 중 1건은 skip됩니다. 최근 실행한 Part에는 그 파라미터가 있어 40개가 모두 통과했습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.

@@ -12,7 +12,8 @@ Every field here comes from a read already backed by live evidence:
   by `ParameterCollection.user_parameters()`;
 * sketch names through `Body.Sketches`, verified live;
 * features through `Body.Shapes` enumeration and each item's `Name` and
-  `type(item).__name__`, live-verified for all thirteen kinds the SDK creates;
+  `type(item).__name__`, live-verified for every kind the SDK creates, including the
+  Multi-sections Solid's `Loft` (probe 40);
 * bodies through `Part.Bodies` `Count`/`Item`/`Name`, with the main body recognised by
   COM identity (`Bodies.Item(1) == MainBody`, probe 38);
 * geometrical sets through `Part.HybridBodies`, each set's `HybridShapes` items with
@@ -46,6 +47,7 @@ from auto_3dx.geometry.part_design import (
     GROOVE_KIND,
     HOLE_KIND,
     MIRROR_KIND,
+    MULTI_SECTION_SOLID_KIND,
     PAD_KIND,
     POCKET_KIND,
     RECTANGULAR_PATTERN_KIND,
@@ -72,6 +74,7 @@ SUPPORTED_FEATURE_KINDS: frozenset[str] = frozenset(
         MIRROR_KIND,
         RIB_KIND,
         SLOT_KIND,
+        MULTI_SECTION_SOLID_KIND,
         RECTANGULAR_PATTERN_KIND,
         EDGE_FILLET_KIND,
         CHAMFER_KIND,

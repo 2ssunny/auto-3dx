@@ -17,7 +17,7 @@
   판정 추가 후), Conda에서 38 통과·1 skip(그 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **896 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
+- 테스트: **919 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
   검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **42 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
@@ -364,6 +364,8 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 12 | topology 검색의 사용자 selection 복원 | 완료 | `part.topology.edges()`/`faces()`가 검색 전 selection을 캡처하고 뒤에 복원한 뒤 개수로 확인한다. CATIA가 복원 일부를 조용히 거부하면 스냅샷은 그대로 돌려주고 `SelectionNotRestoredWarning`을 낸다 (`test_topology_selection.py`, live `test_snapshots_restore_the_user_selection_and_stay_usable`) |
 | 13 | 스레드 안전성 | 중간 | 미검증 (2.7) |
 | 14 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
+| 15 | Multi-sections Solid (Loft) | 완료 (모서리 없는 섹션) | `create_multi_section_solid`/`get_`/`remove_`/`multi_section_solids`/`section_names()`. live: 원 두 개와 닫힌 spline NACA 2415/2412 날개가 공개 API만으로 만들어졌고, 새 프로세스에서 재발견·섹션 읽기·삭제·기준 복원까지 통과했다. 사각형과 선으로 닫은 에어포일처럼 모서리가 있는 섹션은 닫힘점 없이 update에 실패하며, `remove_multi_section_solid`로 복구된다. guide·spine·닫힘점·coupling은 미지원 (conventions 1.8, live `test_multi_section_solid_live.py`) |
+| 16 | live 테스트 대상 Part 지정 | 완료 | `AUTO3DX_LIVE_PART`가 활성 Part와 일치해야 통합 테스트 세션이 시작된다. 이름을 지정하지 않은 Part에서 probe가 공유 기하 세트를 지운 사고에서 나온 규칙이다 (conventions 1.8) |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸고, 면은
 probe 37에서 같은 경로로 뚫렸으므로, 남은 것은 "어느 모서리·어느 면인가"를 안정적으로

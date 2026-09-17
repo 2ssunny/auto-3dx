@@ -535,6 +535,10 @@ Status: Enforced by review.
 - After a deliberately broken feature, remove it before continuing: a failed update poisons every
   later update.
 - Restore the In-Work Object and the selection when a test changes them.
+- Run only against a disposable Part named by `AUTO3DX_LIVE_PART`. The integration session
+  refuses to start otherwise, and probes select the Part by that name. Remove only what the
+  test created: never a whole shared container such as the `auto_3dx_Planes` set when it
+  existed before the test (conventions 1.8 records the incident that made this a rule).
 - Verify cleanup by counting what remains, not by trusting that removal did not throw.
 
 ---
@@ -560,4 +564,5 @@ Status: Enforced by review.
 | `part.inspect`: In-Work Object (`InWorkObjectInfo`) | 11 | Done |
 | `part.planes`: `list`/`names`/`get`, and cleanup without in-memory state | 4 | Done |
 | `sketch.support()` resolving user-defined planes, not only origin planes | 4 | Done |
+| `part_design`: Multi-sections Solid (`MultiSectionSolid`, sections only) | 4 | Done; builds live for corner-free sections, no closing-point support |
 | File export | 12 | Probed: unavailable for PLM-backed documents |

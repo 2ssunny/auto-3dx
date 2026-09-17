@@ -3,7 +3,7 @@
 Exposes `Sketch`/`SketchCollection`/`SketchElement` (2D profiles on origin
 planes, and the point/line/circle/spline elements drawn in one),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
-`Rib`/`Slot`/`RectangularPattern`/`ConstRadEdgeFillet`/`Chamfer`/`Shell`/
+`Rib`/`Slot`/`MultiSectionSolid`/`RectangularPattern`/`ConstRadEdgeFillet`/`Chamfer`/`Shell`/
 `Thickness`/`Hole`/`PartDesign` (extruded, pocketed, revolved, mirrored,
 ribbed, slotted, patterned, filleted, chamfered, shelled, thickened, and
 holed solid features), `Edge`/`EdgeSnapshot` and `Face`/`FaceSnapshot` (the
@@ -54,6 +54,7 @@ from auto_3dx.geometry.part_design import (
     PATTERN_DIRECTION_Z,
     POCKET_KIND,
     RECTANGULAR_PATTERN_KIND,
+    MULTI_SECTION_SOLID_KIND,
     RIB_KIND,
     SHAFT_KIND,
     SHELL_KIND,
@@ -73,6 +74,7 @@ from auto_3dx.geometry.part_design import (
     Pocket,
     RectangularPattern,
     RevolvedFeature,
+    MultiSectionSolid,
     Rib,
     Shaft,
     Shell,
@@ -112,6 +114,7 @@ __all__ = [
     "GROOVE_KIND",
     "MIRROR_KIND",
     "RECTANGULAR_PATTERN_KIND",
+    "MULTI_SECTION_SOLID_KIND",
     "RIB_KIND",
     "SLOT_KIND",
     "PATTERN_DIRECTION_X",
@@ -129,6 +132,7 @@ __all__ = [
     "Shaft",
     "Groove",
     "Mirror",
+    "MultiSectionSolid",
     "Rib",
     "Slot",
     "RectangularPattern",

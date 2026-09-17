@@ -56,10 +56,21 @@ single-generation staleness policy (`geometry.faces`, `_require_current_face`)
 as the edge features, and reduce to `com_object`/`name` for the same reason:
 there is no verified way to read a shell/thickness/hole's source face back,
 so there is no `ensure_shell`/`ensure_thickness`/`ensure_hole` either.
+
+`MultiSectionSolid` (probe 40, `docs/conventions.md` section 1.8) is the Part Design
+Multi-sections Solid -- CATIA's `Loft`. It is created differently from every other
+feature here: `ShapeFactory.AddNewLoft()` takes no arguments, and the sections are
+added to the new feature's `HybridShape` afterwards, one `AddSectionToLoft` call per
+section sketch. `_create_feature` gained an optional post-rename `configure` step for
+exactly that, so the duplicate-name check, the rename and the `PartialCreationError`
+reporting stay shared rather than copied. Its section sketches can be read back from
+the live feature by name (`MultiSectionSolid.section_names`), but guides, spine,
+coupling, closing points, tangency and relimitation are neither set nor read.
 """
 
 import warnings
 import math
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import pywintypes
@@ -68,6 +79,7 @@ from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
+    AutomationError,
     FeatureConflictError,
     FeatureNotFoundError,
     PartialCreationError,
@@ -118,6 +130,33 @@ RIB_KIND: str = "Rib"
 
 SLOT_KIND: str = "Slot"
 """The `type(com_object).__name__` value for a CATIA Slot feature."""
+
+MULTI_SECTION_SOLID_KIND: str = "Loft"
+"""The `type(com_object).__name__` of a Part Design Multi-sections Solid (probe 40).
+
+CATIA's user interface calls the feature "Multi-sections Solid" and names new ones
+`Multi-sections Solid.N`, but the Automation wrapper type is `Loft`.
+"""
+
+MULTI_SECTION_ORIENTATION_VERIFIED: int = 1
+"""The `iOri` value passed to `AddSectionToLoft` for every section.
+
+The only value tried: it was accepted for both sections in probe 40 and read back as
+`1` by `GetSectionFromLoft`, and it is the value the raw NACA wing experiment used. The
+type library gives no enum meaning for it, so no other value is offered.
+"""
+
+MIN_MULTI_SECTION_SECTIONS: int = 2
+"""A Multi-sections Solid needs at least two sections to span between."""
+
+_FIRST_SECTION_RANK: int = 1
+"""`GetSectionFromLoft` ranks are 1-based: rank 0 failed and ranks 1 and 2 answered."""
+
+_MAX_SECTION_RANK: int = 1000
+"""Upper bound on section read-back, so a release that never fails cannot loop forever."""
+
+_E_FAIL: int = -2147467259
+"""`E_FAIL`, which `GetSectionFromLoft` reported for the rank past the last section."""
 
 EDGE_FILLET_KIND: str = "ConstRadEdgeFillet"
 """The `type(com_object).__name__` value for a CATIA constant-radius edge fillet."""
@@ -240,6 +279,60 @@ _PATTERN_ROTATION_ANGLE: float = 0.0
 
 FULL_REVOLUTION: float = 360.0
 """The verified default `FirstAngle.Value` (degrees) a new Shaft/Groove is created with."""
+
+
+def _validate_sections(sections: Any) -> "list[Sketch]":
+    """Checks the section sketches of a Multi-sections Solid before CATIA is called.
+
+    Args:
+        sections: The caller's sections argument.
+
+    Returns:
+        The sections as a list, in the order given.
+
+    Raises:
+        ParameterTypeError: If `sections` is not a sequence of `Sketch` objects, holds
+            fewer than `MIN_MULTI_SECTION_SECTIONS`, or names the same sketch twice.
+    """
+    if isinstance(sections, (str, bytes)) or not isinstance(sections, Iterable):
+        raise ParameterTypeError(
+            "sections must be a sequence of Sketch objects, not "
+            f"{type(sections).__name__}."
+        )
+    section_list = list(sections)
+    if len(section_list) < MIN_MULTI_SECTION_SECTIONS:
+        raise ParameterTypeError(
+            f"A multi-section solid needs at least {MIN_MULTI_SECTION_SECTIONS} sections, "
+            f"got {len(section_list)}."
+        )
+    for position, section in enumerate(section_list, start=1):
+        if not isinstance(section, Sketch):
+            raise ParameterTypeError(
+                f"Section {position} must be a Sketch, not {type(section).__name__}."
+            )
+    for index, first in enumerate(section_list):
+        for second in section_list[index + 1:]:
+            if bool(first.com_object == second.com_object):
+                raise ParameterTypeError(
+                    "The same sketch appears more than once in sections; each section "
+                    "must be a different sketch."
+                )
+    return section_list
+
+
+def _is_past_last_section(error: pywintypes.com_error) -> bool:
+    """Tells whether `GetSectionFromLoft` failed because the rank is past the end.
+
+    Args:
+        error: The COM error `GetSectionFromLoft` raised.
+
+    Returns:
+        `True` only for the `E_FAIL` CATIA reported for the rank after the last section
+        in probe 40. Any other failure is a real error, not the end of the list.
+    """
+    excepinfo = error.args[2] if len(error.args) > 2 else None
+    scode = excepinfo[5] if isinstance(excepinfo, tuple) and len(excepinfo) > 5 else None
+    return scode == _E_FAIL
 
 
 def _scan_shapes(shapes: Any, kind: str) -> "list[Any]":
@@ -841,6 +934,65 @@ class Slot(_NamedFeature):
             raise _wrap_com_error(error) from error
 
 
+class MultiSectionSolid(_NamedFeature):
+    """Wraps a raw CATIA `Loft` COM object: a Part Design Multi-sections Solid.
+
+    Verified against a live session (probe 40, `docs/conventions.md` section 1.8):
+    `ShapeFactory.AddNewLoft()` creates the feature, its `HybridShape` is a
+    `HybridShapeLoft`, and `AddSectionToLoft(Reference, 1, None)` accepts a
+    `Part.CreateReferenceFromObject(sketch)` reference for each section. The feature is
+    found again by enumerating `MainBody.Shapes`, and its sections can be read back from
+    that rediscovered object, so nothing here depends on the wrapper that created it.
+
+    Only the sections are covered. Guides, spine, coupling, closing points, tangency and
+    relimitation are neither set by `create_multi_section_solid` nor exposed here.
+    """
+
+    def section_names(self) -> "list[str]":
+        """Reads the names of this feature's section sketches from the live model.
+
+        Each section is read with `HybridShape.GetSectionFromLoft(rank)`, which returns
+        `(Reference, orientation, closing point)`; the reference's `DisplayName` is the
+        section sketch's name (probe 40). There is no section-count member, so ranks are
+        read from 1 until CATIA reports `E_FAIL`, which is what the rank after the last
+        section returned live. Any other failure is raised, not taken as the end.
+
+        Names are returned rather than `Sketch` objects: a reference names a sketch, and
+        sketch names are not guaranteed unique, so resolving one is left to
+        `part.sketches.get(name)`, which refuses to guess.
+
+        Returns:
+            The section sketch names, in section order.
+
+        Raises:
+            AutomationError: If the sections cannot be read, a reference has no readable
+                name, or CATIA reports more than `_MAX_SECTION_RANK` sections.
+        """
+        try:
+            hybrid_loft = self._com_object.HybridShape
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        names: list[str] = []
+        for rank in range(_FIRST_SECTION_RANK, _MAX_SECTION_RANK + 1):
+            try:
+                section = hybrid_loft.GetSectionFromLoft(rank)
+            except pywintypes.com_error as error:
+                if rank > _FIRST_SECTION_RANK and _is_past_last_section(error):
+                    return names
+                raise _wrap_com_error(error) from error
+            reference = section[0] if isinstance(section, tuple) else section
+            try:
+                names.append(str(reference.DisplayName))
+            except (AttributeError, pywintypes.com_error) as error:
+                raise AutomationError(
+                    f"Section {rank} of this multi-section solid has no readable name."
+                ) from error
+        raise AutomationError(
+            f"CATIA reported more than {_MAX_SECTION_RANK} sections for one "
+            "multi-section solid; stopped reading rather than guess where they end."
+        )
+
+
 class ConstRadEdgeFillet(_NamedFeature):
     """Wraps a raw CATIA `ConstRadEdgeFillet` COM object.
 
@@ -1193,6 +1345,7 @@ class PartDesign:
         factory_args: "tuple[Any, ...]",
         wrapper_cls: type,
         noun: str,
+        configure: Any = None,
     ) -> Any:
         """Creates a new Part Design feature through `ShapeFactory`.
 
@@ -1213,6 +1366,11 @@ class PartDesign:
             factory_args: The positional arguments to pass to that method
                 (already validated/coerced raw COM values, never wrapper
                 objects).
+            configure: Optional step that finishes building the feature after it
+                is renamed, given its raw COM object. A Multi-sections Solid adds
+                its sections here, because `AddNewLoft` takes no arguments. A COM
+                failure inside it raises `PartialCreationError`: by then the
+                feature exists under `name` and can be removed by name.
             wrapper_cls: `Pad`, `Pocket`, `Shaft`, `Groove`, or `Mirror`.
             noun: `"pad"`, `"pocket"`, `"shaft"`, `"groove"`, or `"mirror"`,
                 used only in error messages.
@@ -1262,6 +1420,15 @@ class PartDesign:
                     f"retry blindly: retrying would create another {noun} instead "
                     "of fixing this one."
                 ) from error
+            if configure is not None:
+                try:
+                    configure(feature.com_object)
+                except pywintypes.com_error as error:
+                    raise PartialCreationError(
+                        f"Created a {noun} named {name!r} but could not finish "
+                        "building it. It is in the model under that name; remove it "
+                        "before retrying."
+                    ) from error
         return feature
 
     def _ensure(
@@ -2339,6 +2506,128 @@ class PartDesign:
                 failed.
         """
         self._remove(name, self.get_slot, "slot")
+
+    @property
+    def multi_section_solids(self) -> "list[MultiSectionSolid]":
+        """Lists every Multi-sections Solid on the Part's `MainBody`.
+
+        Read from the live model each time: a feature created by another process is
+        listed just like one created through this wrapper.
+
+        Returns:
+            A `MultiSectionSolid` for each item in `MainBody.Shapes` whose wrapper type
+            is `MULTI_SECTION_SOLID_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(MULTI_SECTION_SOLID_KIND, MultiSectionSolid)
+
+    def get_multi_section_solid(self, name: str) -> MultiSectionSolid:
+        """Looks up a Multi-sections Solid by name.
+
+        Args:
+            name: The feature's name.
+
+        Returns:
+            The matching `MultiSectionSolid`.
+
+        Raises:
+            FeatureNotFoundError: If no Multi-sections Solid named `name` exists.
+            AmbiguousNameError: If two or more exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(
+            MULTI_SECTION_SOLID_KIND, MultiSectionSolid, "multi-section solid", name
+        )
+
+    def create_multi_section_solid(
+        self, name: str, sections: "Sequence[Sketch]"
+    ) -> MultiSectionSolid:
+        """Creates a Multi-sections Solid (CATIA Loft) through two or more sketches.
+
+        Each section is passed to `AddSectionToLoft` as a reference created from the
+        sketch, with orientation `MULTI_SECTION_ORIENTATION_VERIFIED` and no closing
+        point -- the combination verified live (probe 40). The sections are used in the
+        order given. No guide, spine, coupling, tangency or relimitation is set.
+
+        This does not rebuild. Call `part.update()` afterwards, and if that raises
+        `PartUpdateError`, remove the feature with `remove_multi_section_solid`: a
+        feature whose update failed breaks every later update.
+
+        No closing points are set, so what builds depends on the sections' corners
+        (`docs/conventions.md` section 1.8). Live, corner-free sections built: two circles,
+        and a NACA profile drawn as one closed spline per section. Sections with corners
+        failed `Part.Update()`: two rectangles, and a NACA profile whose open trailing
+        edge was closed by a separate line. Prefer one smooth closed curve per section.
+
+        Creating the feature makes its loft the In-Work Object in CATIA (probe 40). The
+        SDK does not change that; `part.inspect.in_work_object()` reports it.
+
+        Args:
+            name: The new feature's name. Must be non-empty, without surrounding
+                whitespace, and must not contain `"\\"`.
+            sections: Two or more different `Sketch` objects, each a closed profile, in
+                the order the solid should pass through them.
+
+        Returns:
+            The new `MultiSectionSolid`, renamed to `name`, with every section added.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `sections` is not a sequence of at least two
+                different `Sketch` objects.
+            FeatureConflictError: If a Multi-sections Solid named `name` already exists.
+            AmbiguousNameError: If two or more already exist.
+            PartialCreationError: If the feature was created but could not be renamed or
+                could not receive every section.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        section_list = _validate_sections(sections)
+        references = []
+        for section in section_list:
+            try:
+                references.append(
+                    self._part_com_object.CreateReferenceFromObject(section.com_object)
+                )
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+        def add_sections(com_object: Any) -> None:
+            hybrid_loft = com_object.HybridShape
+            for reference in references:
+                hybrid_loft.AddSectionToLoft(
+                    reference, MULTI_SECTION_ORIENTATION_VERIFIED, None
+                )
+
+        return self._create_feature(
+            name,
+            MULTI_SECTION_SOLID_KIND,
+            "AddNewLoft",
+            (),
+            MultiSectionSolid,
+            "multi-section solid",
+            configure=add_sections,
+        )
+
+    def remove_multi_section_solid(self, name: str) -> None:
+        """Removes a Multi-sections Solid from the model.
+
+        The feature is found in the live model by name, so one created by another
+        process can be removed. Deleting it also deleted its section sketches in probe
+        40, the way deleting a pad deletes its sketch; a later `sketches.remove` for
+        them will legitimately raise `SketchNotFoundError`. Planes the sketches sat on
+        are not removed. This does not rebuild and never saves.
+
+        Args:
+            name: The feature's name.
+
+        Raises:
+            FeatureNotFoundError: If no Multi-sections Solid named `name` exists.
+            Auto3dxError: If no editor selection is available, or the deletion failed.
+        """
+        self._remove(name, self.get_multi_section_solid, "multi-section solid")
 
     def snapshot_edges(self) -> EdgeSnapshot:
         """Takes a fresh snapshot of every edge of the Part's solid.

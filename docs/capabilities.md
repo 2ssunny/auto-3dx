@@ -7,7 +7,7 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **896 unit 통과**
+- 현재 정적 검증: **919 unit 통과**
 - 현재 라이브 검증: 2026-09-16 재실행 기준 **42 integration 통과**(수동으로 파라미터를
   추가하지 않은 Part에서는 그중 1건이 skip된다). 실행 뒤
   모델이 실행 전 상태와 같았다
@@ -216,8 +216,46 @@ Thickness, Hole)가 뚫렸다. `Selection.Search('Topology.Edge,all')` /
 
 ```text
 AddNewDraft       AddNewStiffener   AddNewCircPattern AddNewUserPattern
-AddNewLoft        AddNewSplit       AddNewTrim        AddNewSolidCombine ... 외 69개
+AddNewSplit       AddNewTrim        AddNewSolidCombine ... 외 69개
 ```
+
+`AddNewLoft`는 Multi-sections Solid로 올렸다(3.4.4).
+
+### 3.4.4 Multi-sections Solid (Loft)
+
+```python
+root = part.sketches.create("WING_ROOT", support="XY")      # 닫힌 프로파일
+plane = part.planes.create_offset("WING_TIP_PLANE", "XY", 300)
+part.update()                                                # 평면 위 스케치 전에 필요
+tip = part.sketches.create("WING_TIP", support=plane)        # 닫힌 프로파일
+
+solid = part.part_design.create_multi_section_solid("WING_SOLID_LOFT", sections=[root, tip])
+part.update()
+
+part.part_design.multi_section_solids               # 모델에서 다시 읽는다
+part.part_design.get_multi_section_solid("WING_SOLID_LOFT").section_names()
+part.part_design.remove_multi_section_solid("WING_SOLID_LOFT")  # 섹션 스케치도 함께 지워진다
+```
+
+| 항목 | 상태 |
+|---|---|
+| 생성(`AddNewLoft` + 섹션마다 `AddSectionToLoft(reference, 1, None)`) | live 검증 |
+| 두 개 이상 섹션, 주어진 순서 | 구현, live는 2개로 검증 |
+| update 성공, 부피·면적, topology 변화 | **모서리 없는 섹션만**. 원 두 개(부피 = 원뿔대 ±1%), 닫힌 spline 하나짜리 NACA 날개 성공. 사각형, 선으로 닫은 NACA는 update 실패 |
+| 다른 프로세스에서 `get_multi_section_solid`로 다시 찾기 | live 검증 (SDK가 만든 것, raw로 만든 것 모두) |
+| `section_names()` | live 검증, 별도 프로세스 포함 |
+| update 실패 후 `remove_multi_section_solid`로 복구 | live 검증 (사각형) |
+| 삭제 | 섹션 스케치까지 함께 지워지는 것 확인(probe 40). 평면은 남는다 |
+| 검사 | `part.inspect.features()`에 kind `Loft`, `supported=True` |
+| guide, spine, 닫힘점, coupling, tangency, relimitation, GSD loft | 미지원 |
+
+- 생성 직후 CATIA가 In-Work Object를 Loft의 `HybridShape`로 옮긴다. SDK는 되돌리지 않는다.
+- update가 `PartUpdateError`면 feature를 `remove_multi_section_solid`로 지우고 다시 시작한다.
+- COM 동일성은 믿을 수 없어(생성 객체와 재조회 객체가 `==` False) 이름과 타입으로 찾는다.
+- **섹션은 모서리 없는 닫힌 곡선 하나로 그린다.** 닫힘점을 설정하지 않으므로 사각형이나, 열린
+  뒷전을 선으로 닫은 에어포일처럼 모서리가 있는 섹션은 update에 실패했다. NACA 에어포일은 뒷전이
+  날카로운 닫힌 spline 하나로 그리면 만들어진다(`scripts/acceptance/naca_wing_multi_section_solid.py`).
+- 자세한 실측과 남은 확인 항목은 conventions 1.8.
 
 ### 3.4.1 스케치 제약
 

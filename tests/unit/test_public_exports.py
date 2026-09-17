@@ -65,6 +65,7 @@ HOMES = {
         "Groove",
         "Mirror",
         "Rib",
+        "MultiSectionSolid",
         "Slot",
         "RectangularPattern",
         "ConstRadEdgeFillet",
