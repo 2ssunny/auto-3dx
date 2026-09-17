@@ -140,6 +140,8 @@ def test_mirror_round_trip(part) -> None:
     """A mirror takes an origin plane, so it needs no BRep reference."""
     body = part.com_object.MainBody
     shapes_before = body.Shapes.Count
+    if shapes_before == 0:
+        pytest.skip("The main body is empty; a mirror of nothing fails the update.")
     if MIRROR_NAME in [f.name for f in part.part_design.mirrors]:
         pytest.skip(f"{MIRROR_NAME} already exists; clean it up first.")
 

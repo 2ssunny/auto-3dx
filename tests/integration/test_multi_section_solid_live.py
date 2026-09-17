@@ -37,6 +37,7 @@ from auto_3dx.errors import (  # noqa: E402
     NoActivePartError,
 )
 from auto_3dx.geometry.part_design import MULTI_SECTION_SOLID_KIND  # noqa: E402
+from auto_3dx.geometry.planes import GEOMETRICAL_SET_NAME  # noqa: E402
 
 ROOT_RADIUS, TIP_RADIUS = 20.0, 12.0
 ROOT_WIDTH, ROOT_HEIGHT = 40.0, 20.0
@@ -90,8 +91,23 @@ def _sections(part: Any, names: "dict[str, str]", shape: str) -> "list[Any]":
     return [root, tip]
 
 
-def _remove_own(part: Any, names: "dict[str, str]") -> None:
-    """Removes exactly what one test created, then rebuilds."""
+def _plane_set_exists(part: Any) -> bool:
+    return GEOMETRICAL_SET_NAME in [item.name for item in part.inspect.geometrical_sets()]
+
+
+def _volume_of_main_body(part: Any) -> float:
+    """CATIA cannot measure an empty body, whose volume is zero anyway."""
+    if int(part.com_object.MainBody.Shapes.Count) == 0:
+        return 0.0
+    return part.measurement.measure().volume_mm3
+
+
+def _remove_own(part: Any, names: "dict[str, str]", plane_set_existed: bool) -> None:
+    """Removes exactly what one test created, then rebuilds.
+
+    The plane's geometrical set goes too, but only if this test created it and it is
+    empty again.
+    """
     try:
         part.part_design.remove_multi_section_solid(names["solid"])
     except Auto3dxError:
@@ -105,13 +121,17 @@ def _remove_own(part: Any, names: "dict[str, str]") -> None:
         part.planes.remove(part.planes.get(names["plane"]))
     except Auto3dxError:
         pass
+    plane_set = [s for s in part.inspect.geometrical_sets() if s.name == GEOMETRICAL_SET_NAME]
+    if not plane_set_existed and plane_set and not plane_set[0].elements:
+        part.planes.remove_geometrical_set()
     part.update()
 
 
 def test_a_multi_section_solid_is_created_rediscovered_and_removed(part: Any) -> None:
     names = _names("CIRCLE")
     before = part.inspect.summary()
-    volume_before = part.measurement.measure().volume_mm3
+    plane_set_existed = _plane_set_exists(part)
+    volume_before = _volume_of_main_body(part)
 
     try:
         sections = _sections(part, names, "circle")
@@ -144,7 +164,7 @@ def test_a_multi_section_solid_is_created_rediscovered_and_removed(part: Any) ->
         # Deleting the feature took its section sketches with it (probe 40).
         assert names["root"] not in fresh.inspect.sketches()
     finally:
-        _remove_own(part, names)
+        _remove_own(part, names, plane_set_existed)
 
     restored = part.inspect.summary()
     assert [(f.name, f.kind) for f in restored.features] == [
@@ -159,6 +179,7 @@ def test_sections_with_corners_fail_the_update_and_removal_recovers(part: Any) -
     """Two rectangles do not build without closing points; removing the feature recovers."""
     names = _names("RECT")
     before = part.inspect.summary()
+    plane_set_existed = _plane_set_exists(part)
 
     try:
         sections = _sections(part, names, "rectangle")
@@ -172,7 +193,7 @@ def test_sections_with_corners_fail_the_update_and_removal_recovers(part: Any) -
         part.update()
         assert part.is_up_to_date()
     finally:
-        _remove_own(part, names)
+        _remove_own(part, names, plane_set_existed)
 
     restored = part.inspect.summary()
     assert [(f.name, f.kind) for f in restored.features] == [
