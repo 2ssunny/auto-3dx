@@ -48,6 +48,7 @@ from auto_3dx.errors import (
     ParameterTypeError,
     PartialCreationError,
     SketchAlreadyExistsError,
+    SketchElementNotFoundError,
     SketchNotFoundError,
     SketchSupportMismatchError,
     SupportNotUpdatedError,
@@ -237,6 +238,45 @@ class SketchElement:
             `type(self.com_object).__name__`, e.g. `"Line2D"`.
         """
         return type(self._com_object).__name__
+
+
+    @property
+    def name(self) -> str:
+        """str: The name CATIA gave this element, such as `"Line.1"`.
+
+        This is the durable identity of a sketch element: it is stored in the model, so
+        `sketch.get_element(name)` finds the same element again in a later session or a
+        different process (probe 43). Index position is not identity.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return str(self._com_object.Name)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    @property
+    def radius(self) -> float:
+        """float: The radius of a circular element, read from `Circle2D.Radius`.
+
+        Only circles carry it; live (probe 43) a `Circle2D` reported its radius while a
+        `Line2D` in this release exposes no coordinate accessors at all (no
+        `GetCoordinates`, no start/end point members), which is why this wrapper offers
+        no line geometry.
+
+        Raises:
+            ParameterTypeError: If this element has no radius, such as a line.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return float(self._com_object.Radius)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except AttributeError as error:
+            raise ParameterTypeError(
+                f"A {self.kind} has no radius; only circular elements do."
+            ) from error
 
     @property
     def sketch(self) -> Any:
@@ -1226,6 +1266,68 @@ class Sketch:
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
         return names
+
+
+    def elements(self) -> "list[SketchElement]":
+        """Returns every geometric element of this sketch, read from the model.
+
+        The elements are whatever `GeometricElements` holds now, including the
+        `AbsoluteAxis` CATIA puts in every sketch, in collection order. Nothing is
+        cached: a sketch drawn by an earlier process lists exactly the same way.
+
+        Returns:
+            One `SketchElement` per item, each carrying this sketch as its owner so it
+            can be passed straight back into constraint methods inside `edit()`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            collection = self._com_object.GeometricElements
+            count = int(collection.Count)
+            items = [collection.Item(index) for index in range(1, count + 1)]
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return [SketchElement(item, self._com_object) for item in items]
+
+    def get_element(self, name: str) -> SketchElement:
+        """Finds one geometric element of this sketch by the name CATIA gave it.
+
+        This is what makes an existing sketch editable after the Python objects that
+        drew it are gone: `sketch.element_names()` says what is there, and this returns
+        a usable wrapper for one of them. Live (probe 43): a line rediscovered this way,
+        in a process that never drew it, was accepted by `SketchEditor.parallel` inside
+        `edit()` and the constraint updated.
+
+        Reading an element does not need `edit()`; creating a constraint from it does,
+        exactly as before.
+
+        Args:
+            name: The element's CATIA name, for example `"Line.1"` or `"Circle.1"`.
+
+        Returns:
+            A `SketchElement` wrapping that element, with this sketch as its owner.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            SketchElementNotFoundError: If this sketch holds no element with that name.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        try:
+            collection = self._com_object.GeometricElements
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        try:
+            item = collection.Item(name)
+        except pywintypes.com_error as error:
+            # CATIA reports a missing element as a plain COM failure from Item(); the
+            # names are enumerated here so the caller is told what the sketch does hold.
+            raise SketchElementNotFoundError(
+                f"This sketch has no element named {name!r}. It holds "
+                f"{self.element_names()}."
+            ) from error
+        return SketchElement(item, self._com_object)
 
     @property
     def constraints(self) -> ConstraintCollection:

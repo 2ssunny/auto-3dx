@@ -39,6 +39,7 @@ CATEGORIES = {
         "ConstraintNotFoundError",
         "PlaneNotFoundError",
         "BodyNotFoundError",
+        "SketchElementNotFoundError",
     },
     "ConflictError": {
         "ParameterAlreadyExistsError",
@@ -50,6 +51,7 @@ CATEGORIES = {
         "BodyAlreadyExistsError",
         "BodyRemovalError",
         "TargetNotUpToDateError",
+        "ParameterInUseError",
     },
     "AutomationError": {
         "PartUpdateError",

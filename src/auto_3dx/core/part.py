@@ -23,12 +23,16 @@ from auto_3dx.errors import (
     Auto3dxError,
     AutomationError,
     BodyNotFoundError,
+    FeatureNotFoundError,
     NoActiveEditorError,
     ParameterTypeError,
     PartUpdateError,
 )
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.geometry.bodies import Body, BodyCollection
+from auto_3dx.geometry.part_design import (
+    WORK_AT_FEATURES as _WORK_AT_FEATURES,
+)
 from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
 from auto_3dx.geometry.sketch import SketchCollection
@@ -36,6 +40,16 @@ from auto_3dx.geometry.topology import Topology
 from auto_3dx.inspect import Inspector
 from auto_3dx.measurement.inertia import SolidMeasurement
 from auto_3dx.parameters.collection import ParameterCollection
+
+
+def _shapes_of(body_com_object: Any) -> "list[Any]":
+    """Lists a body's features, tolerating a CATIA collection that reports none."""
+    try:
+        shapes = body_com_object.Shapes
+        count = int(shapes.Count)
+        return [shapes.Item(index) for index in range(1, count + 1)]
+    except (pywintypes.com_error, AttributeError):
+        return []
 
 
 class Part:
@@ -79,6 +93,9 @@ class Part:
         # Raw bodies of the enclosing `work_in` blocks, innermost last. Transient: it
         # exists only while a `with` block runs, never across calls or processes.
         self._work_bodies: list[Any] = []
+        # Raw In-Work targets of every enclosing `work_in`/`work_at` block, innermost
+        # last, so the innermost block decides where a new feature is created.
+        self._work_targets: list[Any] = []
 
     @property
     def com_object(self) -> Any:
@@ -115,9 +132,22 @@ class Part:
             except pywintypes.com_error as error:
                 raise automation_error(error, "reading Part.Parameters") from error
             self._parameters = ParameterCollection(
-                parameters_com_object, generation=self._generation
+                parameters_com_object,
+                generation=self._generation,
+                dependents_of=self._formulas_reading,
             )
         return self._parameters
+
+    def _formulas_reading(self, parameter: Any) -> "list[Any]":
+        """Returns the formulas that read a parameter, for the removal guard.
+
+        Args:
+            parameter: The `Parameter` about to be removed.
+
+        Returns:
+            The formulas reading it, read from `Relations` in the live model.
+        """
+        return self.formulas.reading(parameter)
 
     @property
     def sketches(self) -> SketchCollection:
@@ -144,7 +174,11 @@ class Part:
         """
         if self._part_design is None:
             self._part_design = PartDesign(
-                self._com_object, self._selection, self._generation, self._target_body
+                self._com_object,
+                self._selection,
+                self._generation,
+                self._target_body,
+                self._in_work_target,
             )
         return self._part_design
 
@@ -309,6 +343,7 @@ class Part:
         except pywintypes.com_error as error:
             raise automation_error(error, "reading Part.InWorkObject") from error
         self._work_bodies.append(target.com_object)
+        self._work_targets.append(target.com_object)
         try:
             try:
                 self._com_object.InWorkObject = target.com_object
@@ -317,12 +352,14 @@ class Part:
             yield target
         except BaseException as error:
             self._work_bodies.pop()
+            self._work_targets.pop()
             problem = self._put_back_in_work(previous)
             if problem is not None:
                 error.add_note(problem)
             raise
         else:
             self._work_bodies.pop()
+            self._work_targets.pop()
             problem = self._put_back_in_work(previous)
             if problem is not None:
                 raise AutomationError(problem)
@@ -330,6 +367,113 @@ class Part:
     def _target_body(self) -> Any:
         """Returns the raw body of the innermost `work_in` block, or `None` outside one."""
         return self._work_bodies[-1] if self._work_bodies else None
+
+    @contextmanager
+    def work_at(self, feature: Any) -> Iterator[Any]:
+        """Models at an existing feature's position in the history for one block.
+
+        ``work_in(body)`` chooses WHICH BODY to model in; this chooses WHERE IN THAT
+        BODY'S HISTORY the next feature goes. Observed live (probe 43) on a body holding
+        ``PAD`` then ``FILLET``:
+
+        * In-Work Object before the block was ``FILLET`` (the last feature created).
+        * Inside ``work_at(pad)`` it was ``PAD``.
+        * A pad created inside the block landed **immediately after** the target, giving
+          ``PAD, PAD2, FILLET``: CATIA inserts after the In-Work feature rather than
+          appending to the end, and the fillet stayed downstream of the new feature.
+        * Creating that feature moved the In-Work Object onto it, exactly as it does
+          outside a block.
+        * ``Part.Update()`` afterwards succeeded and the volume included both pads.
+
+        That is the whole of the verified behaviour. This is not tree reordering: nothing
+        here moves an existing feature, and only the insertion point changes.
+
+        Sketches still go to the body being modelled in, so combine this with
+        ``work_in(body)`` when the target feature is not in the main body. On leaving the
+        block, normally or through an exception, the In-Work Object that was current
+        before is put back and read back to confirm it. Blocks nest.
+
+        Args:
+            feature: A Part Design feature wrapper from ``part.part_design`` -- a ``Pad``,
+                ``Pocket``, ``Shaft``, ``Groove``, fillet, chamfer, and so on.
+
+        Yields:
+            The same feature wrapper, for convenience.
+
+        Raises:
+            ParameterTypeError: If ``feature`` is not a feature wrapper, or belongs to
+                another Part. Raw COM objects are refused: a wrapper is what the SDK can
+                check.
+            FeatureNotFoundError: If the feature is no longer in this Part.
+            AutomationError: If the In-Work Object cannot be read, set, or restored. When
+                the block itself raised, a failed restore is added to that exception as a
+                note instead of replacing it.
+        """
+        target = self._resolve_work_feature(feature)
+        try:
+            previous = self._com_object.InWorkObject
+        except pywintypes.com_error as error:
+            raise automation_error(error, "reading Part.InWorkObject") from error
+        self._work_targets.append(target)
+        try:
+            try:
+                self._com_object.InWorkObject = target
+            except pywintypes.com_error as error:
+                raise automation_error(
+                    error, "making the feature the In-Work Object"
+                ) from error
+            yield feature
+        except BaseException as error:
+            self._work_targets.pop()
+            problem = self._put_back_in_work(previous)
+            if problem is not None:
+                error.add_note(problem)
+            raise
+        else:
+            self._work_targets.pop()
+            problem = self._put_back_in_work(previous)
+            if problem is not None:
+                raise AutomationError(problem)
+
+    def _resolve_work_feature(self, feature: Any) -> Any:
+        """Returns the raw COM object of a feature wrapper that is in this Part now.
+
+        Args:
+            feature: The wrapper the caller passed.
+
+        Returns:
+            Its raw COM object, found in one of this Part's bodies.
+
+        Raises:
+            ParameterTypeError: If it is not a feature wrapper of this SDK, or its
+                feature belongs to another Part.
+            FeatureNotFoundError: If it is no longer in this Part.
+        """
+        if not isinstance(feature, _WORK_AT_FEATURES):
+            raise ParameterTypeError(
+                "work_at() takes a Part Design feature from part.part_design (a Pad, "
+                f"Pocket, fillet, ...), not {type(feature).__name__}."
+            )
+        com_object = feature.com_object
+        for body in self.bodies.list():
+            for shape in _shapes_of(body.com_object):
+                try:
+                    if bool(shape == com_object):
+                        return com_object
+                except pywintypes.com_error:
+                    continue
+        raise FeatureNotFoundError(
+            "The feature passed to work_at() is not in this Part. A feature of another "
+            "Part cannot set this Part's In-Work Object."
+        )
+
+    def _in_work_target(self) -> Any:
+        """Returns the innermost work context's raw target, or `None` outside one.
+
+        A `work_at` feature and a `work_in` body share one stack, so the innermost block
+        wins: `part_design` makes that object the In-Work Object before each creation.
+        """
+        return self._work_targets[-1] if self._work_targets else None
 
     def _resolve_work_body(self, body: "Body | str") -> Body:
         """Turns a `Body` or a body name into a `Body` found in this Part now."""

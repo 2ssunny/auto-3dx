@@ -853,6 +853,98 @@ class _NamedFeature:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    def _dimension(self, path: "tuple[str, ...]") -> Any:
+        """Walks to the CATIA parameter object holding one of this feature's dimensions.
+
+        Args:
+            path: The member names to follow from the feature, for example
+                `("Radius",)` or `("BottomLimit", "Dimension")`.
+
+        Returns:
+            The raw `Length`/`Angle` parameter object, which carries `.Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        node = self._com_object
+        try:
+            for member in path:
+                node = getattr(node, member)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except AttributeError as error:
+            raise AutomationError(
+                f"{type(self).__name__} exposes no {'.'.join(path)} in this release."
+            ) from error
+        return node
+
+    def _read_dimension(self, path: "tuple[str, ...]") -> float:
+        """Reads one of this feature's dimensions.
+
+        Args:
+            path: The member names to follow, as for `_dimension`.
+
+        Returns:
+            The parameter's current `Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return float(self._dimension(path).Value)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _write_length(
+        self, path: "tuple[str, ...]", value: float, unit: str
+    ) -> None:
+        """Writes a length dimension, validating exactly as the other setters do.
+
+        The write advances the model generation and does NOT rebuild: `part.update()`
+        stays the one place a rebuild happens (`docs/api-design.md` section 6), so a
+        caller can change several dimensions and rebuild once.
+
+        Args:
+            path: The member names to follow, as for `_dimension`.
+            value: The new value.
+            unit: The unit `value` is expressed in.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `value` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        validate_length_unit(unit)
+        coerced = validate_length_value(value)
+        dimension = self._dimension(path)
+        with self._generation.mutation():
+            try:
+                dimension.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    def _write_angle(self, path: "tuple[str, ...]", value: float, unit: str) -> None:
+        """Writes an angle dimension, validating exactly as `set_first_angle` does.
+
+        Args:
+            path: The member names to follow, as for `_dimension`.
+            value: The new angle.
+            unit: The unit `value` is expressed in.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `value` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        validate_angle_unit(unit)
+        coerced = validate_angle_value(value)
+        dimension = self._dimension(path)
+        with self._generation.mutation():
+            try:
+                dimension.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
     def __repr__(self) -> str:
         """Returns a debugging representation.
 
@@ -1009,6 +1101,51 @@ class ConstRadEdgeFillet(_NamedFeature):
     there is no `ensure_edge_fillet`.
     """
 
+    @property
+    def radius(self) -> float:
+        """float: The fillet radius, read from `Radius.Value`.
+
+        Live (probe 43): reading, writing, `Part.Update()`, the resulting volume change
+        and a fresh wrapper all agreed on the new value.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Radius",))
+
+    def set_radius(self, radius: float, unit: str = MILLIMETRE) -> None:
+        """Sets the radius of this existing fillet.
+
+        Editing beats deleting and recreating: the fillet keeps its identity, so the
+        edges it consumes are not re-resolved. This does not rebuild; call
+        `part.update()`. If that update fails, put the previous radius back and update
+        again rather than removing the fillet (`docs/api-design.md` section 6).
+
+        Args:
+            radius: The new radius. Must be finite and positive.
+            unit: The unit `radius` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `radius` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Radius",), radius, unit)
+
+    def radius_parameter(self) -> Parameter:
+        """Returns the `Length` parameter backing this fillet's radius.
+
+        This is what a `Formula` drives, the same idea as
+        `SketchFeature.depth_parameter()`.
+
+        Returns:
+            A `Parameter` wrapping `Radius`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return Parameter(self._dimension(("Radius",)), self._generation)
+
 
 class Chamfer(_NamedFeature):
     """Wraps a raw CATIA `Chamfer` COM object.
@@ -1020,7 +1157,61 @@ class Chamfer(_NamedFeature):
     passes either. Reduces to `com_object`/`name` only, for the same reason
     as `ConstRadEdgeFillet`: there is no verified way to read the source edge
     back, so there is no `ensure_chamfer` either (`geometry.edges`).
+
+    `Length1` and `Angle` are editable on an existing chamfer (probe 43). `Length2` is
+    readable but CATIA refused every write to it on a chamfer created in the
+    length/angle mode this SDK uses, so no setter is exposed for it.
     """
+
+    @property
+    def length1(self) -> float:
+        """float: The chamfer's first length, read from `Length1.Value`.
+
+        Live (probe 43): read, written (2 -> 5), rebuilt and read back.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Length1",))
+
+    def set_length1(self, length: float, unit: str = MILLIMETRE) -> None:
+        """Sets the chamfer's first length. Does not rebuild; call `part.update()`.
+
+        Args:
+            length: The new length. Must be finite and positive.
+            unit: The unit `length` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `length` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Length1",), length, unit)
+
+    @property
+    def angle(self) -> float:
+        """float: The chamfer angle in degrees, read from `Angle.Value`.
+
+        Live (probe 43): read, written (45 -> 30), rebuilt and read back.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Angle",))
+
+    def set_angle(self, angle: float, unit: str = DEGREE) -> None:
+        """Sets the chamfer angle. Does not rebuild; call `part.update()`.
+
+        Args:
+            angle: The new angle.
+            unit: The unit `angle` is expressed in. Defaults to `DEGREE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `angle` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_angle(("Angle",), angle, unit)
 
 
 class Shell(_NamedFeature):
@@ -1035,6 +1226,56 @@ class Shell(_NamedFeature):
     source face back, so there is no `ensure_shell` either (`geometry.faces`).
     """
 
+    @property
+    def internal_thickness(self) -> float:
+        """float: The inward wall thickness, read from `InternalThickness.Value`.
+
+        Live (probe 43): read, written (2 -> 4), rebuilt, read back, volume changed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("InternalThickness",))
+
+    def set_internal_thickness(self, thickness: float, unit: str = MILLIMETRE) -> None:
+        """Sets the inward wall thickness. Does not rebuild; call `part.update()`.
+
+        Args:
+            thickness: The new thickness. Must be finite and positive.
+            unit: The unit `thickness` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `thickness` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("InternalThickness",), thickness, unit)
+
+    @property
+    def external_thickness(self) -> float:
+        """float: The outward wall thickness, read from `ExternalThickness.Value`.
+
+        Live (probe 43): read, written (0 -> 1.5), rebuilt, read back, volume changed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("ExternalThickness",))
+
+    def set_external_thickness(self, thickness: float, unit: str = MILLIMETRE) -> None:
+        """Sets the outward wall thickness. Does not rebuild; call `part.update()`.
+
+        Args:
+            thickness: The new thickness. Must be finite and positive.
+            unit: The unit `thickness` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `thickness` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("ExternalThickness",), thickness, unit)
+
 
 class Thickness(_NamedFeature):
     """Wraps a raw CATIA `Thickness` COM object.
@@ -1047,6 +1288,33 @@ class Thickness(_NamedFeature):
     `ensure_thickness` either (`geometry.faces`).
     """
 
+    @property
+    def offset(self) -> float:
+        """float: The added material thickness, read from `Offset.Value`.
+
+        CATIA calls this member `Offset`, not `Thickness` (probe 43). Live: read,
+        written (3 -> 6), rebuilt, read back, volume 52800 -> 57600 mm3, and a fresh
+        wrapper agreed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Offset",))
+
+    def set_offset(self, offset: float, unit: str = MILLIMETRE) -> None:
+        """Sets the added material thickness. Does not rebuild; call `part.update()`.
+
+        Args:
+            offset: The new thickness. Must be finite and positive.
+            unit: The unit `offset` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `offset` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Offset",), offset, unit)
+
 
 class Hole(_NamedFeature):
     """Wraps a raw CATIA `Hole` COM object.
@@ -1058,6 +1326,58 @@ class Hole(_NamedFeature):
     there is no verified way to read the source face back, so there is no
     `ensure_hole` either (`geometry.faces`).
     """
+
+    @property
+    def diameter(self) -> float:
+        """float: The hole diameter, read from `Diameter.Value`.
+
+        Live (probe 43): read, written (10 -> 12), rebuilt, read back, volume changed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Diameter",))
+
+    def set_diameter(self, diameter: float, unit: str = MILLIMETRE) -> None:
+        """Sets the hole diameter. Does not rebuild; call `part.update()`.
+
+        Args:
+            diameter: The new diameter. Must be finite and positive.
+            unit: The unit `diameter` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `diameter` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Diameter",), diameter, unit)
+
+    @property
+    def depth(self) -> float:
+        """float: The hole depth, read from `BottomLimit.Dimension.Value`.
+
+        A `Hole` has no `Depth` member; the depth passed to `AddNewHole` lands in the
+        bottom limit's dimension (probe 43), which is where this reads and writes. Live:
+        read (5), written (12), rebuilt, read back, volume changed, fresh wrapper agreed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("BottomLimit", "Dimension"))
+
+    def set_depth(self, depth: float, unit: str = MILLIMETRE) -> None:
+        """Sets the hole depth. Does not rebuild; call `part.update()`.
+
+        Args:
+            depth: The new depth. Must be finite and positive.
+            unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `depth` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("BottomLimit", "Dimension"), depth, unit)
 
 
 class RectangularPattern:
@@ -1095,6 +1415,20 @@ class RectangularPattern:
     def __repr__(self) -> str:
         """Returns a debugging representation without unverified COM reads."""
         return "RectangularPattern()"
+
+
+WORK_AT_FEATURES: tuple = (
+    SketchFeature,
+    RevolvedFeature,
+    _NamedFeature,
+)
+"""The feature wrappers `Part.work_at` accepts as an In-Work Object target.
+
+Every Part Design feature this SDK creates is one of these three families, so this
+covers pads, pockets, shafts, grooves, mirrors, ribs, slots, multi-section solids,
+fillets, chamfers, shells, thicknesses and holes. A raw COM object is deliberately not
+accepted: a wrapper is what `Part` can check for ownership.
+"""
 
 
 class PartDesign:
@@ -1150,6 +1484,7 @@ class PartDesign:
         selection: Any = None,
         generation: ModelGeneration | None = None,
         body_target: Any = None,
+        in_work_target: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -1167,11 +1502,18 @@ class PartDesign:
                 `PartDesign` from a `Part` instead.
             body_target: A callable returning the raw `Body` of an enclosing
                 `part.work_in(body)`, or `None` outside one. Supplied by `Part`; without
-                it everything works on the main body exactly as before.
+                it everything works on the main body exactly as before. It decides which
+                body features are listed and looked up in.
+            in_work_target: A callable returning the raw object the innermost
+                `part.work_in(body)`/`part.work_at(feature)` block targets, or `None`
+                outside one. It decides what the In-Work Object is set to before each
+                creation: a body appends to that body, a feature inserts right after that
+                feature (probe 43). Defaults to following `body_target`.
         """
         self._part_com_object = part_com_object
         self._selection = selection
         self._body_target = body_target
+        self._in_work_target = in_work_target
         # Shared with the owning Part and everything else reachable from it
         # (`docs/api-design.md` section 5). Every mutation here advances it, and
         # every edge or face handle is checked against it before reaching CATIA.
@@ -1291,17 +1633,22 @@ class PartDesign:
             raise _wrap_com_error(error) from error
 
     def _target_in_work(self) -> None:
-        """Makes the work body the In-Work Object before a feature is created in it.
+        """Makes the current work target the In-Work Object before a feature is created.
 
-        Only inside `part.work_in(body)`. `ShapeFactory` builds a feature in the In-Work
-        Body (probe 41), but creating a feature or a plane moves the In-Work Object, so it
-        is set again before every creation rather than once when the context opens.
-        Outside a context nothing is touched, exactly as before.
+        Only inside `part.work_in(body)` or `part.work_at(feature)`. `ShapeFactory` builds
+        in the In-Work Object (probe 41), and creating a feature or a plane moves it, so it
+        is set again before every creation rather than once when the context opens. With a
+        body in work the feature is appended to that body; with a feature in work CATIA
+        inserts the new feature immediately after it (probe 43). Outside a context nothing
+        is touched, exactly as before.
 
         Raises:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        target = self._body_target() if self._body_target is not None else None
+        if self._in_work_target is not None:
+            target = self._in_work_target()
+        else:
+            target = self._body_target() if self._body_target is not None else None
         if target is None:
             return
         try:

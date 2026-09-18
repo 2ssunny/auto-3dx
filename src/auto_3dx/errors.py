@@ -231,6 +231,16 @@ class FormulaNotFoundError(NotFoundError):
     """Raised when a formula cannot be found by name in a Relations collection."""
 
 
+class SketchElementNotFoundError(NotFoundError):
+    """Raised when a sketch holds no geometric element with the requested name.
+
+    Elements are found by the name CATIA gives them (`"Line.1"`, `"Circle.1"`), read from
+    the sketch's `GeometricElements` collection, so an element drawn in an earlier
+    session or by another process is found again by name. A missing name is reported
+    here rather than as the bare COM failure `GeometricElements.Item` raises.
+    """
+
+
 class BodyNotFoundError(NotFoundError):
     """Raised when a body cannot be found by name in a Part's `Bodies`."""
 
@@ -276,6 +286,22 @@ class BodyRemovalError(ConflictError):
 
     Deleting a body deletes every feature and sketch in it, so a body that still holds
     content is removed only when the caller says so. Nothing was changed.
+    """
+
+
+class ParameterInUseError(ConflictError):
+    """Raised when removing a parameter that a formula still reads.
+
+    CATIA removes such a parameter without complaint and rewrites every formula that
+    referenced it, leaving a body like `deleted_L_box * 2` and a Part that is no longer
+    up to date (live, 2026-09-18). The relation survives as an orphan that no longer
+    computes anything.
+
+    Removal therefore checks `Relations` first: every formula's inputs are read through
+    `Formula.GetInParameter`, so the answer comes from the model and is the same in any
+    process. Nothing was changed. Remove or rewrite the formulas first --
+    `part.parameters.dependents(name)` lists them -- or pass `force=True` to accept the
+    orphaned relations deliberately.
     """
 
 

@@ -7,6 +7,7 @@ import pywintypes
 
 from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
+    ParameterInUseError,
     AmbiguousNameError,
     Auto3dxError,
     ParameterAlreadyExistsError,
@@ -86,7 +87,12 @@ class ParameterCollection:
     treated as an error.
     """
 
-    def __init__(self, com_object: Any, generation: ModelGeneration | None = None) -> None:
+    def __init__(
+        self,
+        com_object: Any,
+        generation: ModelGeneration | None = None,
+        dependents_of: Any = None,
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -95,8 +101,13 @@ class ParameterCollection:
                 `Parameter` this collection returns. A standalone instance gets
                 its own, which no other wrapper shares; obtain
                 `ParameterCollection` from a `Part` instead.
+            dependents_of: Returns the formulas that read a given `Parameter`. `Part`
+                supplies `part.formulas.reading`, which is what makes `remove` refuse a
+                parameter a formula still needs. Without it there is no dependency check,
+                which is the old behaviour of a standalone collection.
         """
         self._com_object = com_object
+        self._dependents_of = dependents_of
         self._units: UnitCatalogue | None = None
         # Shared with the owning Part and every Parameter this collection
         # returns (`docs/api-design.md` section 5). Every creation and value
@@ -778,26 +789,68 @@ class ParameterCollection:
             lambda existing: existing.set(coerced),
         )
 
-    def remove(self, name: str) -> None:
-        """Removes a parameter from the model.
+    def dependents(self, name: str) -> "list[Any]":
+        """Returns the formulas that read a parameter, so removal can be decided safely.
+
+        Args:
+            name: The parameter's name, qualified or short.
+
+        Returns:
+            The `Formula` objects reading it, empty when nothing does. Always empty when
+            this collection was built without a dependency source, as a standalone
+            `ParameterCollection` is.
+
+        Raises:
+            ParameterNotFoundError: If no parameter named `name` exists.
+            AutomationError: If the relations cannot be read.
+        """
+        target = self.get(name)
+        if self._dependents_of is None:
+            return []
+        return list(self._dependents_of(target))
+
+    def remove(self, name: str, *, force: bool = False) -> None:
+        """Removes a parameter from the model, unless a formula still reads it.
 
         The parameter is looked up first so a missing name is reported as
         `ParameterNotFoundError`, and so removal targets the authoritative
         qualified name rather than whatever the caller passed.
+
+        **A parameter a formula reads is refused.** CATIA removes it without complaint
+        and rewrites the formula body into something like `deleted_L_box * 2`, leaving a
+        relation that no longer computes anything and a Part that is no longer up to date
+        (live, probe 43). `dependents(name)` lists what is in the way; remove or rewrite
+        those formulas first.
 
         This deletes model content. It does not call `Part.Update()`, and it
         never saves.
 
         Args:
             name: The parameter's name, qualified or short.
+            force: Remove it even though a formula reads it, accepting the orphaned
+                relations that leaves behind. The default is the safe path; this exists
+                for a caller who has decided to clean the relations up afterwards.
 
         Raises:
             ParameterNotFoundError: If no parameter named `name` exists.
+            ParameterInUseError: If a formula reads it and `force` is `False`. Nothing
+                was changed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         target = self.get(name)
-        # The lookup above stays outside the mutation block: a missing name is
-        # rejected before any COM call, so the generation must not advance for it.
+        # The lookup and the dependency check stay outside the mutation block: a request
+        # rejected before any COM write must not advance the generation.
+        if not force and self._dependents_of is not None:
+            blocking = list(self._dependents_of(target))
+            if blocking:
+                readers = ", ".join(repr(formula.name) for formula in blocking)
+                raise ParameterInUseError(
+                    f"Parameter {target.name!r} is read by {len(blocking)} formula(s): "
+                    f"{readers}. Removing it would leave each one rewritten to "
+                    "'deleted_...' and the Part not up to date. Nothing was changed: "
+                    "remove or rewrite those formulas first, or pass force=True to "
+                    "accept the orphaned relations."
+                )
         with self._generation.mutation():
             try:
                 self._com_object.Remove(target.name)
