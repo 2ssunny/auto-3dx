@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **991 unit 통과**
+- 현재 정적 검증: **1036 unit 통과**
 - 현재 라이브 검증: 2026-09-18 빈 테스트 Part `3D Shape00422558`에서 재실행 기준
-  **50 integration 중 44 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
+  **55 integration 중 49 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -427,6 +427,10 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 숨김 / 표시 | 동작 | `body.hide()`/`show()`/`is_visible`, `Selection.VisProperties`. read-back 검증. 활성 Part만 |
 | body 단위 재빌드 | 동작 | `body.update()` 또는 `part.update(body)` (`Part.UpdateObject`). work_in을 나가는 것만으로는 재빌드되지 않는다. `body.is_up_to_date`로 상태 확인 |
 | body 단위 topology | 동작 | `part.topology.edges(body=...)`/`faces(body=...)`. work_in 안에서는 그 body가 기본. `body=None`이면 Part 전체 |
+| 기존 feature 치수 편집 | 동작 | fillet `radius`, chamfer `length1`/`angle`, hole `diameter`/`depth`, shell `internal_thickness`/`external_thickness`, thickness `offset`. setter는 재빌드하지 않는다. 검증 표는 conventions 1.11 |
+| 스케치 요소 재발견 | 동작 | `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`kind`/`radius`(원만). 이름이 지속 identity이고 새 프로세스에서도 제약에 재사용된다 |
+| feature 위치에서 작업 | 동작 | `with part.work_at(feature):` — 그 feature 바로 뒤에 삽입된다. 이전 In-Work Object는 예외가 나도 복원된다 |
+| 파라미터 의존성 조회/보호 | 동작 (formula 한정) | `part.parameters.dependents(name)`, `remove()`가 `ParameterInUseError`로 거부. rule/check/law/program/design table은 미탐지 |
 | 모서리·면 소유 body | 동작 | `edge.owner_body_name`/`owner_feature_name`. 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError` |
 | body 삭제 | 동작 (가드) | `part.bodies.remove(name, delete_contents=False)`. main body는 거부, 내용이 있으면 `delete_contents=True`가 있어야 지운다. 활성 Part만 |
 | boolean 연산 (Add/Remove/Intersect/Assemble) | 미지원 | 미검증 |
@@ -486,6 +490,7 @@ Catia.attach(com3dx_path=None) -> Catia
 .bodies          -> BodyCollection    # list/names/get/main/create/remove
 .update(target=None)                  # 인자를 주면 그 객체만 재빌드 (Part.UpdateObject)
 .work_in(body)   # context manager: 그 body에서 스케치·feature 생성/조회, In-Work Object 복원
+.work_at(feature)  # context manager: 그 feature 바로 뒤에 다음 feature를 삽입
 .update()        # 실패 시 PartUpdateError
 .measurement     -> SolidMeasurement  # editor 기반 read-only 측정
 .topology        -> Topology          # edges() / faces() 스냅샷
@@ -502,6 +507,11 @@ bodies.get(name) -> Body          # BodyNotFoundError / AmbiguousNameError
 bodies.main      -> Body
 bodies.create(name) -> Body       # BodyAlreadyExistsError, PartialCreationError
 bodies.remove(name, *, delete_contents=False)   # BodyRemovalError, InactivePartError
+
+parameters.dependents(name) -> list[Formula]       # 이 파라미터를 읽는 formula
+parameters.remove(name, *, force=False)            # 참조 중이면 ParameterInUseError
+formula.inputs() -> list[str]                      # Formula.GetInParameter 기반
+formulas.reading(parameter) -> list[Formula]
 
 body.name / body.is_main / body.com_object
 body.features       -> tuple[FeatureInfo, ...]
@@ -626,6 +636,18 @@ constraint.name / .type_code / .status        # status 0이 정상
 
 `support`는 `"XY"`, `"YZ"`, `"ZX"` 중 하나다.
 
+### Sketch 요소 재발견
+
+```python
+sketch.element_names()        -> list[str]        # ['AbsoluteAxis', 'Line.1', ...]
+sketch.elements()             -> list[SketchElement]
+sketch.get_element(name)      -> SketchElement    # 없으면 SketchElementNotFoundError
+element.name / element.kind                        # 'Line.1' / 'Line2D'
+element.radius                                     # 원만. 선이면 ParameterTypeError
+# 재발견한 요소는 edit() 안에서 제약 메서드에 그대로 넘길 수 있다.
+# 선의 좌표는 이 릴리스의 Line2D가 노출하지 않아 제공하지 않는다.
+```
+
 ### Topology / Edge / Face
 
 ```python
@@ -657,6 +679,15 @@ part.part_design.pads / .pockets / .shafts / .grooves / .mirrors
                      pad, 2, 1, 60, 60, direction_1="X", direction_2="Y"
                  )
                  .ensure_*(...)   /  .remove_*(name)
+
+# 기존 feature 치수 편집 (probe 43에서 읽기·쓰기·update·형상·새 wrapper까지 검증한 것만)
+fillet.radius / set_radius(v, unit="mm") / radius_parameter()
+chamfer.length1 / set_length1(...)   chamfer.angle / set_angle(...)
+hole.diameter / set_diameter(...)    hole.depth / set_depth(...)
+shell.internal_thickness / set_internal_thickness(...)
+shell.external_thickness / set_external_thickness(...)
+thickness.offset / set_offset(...)
+# setter는 part.update()를 부르지 않는다. 여러 개 바꾸고 한 번 update한다.
 
 # Pad와 Pocket은 SketchFeature를 공유한다
 feature.name / .depth / .set_depth(depth, unit="mm") / .sketch()
@@ -794,7 +825,8 @@ Auto3dxError
 │   ├── FeatureNotFoundError       이름으로 feature를 못 찾음
 │   ├── FormulaNotFoundError       이름으로 formula를 못 찾음
 │   ├── ConstraintNotFoundError    이름으로 제약을 못 찾음
-│   └── BodyNotFoundError          이름으로 body를 못 찾음
+│   ├── BodyNotFoundError          이름으로 body를 못 찾음
+│   └── SketchElementNotFoundError 이름으로 스케치 요소를 못 찾음
 ├── ConflictError            모델의 이름·상태가 요청을 막음. 아무것도 만들지 않았다
 │   ├── ParameterAlreadyExistsError  이미 있는 이름으로 생성 시도
 │   ├── SketchAlreadyExistsError     이미 있는 이름으로 생성 시도
@@ -804,6 +836,7 @@ Auto3dxError
 │   ├── BodyAlreadyExistsError       이미 있는 이름으로 body 생성 시도
 │   ├── BodyRemovalError             main body, 또는 delete_contents 없이 내용 있는 body 삭제
 │   ├── TargetNotUpToDateError       재빌드되지 않은 대상 측정
+│   ├── ParameterInUseError          formula가 읽는 파라미터 삭제 시도
 │   └── AmbiguousNameError           같은 이름이 둘 이상
 └── AutomationError          CATIA가 COM 호출을 거부하거나 실패함. hresult 속성을 가짐
     ├── PartUpdateError            Part.Update() 실패

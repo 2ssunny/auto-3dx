@@ -17,7 +17,9 @@
   판정 추가 후), Conda에서 38 통과·1 skip(그 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **991 unit 통과**. 2026-09-18 첫 안전 배치 뒤 빈 테스트 Part `3D Shape00422558`에서
+- 테스트: **1036 unit 통과**. 2026-09-18 Phase 2(기존 모델 편집) 뒤 빈 테스트 Part
+  `3D Shape00422558`에서 integration **49 통과, 6 skip**, A→B acceptance(`phase2_editing.py`)
+  통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **991 unit 통과**. 2026-09-18 첫 안전 배치 뒤 빈 테스트 Part `3D Shape00422558`에서
   integration **44 통과, 6 skip**, A→B acceptance(`batch1_safety.py`) 통과, 실행 뒤 기준 상태와 같음.
   그 전 기록: **957 unit 통과**. 2026-09-17 Multi-Body 뒤 빈 테스트 Part `AUTO3DX_MULTIBODY_TEST`에서
   integration **40 통과, 6 skip**(빈 main body·수동 파라미터가 필요한 테스트), 실행 뒤 기준 상태와 같음.
@@ -25,7 +27,7 @@
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
   검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **42 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
-- probe: `scripts/probes/`에 42개 존재
+- probe: `scripts/probes/`에 43개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -378,6 +380,10 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 21 | EnumParam 읽기 | 완료 | `Value`가 없는 파라미터는 `ValueAsString()`으로 읽는다. 제약이 있는 Part에서 파라미터 열거가 깨지던 문제. 쓰기는 미검증이라 `set()`은 계속 거부 |
 | 22 | 평면 support 사전 조건 | 완료 | 재빌드 안 된 평면 위 스케치는 `SupportNotUpdatedError`로 거부한다. 전에는 opaque E_FAIL이었다 |
 | 23 | PartUpdateError 복구 정책 | 완료 (문서·안내) | 정상이던 값을 바꿔 실패한 경우는 값을 되돌리고 다시 update하는 것이 먼저다. 삭제는 애초에 만들어지지 않은 feature나 되돌릴 값이 없을 때만. live로 pad 30→1→30 복구 확인 (conventions 1.10) |
+| 24 | 기존 feature 치수 편집 | 완료 | fillet `radius`, chamfer `length1`/`angle`, hole `diameter`/`depth`, shell 두 두께, thickness `offset`. 읽기·쓰기·update·형상 변화·새 wrapper·새 프로세스까지 확인한 것만 공개했다. setter는 재빌드하지 않고, 실패한 update는 값을 되돌려 복구한다 (conventions 1.11) |
+| 25 | 스케치 요소 재발견 | 완료 | `sketch.get_element(name)`/`elements()`와 `SketchElement.name`/`radius`. CATIA 이름이 지속 identity이고, 새 프로세스에서 재발견한 선으로 새 제약을 만들고 update까지 성공했다. 선 좌표는 이 릴리스의 `Line2D`가 노출하지 않는다 (conventions 1.11) |
+| 26 | feature 단위 작업 위치 | 완료 | `part.work_at(feature)`. 라이브에서 `PAD, FILLET` 트리의 `PAD`에서 작업하니 새 pad가 `PAD, NEW, FILLET`로 **바로 뒤에 삽입**됐다. 트리 재정렬이 아니다. 이전 In-Work Object는 정상·예외 모두 복원된다 (conventions 1.11) |
+| 27 | 파라미터 의존성 보호 | 완료 (formula 한정) | `Formula.GetInParameter`로 각 formula의 입력을 읽어 `parameters.dependents(name)`을 만들고, 참조 중인 파라미터 삭제는 `ParameterInUseError`로 거부한다. 전에는 CATIA가 formula를 `deleted_*`로 고쳐 쓰고 Part가 not-up-to-date가 됐다. rule/check/law/program/design table은 미탐지 (conventions 1.11) |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸고, 면은
 probe 37에서 같은 경로로 뚫렸으므로, 남은 것은 "어느 모서리·어느 면인가"를 안정적으로

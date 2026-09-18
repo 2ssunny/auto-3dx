@@ -680,6 +680,98 @@ Products and assemblies, and any Selection-based operation on a non-active Part.
 
 ---
 
+## 17. Editing an existing model
+
+Status: Implemented, pinned by `tests/unit/test_editing.py`, live by
+`tests/integration/test_editing_live.py` and `scripts/acceptance/phase2_editing.py`
+(conventions 1.11).
+
+Creating geometry is only half the job: an agent that reconnects to a model it did not
+build has to be able to change it. Four things make that possible, and each one reads the
+model rather than remembering anything in Python.
+
+**Feature dimensions are edited in place.**
+
+```python
+fillet = part.part_design.get_edge_fillet("F1")
+previous = fillet.radius
+fillet.set_radius(8.0)          # no rebuild happens here
+part.update()
+```
+
+Editing beats deleting and recreating, which would re-resolve the edges or faces the
+feature consumes. Only dimensions verified end to end are exposed -- read, written,
+rebuilt, geometry changed, and read back by a fresh wrapper: `ConstRadEdgeFillet.radius`,
+`Chamfer.length1`/`angle`, `Hole.diameter`/`depth`, `Shell.internal_thickness`/
+`external_thickness`, `Thickness.offset`, alongside the `Pad`/`Pocket` depth and the
+`Shaft`/`Groove` angles that already existed. Conventions 1.11 holds the full matrix,
+including what was deliberately left out: `Chamfer.Length2`, which CATIA refused to write
+in the mode this SDK creates, and the rectangular pattern's dimensions, which are
+unverified.
+
+A setter validates like every other setter (unit, finite positive value), advances the
+generation, and does not rebuild -- so several edits batch into one `part.update()`. After
+a failed update, put the old value back and update again (section 6): live, a fillet taken
+from 4 mm to 8 mm and back returned the exact original volume.
+
+**Sketch elements are found again by name.**
+
+```python
+sketch = part.sketches.get("PROFILE")     # drawn by another process
+sketch.element_names()                    # ['AbsoluteAxis', 'Line.1', 'Line.2', 'Circle.1']
+line = sketch.get_element("Line.1")
+with sketch.edit() as editor:
+    editor.parallel(line, sketch.get_element("Line.2"))
+```
+
+The name CATIA gives an element is its durable identity; a collection index is not. A
+rediscovered `SketchElement` carries its `name`, its `kind` and its owning sketch, so it
+goes straight back into the constraint methods, which still require `edit()`. Reading does
+not. `radius` is exposed for circles because it reads live; line coordinates are not
+exposed at all, because this release's `Line2D` has no coordinate members (conventions
+1.11). A missing name raises `SketchElementNotFoundError` listing what the sketch does
+hold.
+
+**`work_at(feature)` chooses the history position.**
+
+```python
+with part.work_at(part.part_design.get_pad("BASE")):
+    part.part_design.create_pad("RIB", sketch, 6.0)   # lands right after BASE
+part.update()
+```
+
+`work_in(body)` chooses which body to model in; `work_at(feature)` chooses where in that
+body's history the next feature goes. Observed live: with a tree of `PAD, FILLET`, working
+at `PAD` and creating a pad produced `PAD, NEW, FILLET` -- CATIA inserts immediately after
+the In-Work feature, and the downstream fillet stays downstream. It is not tree
+reordering: no existing feature moves.
+
+It takes a feature wrapper from `part.part_design`, never a raw COM object and never a
+body (`work_in` is for bodies), refuses a feature belonging to another Part, and restores
+the exact previous In-Work Object on every exit, including after an exception. The two
+contexts nest and the innermost one decides.
+
+**A parameter a formula reads cannot be removed by accident.**
+
+```python
+part.parameters.dependents("L_box")       # [Formula(name='DriveL')]
+part.parameters.remove("L_box")           # ParameterInUseError; nothing changed
+part.formulas.remove("DriveL")
+part.parameters.remove("L_box")           # now it is safe
+```
+
+CATIA removes such a parameter silently and rewrites the formula body to
+`deleted_L_box * 2`, leaving an orphaned relation and a Part that is no longer up to date
+(live). The guard asks each formula for its own inputs through `Formula.GetInParameter`,
+so the answer comes from the model and works in any process; formula bodies are never
+parsed. `force=True` accepts the orphan deliberately.
+
+**Verified limitation.** Only formulas are covered. `Relations` can also hold rules,
+checks, laws, programs and design tables, none of which expose a verified input list, so a
+parameter used only by one of those is not reported as in use.
+
+---
+
 ## Migration status
 
 | Item | Section | State |
@@ -710,6 +802,10 @@ Products and assemblies, and any Selection-based operation on a non-active Part.
 | Sketch support refuses a plane that was never rebuilt | 4 | Done |
 | `PartUpdateError` recovery: roll the edit back before deleting | 6 | Done (documentation and guidance) |
 | Topology ownership across processes | 7 | Re-read per snapshot; nothing persists, by design |
+| Feature dimension editing (fillet, chamfer, hole, shell, thickness) | 17 | Done; per-dimension evidence in conventions 1.11 |
+| `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`radius` | 17 | Done; line coordinates unavailable in this release |
+| `part.work_at(feature)` | 17 | Done; CATIA inserts after the In-Work feature |
+| `part.parameters.dependents()` and the removal guard | 17 | Done for formulas; rules/checks/laws not covered |
 | `part.bodies`: `list`/`names`/`get`/`main`/`create`/guarded `remove` | 16 | Done |
 | `part.work_in(body)`: sketches and Part Design in a chosen body, In-Work Object restored | 16 | Done |
 | `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |

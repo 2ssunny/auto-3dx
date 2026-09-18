@@ -1360,6 +1360,106 @@ pad.set_height(30.0) -> update 성공, IsUpToDate True, 부피 47785.398로 복�
 전부 실패). 모서리 index와 BRep 이름은 재빌드마다 바뀌고 프로세스를 넘겨 저장할 수 없다.
 `_GenerationRegistry`는 프로세스 안에서만 유효하므로, 새 프로세스는 스냅샷을 새로 찍어야 한다.
 
+### 1.11 기존 모델 편집: feature 치수, 스케치 요소 재발견, work_at, 파라미터 의존성 (probe 43, 실측 2026-09-18)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**feature 치수 검증 표.** `dir()`에 보이는 것이 아니라 읽기·쓰기·update·형상 변화·새 wrapper까지
+확인한 것만 공개했다.
+
+| feature | 치수 | Automation 멤버 | 읽기 | 쓰기 | update | 형상 변화 | 새 wrapper | 새 프로세스 | 공개 API |
+|---|---|---|---|---|---|---|---|---|---|
+| Edge Fillet | 반지름 | `Radius` (Length) | O | O 4→8 | O | O 47862.7→47450.6 | O | O | `radius` / `set_radius` / `radius_parameter` |
+| Chamfer | 길이1 | `Length1` (Length) | O | O 2→5 | O | O | - | - | `length1` / `set_length1` |
+| Chamfer | 각도 | `Angle` (Angle) | O | O 45→30 | O | O | - | - | `angle` / `set_angle` |
+| Chamfer | 길이2 | `Length2` (Length) | O | **X** `CATIALength: The method Value failed` | - | - | - | - | 없음 (이 SDK가 만드는 길이/각도 모드에서 쓰기 거부) |
+| Hole | 지름 | `Diameter` (Length) | O | O 10→12 | O | O | - | - | `diameter` / `set_diameter` |
+| Hole | 깊이 | `BottomLimit.Dimension` (Length) | O | O 5→12 | O | O 47303.9→46512.2 | O | O | `depth` / `set_depth` |
+| Shell | 내부 두께 | `InternalThickness` (Length) | O | O 2→4 | O | O | - | - | `internal_thickness` / `set_internal_thickness` |
+| Shell | 외부 두께 | `ExternalThickness` (Length) | O | O 0→1.5 | O | O 11712→21955.5 | - | - | `external_thickness` / `set_external_thickness` |
+| Thickness | 두께 | `Offset` (Length) | O | O 3→6 | O | O 52800→57600 | O | O | `offset` / `set_offset` |
+| Pad / Pocket | 깊이 | `FirstLimit.Dimension` | O | O | O | O | O | O | 이미 있음 (`depth`/`height`) |
+| Shaft / Groove | 각도 | `FirstAngle`/`SecondAngle` | O | O | O | O | O | O | 이미 있음 |
+| Hole | `Depth` | — | **멤버 없음** | - | - | - | - | - | 없음 (깊이는 `BottomLimit`에 있다) |
+| Thickness | `Thickness`/`Value` | — | **멤버 없음** | - | - | - | - | - | 없음 (멤버 이름은 `Offset`) |
+| Chamfer | `Mode`/`Propagation` | int | O | 미시도 | - | - | - | - | 없음 (파라미터가 아니라 정수) |
+| RectPattern | 간격/개수 | 미조사 | - | - | - | - | - | - | 없음 (패턴은 생성·삭제만 검증돼 있다) |
+| MultiSectionSolid | — | 단순 치수 없음 | - | - | - | - | - | - | 없음 |
+
+setter는 `part.update()`를 부르지 않는다. 라이브에서 setter 직후 측정은
+`TargetNotUpToDateError`로 거부됐고(Phase 1 가드), update 뒤에야 부피가 바뀌었다. 즉 "setter가
+몰래 재빌드하지 않는다"가 관측으로 확인된다. 실패한 update는 이전 값을 되돌리고 다시 update하면
+복구된다(1.10과 같은 규칙, fillet 8→4로 부피까지 원복 확인).
+
+**스케치 요소 재발견.**
+
+```text
+Sketch.GeometricElements            -> Count/Item(i) 그리고 Item("Line.1")처럼 이름으로도 조회된다
+  내용                               -> ['AbsoluteAxis'(Axis2D), 'Line.1', 'Line.2', 'Circle.1']
+Item('없는 이름')                     -> com_error (HRESULT 0x80020003)
+Circle2D.Radius                     -> 5.0 (읽기 O)
+Line2D 멤버                          -> Application, Construction, GeometricType, GetItem,
+                                       HorizontalReference, Name, Origin, Parent, ReportName,
+                                       VerticalReference  (좌표 접근자 없음)
+Circle2D.GetCenter()                -> com_error
+edit() 없이 Name 읽기                 -> 동작
+edit() 안에서 AddBiEltCst(재발견 요소) -> 'Parallelism.1' 생성, update 성공
+```
+
+즉 **이름이 스케치 요소의 지속 identity**이고, 인덱스는 아니다. 이 사실로
+`sketch.get_element(name)`/`sketch.elements()`와 `SketchElement.name`/`radius`를 만들었다.
+선 좌표는 이 릴리스의 `Line2D`가 아예 노출하지 않으므로 넣지 않았다. 같은 두 선에 같은
+parallelism을 다시 걸면 CATIA는 중복을 만들지 않고 기존 것을 둔다(프로세스 B에서 개수 1→1).
+
+**feature를 In-Work Object로 두면 그 뒤에 삽입된다.**
+
+```text
+tree before        ['AUTO3DX_P43_PAD', 'AUTO3DX_P43_FILLET']
+IWO before         AUTO3DX_P43_FILLET (마지막으로 만든 feature)
+Part.InWorkObject = PAD    -> IWO inside: AUTO3DX_P43_PAD
+그 상태에서 pad 생성        -> 'AUTO3DX_P43_PAD2', IWO는 새 pad로 이동
+tree after         ['AUTO3DX_P43_PAD', 'AUTO3DX_P43_PAD2', 'AUTO3DX_P43_FILLET']
+update             성공, is_up_to_date True, 부피에 두 pad 모두 반영
+```
+
+즉 **선택한 feature "바로 뒤"에 삽입**되고, 그 뒤의 fillet은 여전히 하류에 남는다. 트리 재정렬이
+아니다(기존 feature는 아무것도 움직이지 않는다). 이 사실로 `part.work_at(feature)`를 만들었다.
+`work_in(body)`는 어느 body에 만들지, `work_at(feature)`는 그 body의 history 어디에 만들지를
+고른다. 둘은 하나의 스택을 공유하고 안쪽 블록이 이긴다.
+
+**파라미터 의존성은 Relations에서 읽는다.**
+
+```text
+Formula 멤버        Activate, Activated, Comment, Context, Deactivate, GetInParameter, GetItem,
+                   GetOutParameter, Hidden, IsConst, Modify, Name, NbInParameters,
+                   NbOutParameters, Parent, Rename, Value
+NbInParameters     1
+GetInParameter(1)  '3D Shape00422558\\AUTO3DX_P43_L'  (정규화된 이름)
+GetInParameter(2)  com_error (마지막 다음)
+Parameter.OptionalRelation  입력 파라미터 -> None / 구동되는 파라미터 -> 'AUTO3DX_P43_FORMULA'
+```
+
+`OptionalRelation`은 그 파라미터를 **구동하는** relation(출력 쪽)만 알려주므로, "이 파라미터를
+읽는 formula"는 각 formula의 입력을 훑어야 한다. 문자열 파싱은 하지 않는다.
+
+**참조 중인 파라미터를 지우면 생기는 일(수정 전 동작).**
+
+```text
+parameters.remove('AUTO3DX_P43_L')  -> 예외 없이 성공
+formula 목록                         -> 그대로 남아 있음
+formula body                        -> 'deleted_AUTO3DX_P43_L * 2'
+is_up_to_date                       -> False
+```
+
+그래서 `parameters.remove`는 먼저 `Relations`를 훑어 그 파라미터를 읽는 formula가 있으면
+`ParameterInUseError`로 거부한다. `parameters.dependents(name)`이 무엇이 막고 있는지 알려주고,
+`force=True`는 위 결과를 감수하겠다는 뜻이다. 지원 경계는 **formula까지**다: rule, check, law,
+program, design table은 검증된 입력 목록이 없어 탐지하지 않는다.
+
+**남은 한계.** Chamfer의 `Length2`는 쓰기 불가, 선 좌표는 읽을 수 없고, RectPattern 치수는
+미조사다. 요소 이름은 지속되지만 topology의 모서리·면 index와 BRep 이름은 여전히 재빌드마다
+바뀐다(1.10).
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 991 통과 | 44 통과, 6 skip (2026-09-18, 빈 테스트 Part, 안전 배치 1 포함) |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 1036 통과 | 49 통과, 6 skip (2026-09-18, 빈 테스트 Part, 기존 모델 편집 포함) |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -735,6 +735,103 @@ Part가 3DEXPERIENCE에서 활성 Part가 아니면 아무것도 건드리지 �
 boolean 연산(Add/Remove/Intersect/Assemble), body 이름 변경과 순서, body 안의 기하 세트,
 Product/Assembly는 지원하지 않습니다.
 
+## 기존 모델 편집
+
+이미 만들어진 Part에 다시 붙어서 고치는 흐름입니다. 파이썬 객체가 남아 있지 않아도 됩니다.
+
+### feature 치수 수정
+
+`create_*`로 다시 만들지 않고 기존 feature의 치수를 바꿉니다. 지우고 다시 만들면 그 feature가
+쓰던 모서리·면 참조가 다시 풀리기 때문에, 편집이 더 안전합니다.
+
+```python
+fillet = part.part_design.get_edge_fillet("F1")
+previous = fillet.radius            # 4.0
+fillet.set_radius(8.0)              # 여기서 재빌드하지 않습니다
+part.update()
+
+part.measurement.measure().volume_mm3   # 형상이 실제로 바뀐 것을 확인
+```
+
+라이브에서 읽기·쓰기·update·형상 변화·새 wrapper까지 확인한 것만 열었습니다.
+
+| feature | 열린 치수 |
+|---|---|
+| Edge Fillet | `radius` / `set_radius` / `radius_parameter()` |
+| Chamfer | `length1` / `set_length1`, `angle` / `set_angle` |
+| Hole | `diameter` / `set_diameter`, `depth` / `set_depth` |
+| Shell | `internal_thickness`, `external_thickness` (+ 각 setter) |
+| Thickness | `offset` / `set_offset` |
+| Pad · Pocket | `depth`(`height`) / `set_depth`(`set_height`) — 이전부터 있던 API |
+| Shaft · Groove | `first_angle` / `second_angle` (+ 각 setter) — 이전부터 있던 API |
+
+`Chamfer.Length2`는 CATIA가 이 SDK가 만드는 길이/각도 모드에서 쓰기를 거부해서 열지 않았습니다.
+사각 패턴 치수는 아직 검증하지 않았습니다.
+
+update가 실패하면 **이전 값을 되돌리고 다시 update**하세요. feature를 지우는 것은 마지막
+수단입니다("update가 실패했을 때" 참고).
+
+### 스케치 요소 다시 찾기
+
+예전 세션에서 그린 선·원을 이름으로 다시 잡아 새 제약에 씁니다. 컬렉션 인덱스가 아니라 **CATIA가
+붙인 이름이 지속되는 식별자**입니다.
+
+```python
+sketch = part.sketches.get("PROFILE")     # 다른 프로세스가 그린 스케치
+sketch.element_names()                    # ['AbsoluteAxis', 'Line.1', 'Line.2', 'Circle.1']
+
+line = sketch.get_element("Line.1")
+line.name, line.kind                      # ('Line.1', 'Line2D')
+sketch.get_element("Circle.1").radius     # 5.0
+
+with sketch.edit() as editor:             # 제약 생성은 여전히 edit() 안에서만
+    editor.parallel(line, sketch.get_element("Line.2"))
+part.update()
+```
+
+읽기는 `edit()` 없이도 됩니다. 없는 이름은 `SketchElementNotFoundError`로 알려주고 스케치가 실제로
+가진 이름을 함께 보여줍니다. 선의 좌표는 이 릴리스의 `Line2D`가 아예 노출하지 않아 제공하지
+않습니다(원의 `radius`는 됩니다).
+
+### feature 위치에서 작업하기
+
+`work_in(body)`가 "어느 body"라면, `work_at(feature)`는 "그 body의 history 어디"입니다.
+
+```python
+with part.work_at(part.part_design.get_pad("BASE")):
+    part.part_design.create_pad("RIB", sketch, 6.0)
+part.update()
+```
+
+라이브에서 확인한 동작은 이렇습니다. `PAD, FILLET` 트리에서 `PAD`를 작업 위치로 잡고 pad를 만들면
+`PAD, NEW, FILLET`이 됩니다. 즉 **선택한 feature 바로 뒤에 삽입**되고 하류 fillet은 그대로
+하류에 남습니다. 기존 feature를 옮기는 트리 재정렬이 아닙니다.
+
+- 블록을 나가면 정상·예외 어느 쪽이든 이전 In-Work Object로 되돌립니다.
+- body는 받지 않습니다(그건 `work_in`입니다). 다른 Part의 feature도 거부합니다.
+- `work_in`과 중첩하면 안쪽 블록이 이깁니다.
+
+### 참조 중인 파라미터 삭제 막기
+
+formula가 읽고 있는 파라미터를 지우면, CATIA는 아무 말 없이 지우고 formula 본문을
+`deleted_L_box * 2`처럼 고쳐 써 버립니다. 관계는 남지만 아무것도 계산하지 않고 Part는
+not-up-to-date가 됩니다. 그래서 기본 삭제가 먼저 검사합니다.
+
+```python
+part.parameters.dependents("L_box")   # [Formula(name='DriveL')]
+part.parameters.remove("L_box")       # ParameterInUseError — 모델은 그대로입니다
+
+part.formulas.remove("DriveL")
+part.parameters.remove("L_box")       # 이제 정상 삭제
+```
+
+의존성은 각 formula에게 자기 입력을 물어서(`Formula.GetInParameter`) 찾습니다. 본문 문자열을
+파싱하지 않고, 모델에서 읽으므로 새 프로세스에서도 그대로 동작합니다. 감수하고 지우려면
+`remove(name, force=True)`입니다.
+
+**검증된 한계:** formula만 탐지합니다. `Relations`에는 rule, check, law, program, design table도
+들어갈 수 있는데 이들은 검증된 입력 목록이 없어서, 그것만 참조하는 파라미터는 막지 못합니다.
+
 ## 측정
 
 `part.measurement`는 Part가 속한 Editor의 CATIA 측정 서비스에 연결된
@@ -778,7 +875,7 @@ summary = part.inspect.summary()
 print(summary.render())
 
 summary.features          # FeatureInfo(name, kind, supported), main body, 트리 순서
-summary.sketches          # main body 스케치 이름
+summary.sketches          # main body 스케치 이름 (요소는 sketch.element_names())
 summary.parameters        # 사용자 파라미터
 summary.bodies            # BodyInfo(name, is_main, features, sketches), render()가 body별 feature 표시
 summary.geometrical_sets  # GeometricalSetInfo(name, elements, nested_set_count)
@@ -897,8 +994,8 @@ python -m pytest tests/integration -m integration -q
 ```
 
 `scripts/acceptance/`의 Multi-sections Solid 수명 주기, NACA 날개, Multi-Body A→B 수명 주기,
-다섯 body enclosure, 안전 배치 1(`batch1_safety.py`) 스크립트도 같은 변수로 Part를 골라 공개
-API만 사용합니다. 빈 main body가
+다섯 body enclosure, 안전 배치 1(`batch1_safety.py`), 기존 모델 편집(`phase2_editing.py`)
+스크립트도 같은 변수로 Part를 골라 공개 API만 사용합니다. 빈 main body가
 필요 없는 테스트는 빈 Part에서도 돌고, 이미 solid가 있어야 하는 측정·Mirror 테스트는 skip됩니다.
 
 통합 테스트 세션은 시작할 때 사용자의 CATIA selection을 저장하고 비운 뒤, 끝날 때
@@ -910,8 +1007,8 @@ API만 사용합니다. 빈 main body가
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 991개입니다. B428_Cloud
-live 통합 테스트는 50개이고, 2026-09-18 빈 테스트 Part에서 44개 통과, 6개 skip(빈 main body나
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 1036개입니다. B428_Cloud
+live 통합 테스트는 55개이고, 2026-09-18 빈 테스트 Part에서 49개 통과, 6개 skip(빈 main body나
 수동 파라미터가 필요한 테스트)이었으며 실행 뒤 Part가 실행 전과 같았습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 
