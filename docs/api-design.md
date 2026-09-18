@@ -212,16 +212,28 @@ raises `StaleSnapshotError` on mismatch. The model is untouched when this is rai
 ## 6. Update policy
 
 Status: Enforced. `tests/unit/test_update_policy.py` parses the package source and fails if
-anything other than `Part.update()` calls `Update()`, or if anything calls `Save()` or
-`PLMPropagate()`. `update()` advancing the generation is pinned by the generation tests.
+anything other than `Part.update()` or `Body.update()` calls `Update()`/`UpdateObject()`, or if
+anything calls `Save()` or `PLMPropagate()`. `update()` advancing the generation is pinned by the
+generation tests.
 
-**`part.update()` is the only method that rebuilds the model.** No constructor, setter, `ensure`
-or removal calls `Part.Update()`.
+**`part.update()` and `body.update()` are the only methods that rebuild the model.** No
+constructor, setter, `ensure` or removal rebuilds.
 
 ```python
 pad = part.part_design.create_pad("Base", sketch, 20.0)
-part.update()
+part.update()                       # Part.Update(): everything
+
+with part.work_in(tray):
+    part.part_design.create_pad("TrayFloor", tray_sketch, 3.0)
+tray.update()                       # Part.UpdateObject(tray): that body alone
+part.update(tray)                   # the same call, spelled from the Part
 ```
+
+**A body created or edited inside `work_in` is not rebuilt by leaving the block.** Until
+something rebuilds it, `body.is_up_to_date` is `False`, CATIA has no valid solid for it, and
+measuring it fails inside the inertia service, which is why measurement refuses it first
+(section 12). `body.update()` rebuilds one body without touching the rest of the Part and
+without moving the In-Work Object (live, probe 42).
 
 Why explicit:
 
@@ -233,12 +245,24 @@ Why explicit:
 - Several mutations often form one valid state only together, such as a sketch and the pad
   built on it. Batching them before one rebuild avoids rebuilding invalid intermediate states.
 
-After `part.update()` raises `PartUpdateError`:
+After a rebuild raises `PartUpdateError`, **repair the model; deletion is the last step, not
+the first.** Nothing was rolled back and nothing was deleted, and every later update fails while
+the model stays invalid.
 
-1. The feature that caused it is still in the model.
-2. Remove it with the matching `remove_*` method before doing anything else.
-3. Do not retry blindly. The SDK does not roll back automatically, because removing a pad
-   cascades to its sketch, which makes automatic rollback more dangerous than reporting.
+1. Identify what the failure followed.
+2. If it followed an edit to something that already worked -- a dimension, a parameter, a formula
+   -- put the old value back and update again. Live (probe 42): a pad taken from 30 mm to 1 mm
+   broke a 5 mm fillet that depended on it; `part.update()` raised, the fillet stayed in the
+   tree, and restoring 30 mm rebuilt the Part with the fillet intact and the same volume as
+   before.
+3. Confirm the repair with `part.is_up_to_date()`.
+4. Only if there is nothing to roll back -- a newly created feature that never built, or an
+   edit whose previous value is unknown -- remove the offending feature with the matching
+   `remove_*` method.
+
+The SDK does not roll back automatically. It cannot know which change the caller meant to keep,
+and removing a pad cascades to its sketch, so an automatic rollback would destroy more than it
+repairs. Do not retry blindly.
 
 `part.is_up_to_date()` reports CATIA's rebuild status. It is a rebuild-status query, not an
 unsaved-change detector: a standalone parameter change does not make it return `False`.
@@ -251,15 +275,40 @@ Status: Implemented. `part.part_design.snapshot_edges()` and `snapshot_faces()` 
 deprecated aliases that warn and share the same generation; they will be removed before 1.0.
 
 ```python
-edges = part.topology.edges()          # EdgeSnapshot of the whole solid
-fillet = part.part_design.create_edge_fillet("F1", edges[0], 1.0)
+edges = part.topology.edges()            # every body's edges, in one flat list
+edges = part.topology.edges(body=tray)   # that body's edges only
+edges = part.topology.edges(body=None)   # the whole Part, even inside work_in
+
+edge = [e for e in edges if e.owner_feature_name == "TrayFloor"][0]
+fillet = part.part_design.create_edge_fillet("F1", edge, 1.0)
 part.update()
 
-faces = part.topology.faces()          # a NEW snapshot: the model changed
+faces = part.topology.faces(body=tray)   # a NEW snapshot: the model changed
 part.part_design.create_shell("S1", faces[0], 2.0, 0.0)
 ```
 
-- A snapshot covers the whole solid. No verified search scopes it to one feature.
+**A Part-wide snapshot mixes bodies, so topology is scoped and owned.** `Topology.Edge,all`
+returns the edges of every body in the Part together, and CATIA will happily build a feature in
+one body from another body's edge, failing only at the next `Part.Update()`. Two things prevent
+that:
+
+- **Scoping.** `edges(body=...)`/`faces(body=...)` select that body and search
+  `Topology.Edge,sel`, which live returned only that body's topology and followed the selection,
+  not the In-Work Object (probe 42). Inside `part.work_in(body)` a snapshot follows the work
+  body by default, like sketches and features; `body=None` still asks for the whole Part.
+  Outside a work context, and with no `body` argument, the search is Part-wide exactly as before.
+- **Ownership.** Every `Edge`/`Face` carries `owner_body`, `owner_body_name` and
+  `owner_feature_name`, read at snapshot time by walking `Reference.Parent` up to the owning
+  `Body`. `PartDesign` compares that body with the one it is building in and raises
+  `CrossBodyReferenceError` before calling `ShapeFactory`, so the model is untouched. Ownership
+  is re-read from the model on every snapshot, never remembered between calls or processes.
+  When CATIA reports no owner, the guard allows the call: refusing on a missing answer would
+  break valid work. That is the one gap in this guard.
+
+A body's edges include the wire edges of the sketches its features consumed, which a fillet
+cannot use; `owner_feature_name` is how a caller picks a solid edge.
+
+- A snapshot covers one body or the whole Part. No verified search scopes it to one feature.
 - `Edge.index` is a position in one snapshot, not an identity.
 - `Edge.descriptor` is CATIA's BRep string, for logging and comparison only. It cannot be stored
   and resolved later: `CreateReferenceFromBRepName` failed in every context tried.
@@ -460,6 +509,14 @@ geometrical set.
 
 Status: measurement Implemented. Export probed live (probe 39) and not available: see below.
 
+**Measurement refuses a target CATIA has not rebuilt.** A body whose features have not been
+rebuilt has no valid solid: the inertia service accepts it and then fails at `GetArea` with a
+bare `E_FAIL` (live, probe 42). `part.measurement.measure()` checks `Part.IsUpToDate(item)`
+first and raises `TargetNotUpToDateError`, naming the body and saying to call `part.update()` or
+`body.update()`. It never rebuilds anything itself: measurement stays read-only, so a measured
+number never hides a model change. When the status cannot be read, the measurement goes ahead
+and CATIA decides.
+
 **Measurement** is a verification layer. A capability is exposed only when it is backed by
 reproducible live evidence. An inertia bounding box once returned correct values and later
 returned all zeros silently on an unchanged model, so it is not exposed.
@@ -544,8 +601,9 @@ Status: Enforced by review.
 
 - Never save the test document.
 - Every live mutation runs in `try/finally` and removes what it created.
-- After a deliberately broken feature, remove it before continuing: a failed update poisons every
-  later update.
+- After a deliberately broken update, repair the model before continuing: roll the edit back and
+  update again, and remove the feature only when it never built (section 6). A test that leaves
+  the model invalid makes every later test fail.
 - Restore the In-Work Object and the selection when a test changes them.
 - Run only against a disposable Part named by `AUTO3DX_LIVE_PART`. The integration session
   refuses to start otherwise, and probes select the Part by that name. Remove only what the
@@ -587,6 +645,10 @@ part.bodies.remove("OuterHousing", delete_contents=True)
 
 - **Bodies are found in the model, never remembered.** A new process finds the same bodies by
   name. `Body.is_main` is COM identity with `MainBody`, not the name `PartBody`.
+- **A body has its own rebuild.** Leaving a `work_in` block does not rebuild anything;
+  `body.is_up_to_date` reports that, `body.update()` rebuilds that body alone (section 6), and
+  measurement refuses a body that has not been rebuilt (section 12). A snapshot taken inside a
+  work context covers that body (section 7).
 - **`work_in` is the only way to model in another body.** Inside the block, `part.sketches`
   adds to the body's own `Sketches`, `part.part_design` creates and looks up features in that
   body, and the body is made the In-Work Object immediately before every factory call,
@@ -640,6 +702,14 @@ Products and assemblies, and any Selection-based operation on a non-active Part.
 | `part.planes`: `list`/`names`/`get`, and cleanup without in-memory state | 4 | Done |
 | `sketch.support()` resolving user-defined planes, not only origin planes | 4 | Done |
 | `part_design`: Multi-sections Solid (`MultiSectionSolid`, sections only) | 4 | Done; builds live for corner-free sections, no closing-point support |
+| `part.topology.edges(body=...)`/`faces(body=...)`, implicit inside `work_in` | 7 | Done |
+| `Edge`/`Face` ownership and `CrossBodyReferenceError` | 7 | Done; unknown owner is allowed through |
+| `body.update()` / `part.update(body)` for a non-main body | 6 | Done |
+| Measurement refuses a target that is not up to date | 12 | Done |
+| `Parameter.value` reads an `EnumParam` through `ValueAsString()` | 4 | Done; writing unverified |
+| Sketch support refuses a plane that was never rebuilt | 4 | Done |
+| `PartUpdateError` recovery: roll the edit back before deleting | 6 | Done (documentation and guidance) |
+| Topology ownership across processes | 7 | Re-read per snapshot; nothing persists, by design |
 | `part.bodies`: `list`/`names`/`get`/`main`/`create`/guarded `remove` | 16 | Done |
 | `part.work_in(body)`: sketches and Part Design in a chosen body, In-Work Object restored | 16 | Done |
 | `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |

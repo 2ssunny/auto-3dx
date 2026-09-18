@@ -1258,6 +1258,108 @@ skip한다.
 지원하지 않는 것: boolean 연산(Add/Remove/Intersect/Assemble), body 이름 바꾸기와 순서, body 안의 기하
 세트, Product/Assembly, In-Work Object의 공개 setter(`work_in` 밖), 비활성 Part의 topology·삭제·표시.
 
+### 1.10 body 단위 topology·update·측정 (probe 42, 실측 2026-09-18)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**topology는 body로 범위를 좁힐 수 있다.** 지금까지 "`Topology.Edge,sel`은 전체를 돌려준다"로
+기록돼 있었는데(1.2.2.2), 그때는 아무것도 선택하지 않은 상태였다. body 하나를 **먼저 선택하면**
+그 body만 검색된다.
+
+```text
+Search('Topology.Edge,all')                    -> 32 (두 body의 모서리가 한 목록에 섞여 나온다)
+Selection.Add(MainBody); Search('...Edge,sel') -> 16, owner: MAIN_PAD / MAIN_SKETCH
+Selection.Add(ToolBody); Search('...Edge,sel') -> ToolBody 것만
+Selection.Add(body);     Search('...Face,sel') -> 그 body의 면만 (재빌드 안 된 body는 0개)
+Search('Topology.Edge,in')                     -> 전체 (범위 지정 아님)
+ToolBody를 In-Work로 두고 MainBody를 선택 + ,sel -> MainBody 것. 선택을 따르고 In-Work Object는 무시한다
+```
+
+**모서리·면의 소유 body를 모델에서 읽을 수 있다.** `Reference.Parent`가 그 참조를 만든 feature이고,
+거기서 `Parent`를 따라 올라가면 `Body`가 나온다.
+
+```text
+솔리드 모서리      Reference.Parent -> Pad:MAIN_PAD -> Shapes -> Body:PartBody -> Bodies
+스케치 wire 모서리  Reference.Parent -> Sketch:TOOL_SKETCH -> Pad:TOOL_PAD -> Shapes -> Body:TOOL_BODY
+```
+
+body의 모서리에는 그 body가 소비한 **스케치의 wire 모서리도 섞여 있다.** fillet은 솔리드 모서리만
+받으므로 `owner_feature_name`으로 골라야 한다(라이브에서 wire 모서리에 fillet을 걸었더니
+`AddNewEdgeFilletWithConstantRadius`가 실패했다).
+
+이 사실로 `part.topology.edges(body=...)`/`faces(body=...)`와 `Edge`/`Face`의 `owner_body`,
+`owner_body_name`, `owner_feature_name`, 그리고 `CrossBodyReferenceError` 가드를 만들었다. 소유
+정보는 스냅샷을 찍을 때마다 모델에서 다시 읽으므로 새 프로세스에서도 그대로 동작한다. Python에
+저장해 두는 것은 없다.
+
+**비어 있는 답은 거부하지 않는다.** CATIA가 소유 body를 알려주지 않으면(`owner_body is None`)
+가드는 통과시킨다. 없는 답을 근거로 막으면 정상 호출이 깨지기 때문이다. 이것이 이 가드의 유일한
+구멍이다.
+
+**non-main body는 따로 재빌드해야 한다.**
+
+```text
+work_in에서 ToolBody에 pad 생성 직후
+  IsUpToDate(Part) False / IsUpToDate(MainBody) True / IsUpToDate(ToolBody) False
+  measure(ToolBody) -> GetArea E_FAIL (AutomationError)
+Part.UpdateObject(ToolBody)  -> ToolBody만 up to date, MainBody는 그대로 False,
+                                In-Work Object도 그대로
+measure(ToolBody) -> 4800 mm3 (20x20x12)
+Part.Update()                -> 전체. 이 세션에서는 ToolBody도 함께 up to date가 됐다
+```
+
+`Part.Update()`가 non-main body를 재빌드하지 못한 사례가 보고됐지만 이 Part에서는 재현되지
+않았다. 어느 쪽이든 body 하나만 확실히 재빌드하는 경로가 필요하므로 `body.update()`와
+`part.update(body)`(둘 다 `Part.UpdateObject`)를 만들었다. 측정 전에는
+`Part.IsUpToDate(body)`를 먼저 보고 `TargetNotUpToDateError`로 거부한다. 측정은 읽기 전용이므로
+스스로 재빌드하지 않는다.
+
+**EnumParam에는 `Value`가 없다.**
+
+```text
+EnumParam (Coincidence.1\Mode, Parallelism.1\Mode 등 스케치 제약이 만든다)
+  .Value          -> AttributeError
+  .ValueAsString()-> 'CstAttr_Mode_Constrained'   (property가 아니라 메서드)
+  .ValueAsInt / .EnumeratedValues / .ValuationType -> 없음
+  public 멤버: Application, Comment, Context, GetItem, Hidden, IsTrueParameter, Name,
+               OptionalRelation, Parent, ReadOnly, Rename, Renamed, UserAccessMode,
+               ValuateFromString, ValueAsString, ValueEnum
+```
+
+제약이 하나라도 있는 Part는 이런 파라미터를 갖게 되므로 `Parameter.value`는 `Value`가 없으면
+`ValueAsString()`을 읽는다. 쓰기(`ValuateFromString`)는 검증하지 않았으므로 `set()`은 여전히
+거부한다.
+
+**새로 만든 평면은 재빌드 전에는 스케치 support로 못 쓴다.** 이건 알려진 현상이었고, 이번에
+**상태를 미리 읽을 수 있다**는 것을 확인했다.
+
+```text
+planes.create_offset(...) 직후
+  IsUpToDate(Part) False / IsUpToDate(plane) False
+  sketches.create(support=plane) -> E_FAIL 0x80020009
+part.update() 뒤
+  IsUpToDate(plane) True / sketches.create(support=plane) -> 성공
+```
+
+그래서 `SketchCollection`이 support 평면의 `IsUpToDate`를 먼저 보고 `SupportNotUpdatedError`로
+거부한다. 상태를 읽지 못하면 막지 않고 CATIA에 맡긴다.
+
+**PartUpdateError는 대개 되돌리면 낫는다.**
+
+```text
+pad 30mm + fillet 5mm, update 성공, 부피 47785.398
+pad.set_height(1.0) -> update 실패 (PartUpdateError), IsUpToDate False, fillet은 트리에 그대로
+pad.set_height(30.0) -> update 성공, IsUpToDate True, 부피 47785.398로 복귀, fillet 그대로
+```
+
+즉 **정상이던 값을 바꿔서 실패한 경우는 그 값을 되돌리는 것이 먼저**이고, feature 삭제는 새로
+만든 feature가 애초에 만들어지지 않았거나 되돌릴 값이 없을 때만 한다. 기존 문서·docstring의
+"실패한 feature를 지워야 한다"는 안내를 이에 맞게 고쳤다.
+
+**여전히 남은 한계.** feature 단위 범위 지정은 없다(`Topology.Edge,in,<name>` 등은 probe 35에서
+전부 실패). 모서리 index와 BRep 이름은 재빌드마다 바뀌고 프로세스를 넘겨 저장할 수 없다.
+`_GenerationRegistry`는 프로세스 안에서만 유효하므로, 새 프로세스는 스냅샷을 새로 찍어야 한다.
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

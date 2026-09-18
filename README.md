@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 957 통과 | 40 통과, 6 skip (2026-09-17, 빈 테스트 Part, Multi-Body 포함) |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 991 통과 | 44 통과, 6 skip (2026-09-18, 빈 테스트 Part, 안전 배치 1 포함) |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -196,6 +196,10 @@ parameters = part.parameters
 for parameter in parameters.user_parameters():
     print(parameter.short_name, parameter.kind, parameter.value, parameter.unit)
 
+# 스케치에 제약이 하나라도 있으면 CATIA가 EnumParam(Coincidence.1\Mode 등)을 만듭니다.
+# 이런 파라미터에는 Value가 없어서, SDK는 ValueAsString()을 읽어 문자열로 돌려줍니다
+# ("CstAttr_Mode_Constrained"). 값 쓰기는 검증하지 않아 set()은 계속 거부합니다.
+
 width = parameters.ensure_length("WIDTH", 60, unit="mm")
 parameters.ensure_real("SAFETY_FACTOR", 1.2)
 parameters.ensure_integer("COUNT", 3)
@@ -335,8 +339,13 @@ Shaft와 Groove의 회전 프로파일은 편집 중 얻은 line을
 (`PlaneCollection`)로 offset 평면과 각도 평면을 만들고, 그 평면을 `support`로
 넘겨 스케치할 수 있습니다.
 
+**평면을 만든 뒤에는 `part.update()`를 부르고 나서 스케치를 만들어야 합니다.** 재빌드되지
+않은 평면은 CATIA가 support로 받지 않습니다. 예전에는 의미 없는 COM 오류가 났지만, 지금은
+`SupportNotUpdatedError`로 무엇을 해야 하는지 알려주고 모델은 건드리지 않습니다.
+
 ```python
 plane = part.planes.create_offset("TOP_OFFSET", support="XY", offset=30)
+part.update()                                   # 이 줄이 없으면 SupportNotUpdatedError
 sketch = part.sketches.create("TOP_SKETCH", support=plane)
 
 with sketch.edit() as editor:
@@ -534,11 +543,14 @@ except PartUpdateError:
 면·모서리를 지목할 수 없어 막혀 있던 약 80개 face/edge feature 중 첫 두 개가
 `create_edge_fillet`/`create_chamfer`로 구현되었습니다. 모서리는 이름이나
 좌표가 아니라 `part.topology.edges()`가 돌려주는 `EdgeSnapshot`
-에서 얻습니다. 이 snapshot은 스케치가 아니라 **솔리드 전체**의 모서리를
-검색한 결과이고, 한 feature의 모서리만 골라 검색 범위를 좁히는 방법은 없습니다.
+에서 얻습니다. 인자 없이 부르면 스케치가 아니라 **Part 전체**의 모서리, 즉 모든 body의
+모서리가 한 목록으로 나옵니다. body 하나로 범위를 좁힐 수는 있지만, 한 feature의 모서리만
+골라내는 방법은 없습니다.
 
 ```python
-snapshot = part.topology.edges()
+snapshot = part.topology.edges()                # Part 전체
+snapshot = part.topology.edges(body="LEDTray")  # 그 body만
+# with part.work_in(tray): 안에서는 인자 없이도 tray가 기본 범위입니다.
 
 fillet = design.create_edge_fillet("F1", snapshot[0], radius=3, unit="mm")
 part.update()
@@ -550,6 +562,31 @@ chamfer = design.create_chamfer(
 )
 part.update()
 ```
+
+**모서리는 자기가 속한 body와 feature를 알고 있습니다.** 다른 body의 모서리로 feature를
+만들려고 하면 CATIA는 그 호출을 받아들이고 다음 `part.update()`에서 실패하므로, SDK가
+COM 호출 전에 막습니다.
+
+```python
+tray_edges = part.topology.edges(body="LEDTray")
+tray_edges[0].owner_body_name      # 'LEDTray'
+tray_edges[0].owner_feature_name   # 'TRAY_PAD' 또는 그 body가 소비한 스케치 이름
+
+# body의 모서리에는 그 body가 소비한 스케치의 wire 모서리도 섞여 있습니다.
+# 필렛은 솔리드 모서리만 받으므로 owner_feature_name으로 고릅니다.
+solid = [edge for edge in tray_edges if edge.owner_feature_name == "TRAY_PAD"]
+
+with part.work_in(tray):
+    design.create_edge_fillet("F1", solid[0], radius=3)   # OK
+
+design.create_edge_fillet("F2", solid[0], radius=3)
+# CrossBodyReferenceError: 이 모서리는 'LEDTray'의 것인데 필렛은 'PartBody'에 만들어집니다.
+# 모델은 그대로입니다.
+```
+
+소유 정보는 snapshot을 뜰 때마다 모델에서 다시 읽습니다. 새 프로세스에서도 그대로
+동작하고, Python 쪽에 저장해 두는 것은 없습니다. CATIA가 소유 body를 알려주지 않으면
+SDK는 막지 않습니다 — 알 수 없는 답을 근거로 정상 호출을 거부하지 않기 위해서입니다.
 
 반드시 알아야 할 제약이 세 가지 있습니다.
 
@@ -650,8 +687,8 @@ tray.features                               # (FeatureInfo(name='TRAY_PAD', kind
 tray.sketch_names                           # ('TRAY_SKETCH',)
 ```
 
-- `work_in` 블록 안에서만 스케치·Part Design feature가 그 body로 갑니다. 블록 밖의 동작은
-  main body에서 하던 그대로입니다.
+- `work_in` 블록 안에서만 스케치·Part Design feature·topology snapshot이 그 body로 갑니다.
+  블록 밖의 동작은 main body에서 하던 그대로입니다.
 - 블록을 정상으로 나가든 예외로 나가든 이전 In-Work Object로 되돌립니다. 되돌리기가 실패하면
   예외에 note로 붙이거나(블록이 이미 예외를 냈을 때) `AutomationError`를 냅니다.
 - 다른 Part의 body나 없는 body는 거부합니다. main body로 조용히 바꾸지 않습니다.
@@ -663,6 +700,21 @@ housing = part.bodies.get("OuterHousing")
 housing.hide()
 housing.is_visible                          # False
 housing.show()
+```
+
+**body는 따로 재빌드해야 합니다.** `work_in` 블록을 나가는 것만으로는 재빌드되지 않습니다.
+
+```python
+with part.work_in(tray):
+    ...
+tray.is_up_to_date        # False
+part.measurement.measure(tray)
+# TargetNotUpToDateError: 재빌드되지 않아 측정할 솔리드가 없습니다. 측정은 스스로
+# 재빌드하지 않습니다.
+
+tray.update()             # 그 body만 재빌드 (part.update(tray)도 같습니다)
+tray.is_up_to_date        # True
+part.measurement.measure(tray).volume_mm3
 ```
 
 삭제는 보호됩니다. main body는 지우지 않고, feature·스케치·기하 세트가 든 body는
@@ -731,6 +783,7 @@ summary.parameters        # 사용자 파라미터
 summary.bodies            # BodyInfo(name, is_main, features, sketches), render()가 body별 feature 표시
 summary.geometrical_sets  # GeometricalSetInfo(name, elements, nested_set_count)
 summary.topology          # TopologyCounts(edges, faces), selection이 없거나 활성 Part가 아니면 None
+                          # (Part 전체 개수입니다. body별 범위는 part.topology.edges(body=...))
 summary.in_work_object    # InWorkObjectInfo(name, kind, is_main_body), 없으면 None
 
 iwo = part.inspect.in_work_object()
@@ -762,6 +815,23 @@ live에서 pad를 만들면 새 pad가 In-Work Object가 되었고, 평면을 �
 `Part.Update()`가 성공했다는 사실만으로 형상이 의도대로 만들어졌다고 보장할
 수는 없습니다. 필요한 경우 측정 결과나 모델 조회로 별도 검증해야 합니다.
 
+### update가 실패했을 때: 지우기 전에 되돌리기
+
+`PartUpdateError`가 났을 때 모델은 CATIA가 남긴 그대로이고, 아무것도 지워지지 않습니다.
+모델이 유효해질 때까지 이후 update도 계속 실패합니다. 복구 순서는 이렇습니다.
+
+1. 무엇을 바꾼 직후에 실패했는지 확인합니다.
+2. **잘 되던 값을 바꿔서 실패한 것이면 그 값을 되돌리고 다시 update합니다.** live로
+   확인했습니다: pad를 30mm에서 1mm로 줄이자 그 위의 5mm 필렛이 깨져 update가 실패했고,
+   필렛은 트리에 그대로 남아 있었으며, 30mm로 되돌리고 update하니 필렛이 살아 있는 채로
+   원래 부피까지 복구됐습니다.
+3. `part.is_up_to_date()`로 복구를 확인합니다.
+4. **되돌릴 것이 없을 때만** 문제의 feature를 `remove_*`로 지웁니다. 새로 만든 feature가
+   애초에 만들어지지 않은 경우가 여기 해당합니다.
+
+SDK는 자동으로 롤백하지 않습니다. 어떤 변경을 남기려 했는지 알 수 없고, pad를 지우면
+스케치까지 함께 지워지기 때문입니다.
+
 ## 현재 제한 사항
 
 ### 새 PLM Part 생성
@@ -780,7 +850,8 @@ Automation 경로의 PLM Physical Product/3D Shape 생성은 설치 환경에서
 `Selection.Search('Topology.Edge,all')` / `('Topology.Face,all')` +
 `SelectedElement.Reference`로 모서리·면 `Reference`를 얻는 경로가 뚫렸을 뿐이고,
 그 모서리·면을 재빌드 너머로 다시 지목하는 방법은 없습니다(`part.topology.edges()`
-/ `part.topology.faces()`를 다시 불러야 합니다). `Draft`처럼 나머지 면 reference
+/ `part.topology.faces()`를 다시 불러야 합니다. body 단위 범위 지정은 되지만 feature
+단위는 안 됩니다). `Draft`처럼 나머지 면 reference
 feature는 아직 제공하지 않습니다.
 
 Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더라도
@@ -826,7 +897,8 @@ python -m pytest tests/integration -m integration -q
 ```
 
 `scripts/acceptance/`의 Multi-sections Solid 수명 주기, NACA 날개, Multi-Body A→B 수명 주기,
-다섯 body enclosure 스크립트도 같은 변수로 Part를 골라 공개 API만 사용합니다. 빈 main body가
+다섯 body enclosure, 안전 배치 1(`batch1_safety.py`) 스크립트도 같은 변수로 Part를 골라 공개
+API만 사용합니다. 빈 main body가
 필요 없는 테스트는 빈 Part에서도 돌고, 이미 solid가 있어야 하는 측정·Mirror 테스트는 skip됩니다.
 
 통합 테스트 세션은 시작할 때 사용자의 CATIA selection을 저장하고 비운 뒤, 끝날 때
@@ -838,8 +910,8 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 957개입니다. B428_Cloud
-live 통합 테스트는 46개이고, 2026-09-17 빈 테스트 Part에서 40개 통과, 6개 skip(빈 main body나
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 991개입니다. B428_Cloud
+live 통합 테스트는 50개이고, 2026-09-18 빈 테스트 Part에서 44개 통과, 6개 skip(빈 main body나
 수동 파라미터가 필요한 테스트)이었으며 실행 뒤 Part가 실행 전과 같았습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 

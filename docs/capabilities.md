@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **957 unit 통과**
-- 현재 라이브 검증: 2026-09-17 빈 테스트 Part `AUTO3DX_MULTIBODY_TEST`에서 재실행 기준
-  **46 integration 중 40 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
+- 현재 정적 검증: **991 unit 통과**
+- 현재 라이브 검증: 2026-09-18 빈 테스트 Part `3D Shape00422558`에서 재실행 기준
+  **50 integration 중 44 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -84,7 +84,7 @@ part.update()
 | 목록 조회 (전체) | 동작 | feature 내부 파라미터 포함 |
 | 목록 조회 (사람이 만든 것만) | 동작 | `user_parameters()` / `user_names()` |
 | 이름으로 조회 | 동작 | 짧은 이름·정규화 이름 둘 다 가능 |
-| 값 읽기 | 동작 | |
+| 값 읽기 | 동작 | `Value`가 없는 종류(EnumParam: 제약의 `Mode` 등)는 `ValueAsString()`으로 읽어 문자열을 돌려준다. 제약이 있는 Part의 파라미터 열거가 이것 때문에 깨지던 문제가 있었다 |
 | 값 수정 | 동작 | Length, mm |
 | 생성 | 동작 | 중복 이름·빈 이름·`\` 포함 이름은 거부 |
 | ensure (없으면 생성, 있으면 수정) | 동작 | 다른 타입이면 거부 |
@@ -410,10 +410,10 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 기능 | 상태 |
 |---|---|
 | 이름 조회 | 동작 |
-| `Update()` | 동작 |
+| `Update()` | 동작 | `part.update()`는 전체, `part.update(body)`/`body.update()`는 그 body만 |
 | **`Save()`** | **하지 않음** (아래 6) |
 | **feature rebuild 상태** | 동작 | `part.is_up_to_date(target=None)`. feature 변경 전후 false→true 검증. unsaved-change 감지는 아님 |
-| **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심 조회. bounding box는 제공 안 함 |
+| **솔리드 측정** | 동작 | `part.measurement`로 부피·면적·질량·무게중심 조회. 재빌드되지 않은 대상은 `TargetNotUpToDateError`로 먼저 거부한다(측정이 재빌드하지는 않는다). bounding box는 제공 안 함 |
 | **모델 검사** | 동작 | `part.inspect.summary()`: feature·스케치·사용자 파라미터·body·기하 세트·모서리/면 개수·In-Work Object(`InWorkObjectInfo(name, kind, is_main_body)`). 읽기 전용, COM 객체를 돌려주지 않음 |
 
 ### 3.6.1 Multi-Body
@@ -425,6 +425,9 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 작업 body 지정 | 동작 | `with part.work_in(body):` 안에서 스케치·Pad·Pocket 등 Part Design feature가 그 body에 만들어지고 그 body에서 조회된다. 예외가 나도 이전 In-Work Object를 되돌린다. main body로 조용히 돌아가지 않는다 |
 | body feature·스케치 조회 | 동작 | `body.features`, `body.sketch_names`, `part.inspect.bodies()` |
 | 숨김 / 표시 | 동작 | `body.hide()`/`show()`/`is_visible`, `Selection.VisProperties`. read-back 검증. 활성 Part만 |
+| body 단위 재빌드 | 동작 | `body.update()` 또는 `part.update(body)` (`Part.UpdateObject`). work_in을 나가는 것만으로는 재빌드되지 않는다. `body.is_up_to_date`로 상태 확인 |
+| body 단위 topology | 동작 | `part.topology.edges(body=...)`/`faces(body=...)`. work_in 안에서는 그 body가 기본. `body=None`이면 Part 전체 |
+| 모서리·면 소유 body | 동작 | `edge.owner_body_name`/`owner_feature_name`. 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError` |
 | body 삭제 | 동작 (가드) | `part.bodies.remove(name, delete_contents=False)`. main body는 거부, 내용이 있으면 `delete_contents=True`가 있어야 지운다. 활성 Part만 |
 | boolean 연산 (Add/Remove/Intersect/Assemble) | 미지원 | 미검증 |
 | body 이름 변경·순서, body 안의 기하 세트 | 미지원 | |
@@ -481,6 +484,7 @@ Catia.attach(com3dx_path=None) -> Catia
 .planes          -> PlaneCollection   # offset/각도 평면
 .formulas        -> FormulaCollection
 .bodies          -> BodyCollection    # list/names/get/main/create/remove
+.update(target=None)                  # 인자를 주면 그 객체만 재빌드 (Part.UpdateObject)
 .work_in(body)   # context manager: 그 body에서 스케치·feature 생성/조회, In-Work Object 복원
 .update()        # 실패 시 PartUpdateError
 .measurement     -> SolidMeasurement  # editor 기반 read-only 측정
@@ -502,6 +506,8 @@ bodies.remove(name, *, delete_contents=False)   # BodyRemovalError, InactivePart
 body.name / body.is_main / body.com_object
 body.features       -> tuple[FeatureInfo, ...]
 body.sketch_names   -> tuple[str, ...]
+body.is_up_to_date  -> bool       # work_in을 나가는 것만으로는 재빌드되지 않는다
+body.update()                     # 그 body만 재빌드 (Part.UpdateObject)
 body.is_visible     -> bool       # 활성 Part만
 body.hide() / body.show()         # 활성 Part만, selection 복원
 
@@ -619,6 +625,22 @@ constraint.name / .type_code / .status        # status 0이 정상
 ```
 
 `support`는 `"XY"`, `"YZ"`, `"ZX"` 중 하나다.
+
+### Topology / Edge / Face
+
+```python
+part.topology.edges()              -> EdgeSnapshot   # Part 전체 (모든 body가 한 목록에)
+part.topology.edges(body=body)     -> EdgeSnapshot   # 그 body만 (이름/Body/raw 모두 가능)
+part.topology.edges(body=None)     -> EdgeSnapshot   # work_in 안에서도 Part 전체
+part.topology.faces(body=body)     -> FaceSnapshot
+# work_in(body) 안에서는 인자 없이도 그 body가 기본 범위다
+
+edge.owner_body_name    # 이 모서리가 속한 body 이름 (CATIA가 모르면 None)
+edge.owner_feature_name # 이 모서리를 만든 feature (Pad, 소비된 Sketch 등)
+edge.owner_body         # raw Body COM 객체
+# body의 모서리에는 그 body가 소비한 스케치의 wire 모서리도 들어 있다.
+# fillet은 솔리드 모서리만 받으므로 owner_feature_name으로 고른다.
+```
 
 ### PartDesign / Pad / Pocket
 
@@ -762,6 +784,8 @@ Auto3dxError
 │   ├── UnsupportedUnitError       지원하지 않는 단위
 │   ├── UnsupportedMagnitudeError  CreateDimension의 magnitude가 단위 카탈로그에 없음
 │   ├── UnsupportedSupportError    "XY"/"YZ"/"ZX" 외의 평면 문자열
+│   ├── CrossBodyReferenceError    다른 body의 모서리·면으로 feature 생성 시도
+│   ├── SupportNotUpdatedError     재빌드 안 된 평면을 스케치 support로 사용
 │   └── StaleSnapshotError         모델이 바뀐 뒤 옛 EdgeSnapshot/FaceSnapshot의
 │                                  Edge/Face를 사용
 ├── NotFoundError            그 이름의 객체가 없음 (열거로 확인, 실패한 조회로 추정하지 않음)
@@ -779,6 +803,7 @@ Auto3dxError
 │   ├── SketchSupportMismatchError   같은 이름인데 다른 평면
 │   ├── BodyAlreadyExistsError       이미 있는 이름으로 body 생성 시도
 │   ├── BodyRemovalError             main body, 또는 delete_contents 없이 내용 있는 body 삭제
+│   ├── TargetNotUpToDateError       재빌드되지 않은 대상 측정
 │   └── AmbiguousNameError           같은 이름이 둘 이상
 └── AutomationError          CATIA가 COM 호출을 거부하거나 실패함. hresult 속성을 가짐
     ├── PartUpdateError            Part.Update() 실패
@@ -850,7 +875,8 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 완료: 모서리·면 선택 레이어(`part.topology.edges()`/`faces()`, `EdgeSnapshot`/
 `FaceSnapshot`), Chamfer 인자 확정(mode=1 고정), Shell/Thickness/Hole(면 참조),
 사용자 정의 offset/각도 평면(스케치 + Pad까지 검증), Multi-Body(생성·작업 body·숨김·가드 삭제,
-selection 기반 동작의 활성 Part 가드), Part당 하나의 공유 model
+selection 기반 동작의 활성 Part 가드), body 단위 topology 범위와 소유권 가드, body 단위 재빌드와
+측정 사전 조건, EnumParam 읽기, 평면 support 사전 조건, Part당 하나의 공유 model
 generation, 예외 다섯 범주, 작은 패키지 루트, 측정 기본 대상(main body), topology 검색 전후의
 사용자 selection 복원(`SelectionNotRestoredWarning`), 같은 CATIA Part의 wrapper끼리 공유하는
 generation, `part.inspect.summary()`의 body·기하 세트·모서리와 면 개수,
