@@ -17,7 +17,9 @@
   판정 추가 후), Conda에서 38 통과·1 skip(그 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **1036 unit 통과**. 2026-09-18 Phase 2(기존 모델 편집) 뒤 빈 테스트 Part
+- 테스트: **1089 unit 통과**. 2026-09-19 Phase 3(원형 패턴·boolean·제약 삭제·feature 억제) 뒤
+  빈 테스트 Part `3D Shape00422558`에서 integration **56 통과, 6 skip**, A→B
+  acceptance(`phase3_operations.py`) 통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **1036 unit 통과**. 2026-09-18 Phase 2(기존 모델 편집) 뒤 빈 테스트 Part
   `3D Shape00422558`에서 integration **49 통과, 6 skip**, A→B acceptance(`phase2_editing.py`)
   통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **991 unit 통과**. 2026-09-18 첫 안전 배치 뒤 빈 테스트 Part `3D Shape00422558`에서
   integration **44 통과, 6 skip**, A→B acceptance(`batch1_safety.py`) 통과, 실행 뒤 기준 상태와 같음.
@@ -27,7 +29,7 @@
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
   검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **42 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
-- probe: `scripts/probes/`에 43개 존재
+- probe: `scripts/probes/`에 44개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -384,6 +386,11 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 25 | 스케치 요소 재발견 | 완료 | `sketch.get_element(name)`/`elements()`와 `SketchElement.name`/`radius`. CATIA 이름이 지속 identity이고, 새 프로세스에서 재발견한 선으로 새 제약을 만들고 update까지 성공했다. 선 좌표는 이 릴리스의 `Line2D`가 노출하지 않는다 (conventions 1.11) |
 | 26 | feature 단위 작업 위치 | 완료 | `part.work_at(feature)`. 라이브에서 `PAD, FILLET` 트리의 `PAD`에서 작업하니 새 pad가 `PAD, NEW, FILLET`로 **바로 뒤에 삽입**됐다. 트리 재정렬이 아니다. 이전 In-Work Object는 정상·예외 모두 복원된다 (conventions 1.11) |
 | 27 | 파라미터 의존성 보호 | 완료 (formula 한정) | `Formula.GetInParameter`로 각 formula의 입력을 읽어 `parameters.dependents(name)`을 만들고, 참조 중인 파라미터 삭제는 `ParameterInUseError`로 거부한다. 전에는 CATIA가 formula를 `deleted_*`로 고쳐 쓰고 Part가 not-up-to-date가 됐다. rule/check/law/program/design table은 미탐지 (conventions 1.11) |
+| 28 | 원형 패턴 | 완료 (Z축) | `create_circular_pattern`과 `CircularPattern.angular_instances`/`angular_spacing_deg`. 디스크에서 6개 패턴이 구멍 5개 분량을 정확히 제거했고, 8개로 바꾸면 7개 분량이 됐다. 원점 XY 평면을 회전 중심·축으로 주면 Z축이다. YZ/ZX는 Z가 아니었지만 어느 축인지 확정 못 해 거부한다 (conventions 1.12) |
+| 29 | body boolean 네 가지 | 완료 | remove/add/intersect/assemble 모두 부피로 검증. 대상은 work_in 중인 body, tool body는 소비되어 `part.bodies`에서 사라진다. `tool_body_name`은 feature에서 읽는다. **삭제하면 소비된 body까지 사라지고 되살릴 방법이 없어** `delete_consumed_body=True`를 요구한다 (conventions 1.12) |
+| 30 | 스케치 제약 삭제 | 완료 | `sketch.constraints.remove()`. `Constraints.Remove`는 인덱스를 받고 제약끼리는 COM 동일성 비교가 안 돼서 이름으로 인덱스를 찾는다. edition 안에서 지우고, 이미 edit() 안이면 그 세션을 재사용한다 (conventions 1.12) |
+| 31 | feature 억제 | 완료 | `is_active`/`activate()`/`deactivate()`. Activity는 feature 멤버가 아니라 `Part.Parameters`의 BoolParam이라 Parent 체인으로 Part를 찾아 읽는다. 억제는 generation을 올려 옛 스냅샷을 무효화한다. 상류 feature를 억제하면 update가 실패하고, 되돌리면 복구된다 (conventions 1.12) |
+| 32 | 공개 세션 제목 | 완료 | `catia.active_window_title` 하나만 열어 acceptance 스크립트에서 raw COM을 없앴다. 창 조작은 하지 않는다 |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸고, 면은
 probe 37에서 같은 경로로 뚫렸으므로, 남은 것은 "어느 모서리·어느 면인가"를 안정적으로

@@ -1460,6 +1460,118 @@ program, design table은 검증된 입력 목록이 없어 탐지하지 않는�
 미조사다. 요소 이름은 지속되지만 topology의 모서리·면 index와 BRep 이름은 여전히 재빌드마다
 바뀐다(1.10).
 
+### 1.12 원형 패턴, boolean, 제약 삭제, feature 억제 (probe 44, 실측 2026-09-19)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**AddNewCircPattern의 실제 시그니처** (타입 라이브러리에서 읽음):
+
+```text
+AddNewCircPattern(iShapeToCopy, iNbOfCopiesInRadialDir, iNbOfCopiesInAngularDir,
+                  iStepInRadialDir, iStepInAngularDir,
+                  iShapeToCopyPositionAlongRadialDir, iShapeToCopyPositionAlongAngularDir,
+                  iRotationCenter, iRotationAxis, iIsReversedRotationAxis,
+                  iRotationAngle, iIsRadiusAligned)      -- 12개
+```
+
+**축 매핑은 회전 중심/축에 넘긴 원점 평면이 정한다.** 지름 120, 두께 10 디스크에 반지름 6
+구멍 하나(한 구멍 = 1130.973 mm3)를 뚫고 6개 60도로 패턴했다.
+
+```text
+PlaneXY / PlaneXY  -> 5654.867 제거 = 정확히 구멍 5개. 즉 Z축 회전 (검증)
+PlaneYZ / PlaneYZ  ->  766.234 제거. Z축이 아니다. 구멍들이 디스크 밖으로 나가 일부만 잘림
+PlaneZX / PlaneZX  -> 1130.973 제거. 역시 Z축이 아니다
+```
+
+디스크 형상으로는 YZ/ZX가 정확히 어느 축인지 확정할 수 없었다. 그래서 공개 API는 **Z축만**
+받는다(`SUPPORTED_CIRCULAR_PATTERN_AXES`). 검증 못 한 매핑을 이름만 그럴듯하게 여는 것보다
+없는 편이 안전하다.
+
+**패턴 파라미터.**
+
+```text
+CircPattern 멤버   ActivatePosition, AngularDirectionRow, AngularRepartition,
+                  CircularPatternParameters, DesactivatePosition, GetRotationAxis,
+                  GetRotationCenter, ItemToCopy, RadialAlignment, RadialDirectionRow,
+                  RadialRepartition, RotationAngle, RotationOrientation,
+                  SetInstanceAngularSpacing, SetRotationAxis, SetRotationCenter, ...
+AngularRepartition 멤버  AngularSpacing, InstanceSpacing, InstancesCount
+RadialRepartition       LinearRepartition 타입 (AngularSpacing 없음, Spacing)
+RotationCenter/RotationAxis 속성  없음 (Get/Set 메서드만 있다)
+
+InstancesCount 6 -> 8, update -> 구멍 7개 분량 제거로 일치
+AngularSpacing 60 -> 45, update -> 반영됨
+MainBody.Shapes에 ('이름', 'CircPattern')으로 남아 새 프로세스에서 이름으로 찾힌다
+패턴을 지워도 원본 pocket은 남는다
+```
+
+**boolean 네 가지 모두 동작한다.** 디스크(111966.362)에 반지름 15 높이 40 원기둥(28274.334,
+겹치는 부피 7068.583)을 tool body로 썼다.
+
+| 연산 | 메서드 | 결과 부피 | 해석 |
+|---|---|---|---|
+| Remove | `AddNewRemove(tool)` | 104897.779 | 겹친 7068.583 제거 |
+| Add | `AddNewAdd(tool)` | 133172.113 | 밖에 있던 21205.751 추가 |
+| Intersect | `AddNewIntersect(tool)` | 7068.583 | 겹친 부분만 남음 |
+| Assemble | `AddNewAssemble(tool)` | 133172.113 | 이 형상에서는 Add와 같음 |
+
+```text
+인자                 tool body 하나뿐 (AddNewRemove(iBodyToRemove))
+대상                 In-Work Object인 body. work_in(target)으로 고른다
+생성 후 tool body    InBooleanOperation True, 그리고 Part.Bodies에서 사라진다
+feature 멤버         Application, Body, GetItem, Name, Parent, SetOperatedObject,
+                    SetOperatingVolume   (AffectedBody/ToolBody 같은 건 없다)
+result.Body.Name    소비된 tool body 이름 -> 새 프로세스에서도 읽힌다
+```
+
+**boolean 삭제는 소비된 body까지 지운다.** feature를 지우면 대상 body의 부피는 원래대로
+돌아오지만 tool body는 **돌아오지 않는다**(`Bodies`에도 없고 이름으로도 못 찾는다). 되돌릴
+방법이 확인되지 않았으므로 `remove_boolean(name, delete_consumed_body=True)`로 명시하게 했다.
+
+**제약 삭제.** `Constraints.Remove(iIndex)`는 **인덱스**를 받는다(이름이 아니다). 살아 있는
+스케치에서 두 경로 모두 성공했다.
+
+```text
+스케치 닫힌 채 Remove(1)            -> count 3->2, broken 0, update 성공
+OpenEdition + Remove(1) + CloseEdition -> count 2->1, broken 0, update 성공
+Constraints.Item("이름")            -> 동작 (조회는 이름으로 된다)
+Constraint 객체끼리 COM 동일성 비교   -> 실패. 인덱스는 이름으로 찾아야 한다
+```
+
+SDK는 edition 경로를 쓴다. 제약 생성이 이미 그 경로이고, solver를 열어둔 채 두는 것이 스케치를
+깨뜨리는 원인이기 때문이다. 이미 `with sketch.edit()` 안이면 열린 세션을 재사용한다(중첩
+`OpenEdition`은 미검증).
+
+**feature 억제는 Activity 파라미터로 한다.**
+
+```text
+feature.Activity            -> 멤버 없음
+feature.GetItem("Activity") -> com_error
+Part.Parameters.Item("<Part>\\<Body>\\<Feature>\\Activity") -> BoolParam   <- 이 경로
+Parameters 전체를 "\\<Feature>\\Activity"로 훑어도 정확히 하나 나온다 (대비 경로)
+feature.Parent 체인          Shapes -> Body -> Bodies -> Part(Parameters 보유)
+```
+
+```text
+fillet Activity True -> False, update  -> 부피 111931.591 -> 111966.362 (필렛 효과 사라짐)
+                                          feature는 트리에 그대로
+False -> True, update                  -> 111931.591로 정확히 복귀
+Activity를 쓰면 즉시 is_up_to_date False (update 전)
+```
+
+**상류 feature를 억제하면 하류가 깨진다.** pad를 억제하고 update하면 `Part.Update()`가
+**실패**하고(PartUpdateError) Part는 not-up-to-date가 된다. 하류 fillet은 트리에 남고 Activity도
+True 그대로이며, 측정은 Phase 1 가드에 걸린다. pad Activity를 되돌리고 update하면 완전히
+복구된다. 즉 1.10의 "먼저 되돌려라" 규칙이 억제에도 그대로 적용된다. 의존성을 미리 판단해
+주지는 않는다.
+
+**공개 세션 API.** acceptance 스크립트에서 raw COM을 없애기 위해 `catia.active_window_title`
+하나만 열었다(읽기 전용). 창 조작은 하지 않는다.
+
+**남은 한계.** 원형 패턴의 X/Y축과 반경 방향 행, `RotationAngle`/`RotationOrientation`,
+`ActivatePosition`으로 개별 인스턴스를 끄는 것, boolean으로 소비된 body를 되살리는 것,
+rect 패턴의 치수 편집은 모두 미검증이다.
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

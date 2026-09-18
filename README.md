@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 1036 통과 | 49 통과, 6 skip (2026-09-18, 빈 테스트 Part, 기존 모델 편집 포함) |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 1089 통과 | 56 통과, 6 skip (2026-09-19, 빈 테스트 Part, 패턴·boolean·억제 포함) |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -178,7 +178,11 @@ open_parts = catia.parts()
 named_part = catia.part_named("3D Shape00422534")
 ```
 
-`catia.active_editor()`는 raw Editor COM 객체를 반환합니다. `part.com_object`도
+`catia.active_editor()`는 raw Editor COM 객체를 반환합니다. `catia.active_window_title`은
+활성 창 제목을 문자열로 돌려주는 읽기 전용 API입니다. Part의 Automation 이름(`3D Shape…`)과
+사람이 보는 문서 제목이 다를 수 있어서, 스크립트가 대상 문서를 확인할 때 씁니다. 창을 조작하는
+기능은 없습니다. `part.com_object`도
+
 raw Part에 접근하는 escape hatch이지만, 일반적인 애플리케이션 코드는 wrapper
 API를 사용하는 편이 안전합니다. Assembly context의
 `VPMRootOccurrence`는 Part로 자동 변환하지 않고 `NoActivePartError`를
@@ -735,6 +739,102 @@ Part가 3DEXPERIENCE에서 활성 Part가 아니면 아무것도 건드리지 �
 boolean 연산(Add/Remove/Intersect/Assemble), body 이름 변경과 순서, body 안의 기하 세트,
 Product/Assembly는 지원하지 않습니다.
 
+## 패턴 · boolean · 제약 삭제 · feature 억제
+
+### 원형 패턴 (볼트 서클)
+
+구멍 하나를 중심축 둘레로 반복합니다.
+
+```python
+seed = part.part_design.get_pocket("BOLT_HOLE")
+pattern = part.part_design.create_circular_pattern("BOLT_CIRCLE", seed, 6, 60.0)
+part.update()
+
+pattern.angular_instances        # 6
+pattern.set_angular_instances(8) # 여기서 재빌드하지 않습니다
+part.update()
+```
+
+- **Z축만** 지원합니다. 원점 XY 평면을 회전 중심·축으로 넘기면 Z축 회전이고, 라이브에서 구멍
+  6개가 정확히 구멍 5개분을 더 제거했습니다. YZ/ZX는 Z축이 아니었지만 어느 축인지 확정하지
+  못해서 `axis="X"`/`"Y"`는 거부합니다.
+- `angular_instances`와 `angular_spacing_deg`는 읽고 쓸 수 있습니다. `radial_instances`는
+  읽기 전용(항상 1)입니다.
+- 씨앗 feature는 패턴을 만들 body에 있어야 합니다. 다른 body의 feature면
+  `CrossBodyReferenceError`로 막습니다.
+- `circular_patterns`, `get_circular_pattern(name)`, `remove_circular_pattern(name)`로
+  다시 찾고 지웁니다. 패턴을 지워도 원본 feature는 남습니다.
+
+### Body boolean 연산
+
+네 가지 모두 부피로 검증했습니다.
+
+```python
+with part.work_in(housing):          # 대상은 지금 작업 중인 body입니다
+    cut = part.part_design.create_boolean_remove("CUT_CORE", core_body)
+part.update()
+
+cut.operation                        # 'Remove'
+cut.tool_body_name                   # 'core_body'
+```
+
+`create_boolean_remove` / `create_boolean_add` / `create_boolean_intersect` /
+`create_boolean_assemble`이 있고, tool body는 `Body` 객체나 이름으로 넘깁니다.
+
+**tool body는 소비됩니다.** 연산 뒤 그 body는 `part.bodies`에서 사라지고 boolean feature
+아래로 들어갑니다. 이름은 `tool_body_name`으로 계속 읽을 수 있습니다.
+
+```python
+part.part_design.remove_boolean("CUT_CORE")
+# BooleanOperationError: 'core_body'까지 함께 지워집니다
+
+part.part_design.remove_boolean("CUT_CORE", delete_consumed_body=True)
+```
+
+지우면 소비된 body가 그 안의 내용까지 함께 사라지고, 되살리는 방법이 확인되지 않았습니다.
+그래서 확인 인자를 요구합니다. 대상 body 자신을 tool로 주거나, 다른 Part의 body, 이미 소비된
+body를 주면 COM 호출 전에 `BooleanOperationError`로 거부합니다.
+
+### 스케치 제약 삭제
+
+```python
+sketch.constraints.names()              # ['Parallelism.1', 'Parallelism.2']
+sketch.constraints.remove("Parallelism.1")
+part.update()
+sketch.constraints.broken_count         # 0
+```
+
+제약 객체를 넘겨도 됩니다. CATIA의 `Constraints.Remove`는 인덱스를 받고 하나를 지우면 나머지
+번호가 밀리므로, SDK가 매번 컬렉션을 훑어 이름으로 인덱스를 찾습니다. 삭제는 스케치 edition
+안에서 실행하고, 이미 `with sketch.edit()` 안이라면 그 세션을 재사용합니다. edition은 예외가
+나도 `finally`에서 닫힙니다.
+
+### feature 억제와 복원
+
+지우지 않고 잠시 끕니다.
+
+```python
+fillet = part.part_design.get_edge_fillet("F1")
+fillet.is_active                 # True
+
+fillet.deactivate()
+part.update()                    # 필렛 효과가 사라지고, feature는 트리에 남습니다
+
+fillet.activate()
+part.update()                    # 부피가 정확히 원래대로 돌아옵니다
+```
+
+모든 Part Design feature에 있습니다. CATIA는 이 상태를 feature가 아니라 `Part.Parameters`의
+`Activity` BoolParam에 두기 때문에, wrapper가 자기 Parent 체인을 따라 Part를 찾아 읽습니다.
+다른 setter처럼 재빌드는 하지 않습니다.
+
+억제는 솔리드 전체를 바꿀 수 있으므로 model generation을 올립니다. 억제 전에 떠 둔
+`part.topology.edges()` 스냅샷을 쓰면 `StaleSnapshotError`가 납니다.
+
+**검증된 한계:** 하류가 의존하는 상류 feature를 억제하면 다음 `part.update()`가 **실패**합니다
+(라이브에서 pad를 억제하니 그 위 필렛 때문에 실패했습니다). 이때도 복구는 "되돌리고 다시
+update"입니다. 어떤 억제가 안전한지 SDK가 미리 판단해 주지는 않습니다.
+
 ## 기존 모델 편집
 
 이미 만들어진 Part에 다시 붙어서 고치는 흐름입니다. 파이썬 객체가 남아 있지 않아도 됩니다.
@@ -954,8 +1054,9 @@ feature는 아직 제공하지 않습니다.
 Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더라도
 follow-up `Part.Update()`에서 실패한 사례가 있어 검증된 API로 승격하지
 않았습니다. GSD surface(평면 생성에 쓰는 것 외의 HybridShape), assembly
-constraint, 축 시스템, body boolean 연산, 평면용 세트 외의 HybridBody도 현재 public
-wrapper 범위 밖입니다.
+constraint, 축 시스템, 평면용 세트 외의 HybridBody도 현재 public wrapper 범위 밖입니다.
+원형 패턴의 X/Y축과 반경 방향 행, 개별 인스턴스 비활성화, 사각 패턴의 치수 편집도
+아직 검증하지 않았습니다.
 
 ## 테스트
 
@@ -994,8 +1095,9 @@ python -m pytest tests/integration -m integration -q
 ```
 
 `scripts/acceptance/`의 Multi-sections Solid 수명 주기, NACA 날개, Multi-Body A→B 수명 주기,
-다섯 body enclosure, 안전 배치 1(`batch1_safety.py`), 기존 모델 편집(`phase2_editing.py`)
-스크립트도 같은 변수로 Part를 골라 공개 API만 사용합니다. 빈 main body가
+다섯 body enclosure, 안전 배치 1(`batch1_safety.py`), 기존 모델 편집(`phase2_editing.py`),
+패턴·boolean·억제(`phase3_operations.py`) 스크립트도 같은 변수로 Part를 골라 공개 API만
+사용합니다. 대상 Part 확인까지 공개 API(`catia.active_window_title`)로 합니다. 빈 main body가
 필요 없는 테스트는 빈 Part에서도 돌고, 이미 solid가 있어야 하는 측정·Mirror 테스트는 skip됩니다.
 
 통합 테스트 세션은 시작할 때 사용자의 CATIA selection을 저장하고 비운 뒤, 끝날 때
@@ -1007,8 +1109,8 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 1036개입니다. B428_Cloud
-live 통합 테스트는 55개이고, 2026-09-18 빈 테스트 Part에서 49개 통과, 6개 skip(빈 main body나
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 1089개입니다. B428_Cloud
+live 통합 테스트는 62개이고, 2026-09-19 빈 테스트 Part에서 56개 통과, 6개 skip(빈 main body나
 수동 파라미터가 필요한 테스트)이었으며 실행 뒤 Part가 실행 전과 같았습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 

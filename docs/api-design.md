@@ -610,6 +610,8 @@ Status: Enforced by review.
   test created: never a whole shared container such as the `auto_3dx_Planes` set when it
   existed before the test (conventions 1.8 records the incident that made this a rule).
 - Verify cleanup by counting what remains, not by trusting that removal did not throw.
+- Acceptance scripts use public API only, including the target check:
+  `catia.active_window_title` gives the document title that `Part.Name` does not.
 - `AUTO3DX_LIVE_PART` matches the active Part's `Part.Name` or its 3DEXPERIENCE title, which
   Automation exposes only as the active window caption (`Part.Name` of a titled Part is still
   `3D Shape…`).
@@ -772,6 +774,91 @@ parameter used only by one of those is not reported as in use.
 
 ---
 
+## 18. Patterns, booleans, constraint removal and suppression
+
+Status: Implemented, pinned by `tests/unit/test_phase3.py`, live by
+`tests/integration/test_phase3_live.py` and `scripts/acceptance/phase3_operations.py`
+(conventions 1.12).
+
+**Circular pattern.** One bolt hole becomes a bolt circle.
+
+```python
+seed = part.part_design.get_pocket("BOLT_HOLE")
+pattern = part.part_design.create_circular_pattern("BOLT_CIRCLE", seed, 6, 60.0)
+part.update()
+pattern.set_angular_instances(8)      # no rebuild here either
+part.update()
+```
+
+Only the Z axis is offered. Passing the XY plane as both rotation centre and rotation axis
+patterned around Z and removed exactly five extra holes' worth of material; the other two
+origin planes rotated about something else that the test geometry could not identify, so
+`axis` accepts `"Z"` and refuses the rest (`UnsupportedSupportError`). The angular row's
+`angular_instances` and `angular_spacing_deg` are readable and writable; `radial_instances`
+is read-only, because this SDK always creates one radial row. The seed feature must belong
+to the body being patterned in, checked with the same ownership machinery as topology
+references (`CrossBodyReferenceError`).
+
+**Multi-body booleans.** All four were verified with exact volumes:
+
+```python
+with part.work_in(housing):                       # the target is the body in work
+    cut = part.part_design.create_boolean_remove("CUT_CORE", core_body)
+part.update()
+cut.tool_body_name                                # 'core_body', read from the model
+```
+
+`create_boolean_remove`, `create_boolean_add`, `create_boolean_intersect` and
+`create_boolean_assemble` each take one tool body, by wrapper or by name. A tool body that
+is the target itself, belongs to another Part, or has already been consumed is refused with
+`BooleanOperationError` before CATIA is called.
+
+**The tool body is consumed, and removal is destructive.** After the operation the tool body
+reports `InBooleanOperation` and disappears from `part.bodies`; `BooleanOperation.tool_body_name`
+is how its name is still readable, in any process. Deleting the boolean deletes that body
+with it -- live, it did not come back and its name could no longer be found -- so
+`remove_boolean(name, delete_consumed_body=True)` makes the caller say so. This is the one
+place in the SDK where removing a feature destroys something else, and the asymmetry is
+deliberate.
+
+**Constraint removal.**
+
+```python
+sketch.constraints.remove("Parallelism.1")        # or a Constraint from the collection
+part.update()
+```
+
+`Constraints.Remove` takes an index, and removing one renumbers the rest, so the collection
+is enumerated and matched by the constraint or its name -- never by an index a caller holds.
+The removal runs inside a sketch edition, which is how every other constraint operation
+already works; inside an open `with sketch.edit()` block that session is reused rather than
+nested, and the edition is always closed in a `finally`.
+
+**Feature suppression.**
+
+```python
+fillet.deactivate()
+part.update()                    # the fillet's material comes back; the feature stays
+fillet.activate()
+part.update()                    # and the filleted volume returns exactly
+```
+
+`is_active`, `activate()` and `deactivate()` are on every Part Design feature wrapper. CATIA
+keeps the state in a `BoolParam` called `Activity` inside `Part.Parameters`, not on the
+feature, so the wrapper walks its own `Parent` chain to the Part and reads it there. Like
+every other setter, these do not rebuild.
+
+Suppression can change the whole solid, so it advances the model generation: topology
+snapshots taken before it are refused with `StaleSnapshotError` (section 7).
+
+**Verified limitation.** Suppressing a feature that later features depend on makes the next
+`Part.Update()` fail: live, suppressing a pad under a fillet did exactly that, leaving the
+Part not up to date with everything still in the tree. The repair is the one from section 6
+-- activate it again and update -- and the SDK does not try to predict which suppressions
+are safe.
+
+---
+
 ## Migration status
 
 | Item | Section | State |
@@ -806,6 +893,12 @@ parameter used only by one of those is not reported as in use.
 | `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`radius` | 17 | Done; line coordinates unavailable in this release |
 | `part.work_at(feature)` | 17 | Done; CATIA inserts after the In-Work feature |
 | `part.parameters.dependents()` and the removal guard | 17 | Done for formulas; rules/checks/laws not covered |
+| Circular pattern (`create_circular_pattern`, editable angular row) | 18 | Done; Z axis only |
+| Multi-body booleans: remove, add, intersect, assemble | 18 | Done; tool body is consumed |
+| `remove_boolean(..., delete_consumed_body=True)` | 18 | Done; deletion destroys the consumed body |
+| `sketch.constraints.remove()` | 18 | Done; runs inside a sketch edition |
+| Feature suppression (`is_active`/`activate`/`deactivate`) | 18 | Done; advances the generation |
+| `catia.active_window_title` | 15 | Done; the only window read, so acceptance needs no raw COM |
 | `part.bodies`: `list`/`names`/`get`/`main`/`create`/guarded `remove` | 16 | Done |
 | `part.work_in(body)`: sketches and Part Design in a chosen body, In-Work Object restored | 16 | Done |
 | `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |

@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **1036 unit 통과**
-- 현재 라이브 검증: 2026-09-18 빈 테스트 Part `3D Shape00422558`에서 재실행 기준
-  **55 integration 중 49 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
+- 현재 정적 검증: **1089 unit 통과**
+- 현재 라이브 검증: 2026-09-19 빈 테스트 Part `3D Shape00422558`에서 재실행 기준
+  **62 integration 중 56 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -427,6 +427,12 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 숨김 / 표시 | 동작 | `body.hide()`/`show()`/`is_visible`, `Selection.VisProperties`. read-back 검증. 활성 Part만 |
 | body 단위 재빌드 | 동작 | `body.update()` 또는 `part.update(body)` (`Part.UpdateObject`). work_in을 나가는 것만으로는 재빌드되지 않는다. `body.is_up_to_date`로 상태 확인 |
 | body 단위 topology | 동작 | `part.topology.edges(body=...)`/`faces(body=...)`. work_in 안에서는 그 body가 기본. `body=None`이면 Part 전체 |
+| 원형 패턴 | 동작 (Z축) | `create_circular_pattern(name, feature, instances, spacing_deg)`, `circular_patterns`/`get_`/`remove_`. `angular_instances`/`angular_spacing_deg` 편집 가능. X/Y축은 미검증이라 거부한다 |
+| body boolean (remove/add/intersect/assemble) | 동작 | `create_boolean_remove` 등 네 가지. 대상은 work_in 중인 body, tool body는 **소비된다**(`part.bodies`에서 사라짐). `operation`/`tool_body_name` 조회 |
+| boolean 삭제 | 동작 (가드) | `remove_boolean(name, delete_consumed_body=True)`. 소비된 body까지 지워지고 되살릴 방법이 없어 명시를 요구한다 |
+| 스케치 제약 삭제 | 동작 | `sketch.constraints.remove(제약 또는 이름)`. edition 안에서 지우고, 이미 edit() 안이면 그 세션을 재사용한다 |
+| feature 억제/해제 | 동작 | `feature.is_active` / `activate()` / `deactivate()`. 모든 Part Design feature. 억제는 model generation을 올려 옛 topology 스냅샷을 무효화한다 |
+| 활성 창 제목 | 동작 | `catia.active_window_title` (읽기 전용). 창 조작은 하지 않는다 |
 | 기존 feature 치수 편집 | 동작 | fillet `radius`, chamfer `length1`/`angle`, hole `diameter`/`depth`, shell `internal_thickness`/`external_thickness`, thickness `offset`. setter는 재빌드하지 않는다. 검증 표는 conventions 1.11 |
 | 스케치 요소 재발견 | 동작 | `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`kind`/`radius`(원만). 이름이 지속 identity이고 새 프로세스에서도 제약에 재사용된다 |
 | feature 위치에서 작업 | 동작 | `with part.work_at(feature):` — 그 feature 바로 뒤에 삽입된다. 이전 In-Work Object는 예외가 나도 복원된다 |
@@ -472,6 +478,7 @@ from auto_3dx import Catia
 Catia.attach(com3dx_path=None) -> Catia
 .name                          # "3DEXPERIENCE"
 .active_editor()               # raw Editor COM 객체
+.active_window_title           # 활성 창 제목 (읽기 전용)
 .active_part()   -> Part       # ActiveEditor를 따른다
 .editors()       -> list[EditorInfo]   # name, object_kind, object_name, is_part
 .parts()         -> list[Part]         # 열린 Part 전부
@@ -680,6 +687,25 @@ part.part_design.pads / .pockets / .shafts / .grooves / .mirrors
                  )
                  .ensure_*(...)   /  .remove_*(name)
 
+# 원형 패턴 (Z축만 검증)
+part.part_design.create_circular_pattern(name, feature, instances, spacing_deg, axis="Z")
+part.part_design.circular_patterns / get_circular_pattern(name) / remove_circular_pattern(name)
+pattern.angular_instances / set_angular_instances(n)
+pattern.angular_spacing_deg / set_angular_spacing_deg(deg)
+pattern.radial_instances                      # 읽기 전용, 항상 1
+
+# body boolean. 대상은 work_in 중인 body이고 tool body는 소비된다
+part.part_design.create_boolean_remove(name, tool_body)     # add / intersect / assemble도 동일
+part.part_design.boolean_operations / get_boolean(name)
+operation.operation / operation.tool_body_name
+part.part_design.remove_boolean(name, delete_consumed_body=True)   # 소비된 body까지 삭제
+
+# feature 억제 (모든 Part Design feature)
+feature.is_active / feature.activate() / feature.deactivate()
+
+# 스케치 제약 삭제
+sketch.constraints.remove("Parallelism.1")    # 또는 Constraint 객체
+
 # 기존 feature 치수 편집 (probe 43에서 읽기·쓰기·update·형상·새 wrapper까지 검증한 것만)
 fillet.radius / set_radius(v, unit="mm") / radius_parameter()
 chamfer.length1 / set_length1(...)   chamfer.angle / set_angle(...)
@@ -837,6 +863,7 @@ Auto3dxError
 │   ├── BodyRemovalError             main body, 또는 delete_contents 없이 내용 있는 body 삭제
 │   ├── TargetNotUpToDateError       재빌드되지 않은 대상 측정
 │   ├── ParameterInUseError          formula가 읽는 파라미터 삭제 시도
+│   ├── BooleanOperationError        boolean이 거부됨, 또는 소비된 body 확인 없이 삭제
 │   └── AmbiguousNameError           같은 이름이 둘 이상
 └── AutomationError          CATIA가 COM 호출을 거부하거나 실패함. hresult 속성을 가짐
     ├── PartUpdateError            Part.Update() 실패
