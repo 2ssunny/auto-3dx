@@ -1329,9 +1329,20 @@ class Sketch:
             ) from error
         return SketchElement(item, self._com_object)
 
+    def _is_editing(self) -> bool:
+        """Reports whether this sketch is inside an `edit()` block right now.
+
+        `ConstraintCollection.remove` asks, so that removing a constraint from inside an
+        open edition reuses that session instead of nesting `OpenEdition`.
+
+        Returns:
+            `True` while an `edit()` block is running.
+        """
+        return self._editing
+
     @property
     def constraints(self) -> ConstraintCollection:
-        """Returns a read-only view over this sketch's constraints.
+        """Returns a view over this sketch's constraints.
 
         Built on first access and cached, matching `Part.parameters`/
         `Part.sketches`/`Part.part_design`. Reading this collection works
@@ -1343,7 +1354,9 @@ class Sketch:
             A `ConstraintCollection` over this sketch's `Constraints`.
         """
         if self._constraints is None:
-            self._constraints = ConstraintCollection(self._com_object, self._generation)
+            self._constraints = ConstraintCollection(
+                self._com_object, self._generation, self._is_editing
+            )
         return self._constraints
 
     @contextlib.contextmanager

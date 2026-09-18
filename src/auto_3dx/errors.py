@@ -174,6 +174,9 @@ class CrossBodyReferenceError(ValidationError):
     reference's owner chain in the model, and a feature refuses one that belongs to a
     different body before CATIA is called. Nothing was changed: take a snapshot of the
     body you are building in (`part.topology.edges(body=...)`) and use an edge from it.
+
+    The same rule covers a feature used as a pattern seed: patterning a feature of one
+    body into another body is refused here rather than left to fail at the next update.
     """
 
 
@@ -286,6 +289,22 @@ class BodyRemovalError(ConflictError):
 
     Deleting a body deletes every feature and sketch in it, so a body that still holds
     content is removed only when the caller says so. Nothing was changed.
+    """
+
+
+class BooleanOperationError(ConflictError):
+    """Raised when a multi-body boolean is refused, or removed without acknowledgement.
+
+    A boolean consumes its tool body: after `AddNewRemove`/`AddNewAdd`/`AddNewIntersect`/
+    `AddNewAssemble`, that body reports `InBooleanOperation` and is no longer listed in
+    `part.bodies` (live, 2026-09-19). Building one is refused when the tool body is the
+    target body itself, belongs to another Part, or has already been consumed by an
+    earlier boolean.
+
+    Removal is refused for a different reason. Deleting the boolean feature deletes the
+    consumed tool body with it -- live, the tool body did not come back and its name
+    could no longer be found -- so `remove_boolean` asks for that to be stated with
+    `delete_consumed_body=True`. Nothing was changed when this is raised.
     """
 
 

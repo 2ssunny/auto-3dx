@@ -321,7 +321,10 @@ class ConstraintCollection:
     """
 
     def __init__(
-        self, sketch_com_object: Any, generation: ModelGeneration | None = None
+        self,
+        sketch_com_object: Any,
+        generation: ModelGeneration | None = None,
+        is_editing: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -332,8 +335,12 @@ class ConstraintCollection:
                 instance gets its own, which no other wrapper shares; obtain
                 this collection through `Sketch.constraints` instead. Shared
                 with every `Constraint` this collection returns.
+            is_editing: Reports whether the owning `Sketch` is inside `edit()`.
+                `remove` uses it to reuse an open edition instead of nesting one.
+                Without it, `remove` always opens its own edition.
         """
         self._sketch_com_object = sketch_com_object
+        self._is_editing = is_editing
         self._generation = generation if generation is not None else ModelGeneration()
 
     def _constraints(self) -> Any:
@@ -477,6 +484,138 @@ class ConstraintCollection:
                 "name-based lookup cannot safely pick one."
             )
         return matches[0]
+
+    def remove(self, constraint: Any) -> None:
+        """Removes one constraint from the sketch.
+
+        `Constraints.Remove` takes the constraint's 1-based index, so the collection is
+        enumerated first and the match is made on the constraint itself or on its name --
+        an index a caller happens to be holding is never trusted, because removing any
+        constraint renumbers the rest.
+
+        The removal runs inside a sketch edition. Live (probe 44) both routes worked on a
+        healthy sketch, but the edition is the one the SDK can reason about: it is how
+        every other constraint operation already works, and a solver left mid-edit is
+        exactly what corrupts a sketch. If the caller is already inside
+        `with sketch.edit()`, the open session is reused rather than nested, since nested
+        `OpenEdition` is unverified. The session is closed in a `finally`, so an exception
+        cannot leave the sketch open.
+
+        This does not rebuild: call `part.update()` afterwards.
+
+        Args:
+            constraint: A `Constraint` from this collection, or the name of one.
+
+        Raises:
+            ParameterTypeError: If `constraint` is neither a `Constraint` nor a name.
+            ConstraintNotFoundError: If no constraint matches. Nothing was changed.
+            AmbiguousNameError: If two or more constraints share that name.
+            Auto3dxError: If CATIA refuses the removal, or the edition cannot be opened
+                or closed.
+        """
+        if not isinstance(constraint, Constraint) and not isinstance(constraint, str):
+            raise ParameterTypeError(
+                "remove() takes a Constraint from this collection or its name, not "
+                f"{type(constraint).__name__}."
+            )
+        index = self._index_of(constraint)
+        collection = self._constraints()
+        if self._is_editing is not None and self._is_editing():
+            # Already inside `with sketch.edit()`: that session owns the edition, and its
+            # own exit advances the generation and closes it.
+            self._remove_at(collection, index)
+            return
+        with self._generation.mutation():
+            try:
+                self._sketch_com_object.OpenEdition()
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            try:
+                self._remove_at(collection, index)
+            finally:
+                try:
+                    self._sketch_com_object.CloseEdition()
+                except pywintypes.com_error as error:
+                    raise _wrap_com_error(error) from error
+
+    def _remove_at(self, collection: Any, index: int) -> None:
+        """Calls `Constraints.Remove` for one index.
+
+        Args:
+            collection: The raw `Constraints` collection.
+            index: The 1-based index to remove.
+
+        Raises:
+            Auto3dxError: If CATIA refuses the removal.
+        """
+        try:
+            collection.Remove(index)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _index_of(self, constraint: Any) -> int:
+        """Finds the 1-based index of a constraint, by identity or by name.
+
+        Args:
+            constraint: A `Constraint` or a name.
+
+        Returns:
+            The index `Constraints.Remove` needs.
+
+        Raises:
+            ConstraintNotFoundError: If nothing matches.
+            AmbiguousNameError: If a name matches more than one constraint.
+            Auto3dxError: If the collection cannot be read.
+        """
+        collection = self._constraints()
+        try:
+            count = int(collection.Count)
+            items = [collection.Item(index) for index in range(1, count + 1)]
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if isinstance(constraint, str):
+            matches = []
+            for position, item in enumerate(items, start=1):
+                try:
+                    if str(item.Name) == constraint:
+                        matches.append(position)
+                except pywintypes.com_error:
+                    continue
+            if not matches:
+                raise ConstraintNotFoundError(
+                    f"No constraint named {constraint!r} was found in this sketch. It "
+                    f"holds {self.names()}."
+                )
+            if len(matches) > 1:
+                raise AmbiguousNameError(
+                    f"{len(matches)} constraints are named {constraint!r}; refusing to "
+                    "guess which one to remove."
+                )
+            return matches[0]
+        target = constraint.com_object
+        for position, item in enumerate(items, start=1):
+            try:
+                if bool(item == target):
+                    return position
+            except pywintypes.com_error:
+                continue
+        # Two wrappers for the same constraint do not compare COM-equal live (the same
+        # trap `geometry.edges` documents for references), so the name decides instead.
+        try:
+            name = str(target.Name)
+        except (pywintypes.com_error, AttributeError):
+            name = None
+        if name is not None:
+            for position, item in enumerate(items, start=1):
+                try:
+                    if str(item.Name) == name:
+                        return position
+                except pywintypes.com_error:
+                    continue
+        raise ConstraintNotFoundError(
+            "That constraint is not in this sketch any more; it may already have been "
+            "removed."
+        )
 
     def __len__(self) -> int:
         """Returns the number of constraints in the collection.

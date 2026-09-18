@@ -182,6 +182,36 @@ class Catia:
         except pywintypes.com_error as error:
             raise automation_error(error, "reading Application.Name") from error
 
+    @property
+    def active_window_title(self) -> str:
+        """str: The title of the active 3DEXPERIENCE window.
+
+        This is the only place the SDK reads a window, and it is read-only. It exists
+        because a Part's Automation `Part.Name` is an internal identifier such as
+        `"3D Shape00422558"`, while the title a person sees may be the name they gave the
+        document. A live script that must confirm it is pointed at the right document
+        needs both, and reading this through the SDK keeps raw COM out of scripts
+        (`docs/api-design.md` section 15).
+
+        Nothing here manipulates windows: no activation, no resizing, no enumeration.
+
+        Raises:
+            SessionError: If the session reports no active window.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            window = self._com_object.ActiveWindow
+        except pywintypes.com_error as error:
+            raise automation_error(error, "reading Application.ActiveWindow") from error
+        if window is None:
+            raise NoActiveEditorError(
+                "The session reports no active window, so its title cannot be read."
+            )
+        try:
+            return str(window.Caption)
+        except pywintypes.com_error as error:
+            raise automation_error(error, "reading ActiveWindow.Caption") from error
+
     def active_editor(self) -> Any:
         """Return the raw active ``Editor`` COM object.
 

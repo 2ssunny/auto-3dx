@@ -52,6 +52,7 @@ CATEGORIES = {
         "BodyRemovalError",
         "TargetNotUpToDateError",
         "ParameterInUseError",
+        "BooleanOperationError",
     },
     "AutomationError": {
         "PartUpdateError",

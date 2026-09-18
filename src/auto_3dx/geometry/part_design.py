@@ -80,6 +80,7 @@ from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
     AutomationError,
+    BooleanOperationError,
     CrossBodyReferenceError,
     FeatureConflictError,
     FeatureNotFoundError,
@@ -110,6 +111,64 @@ from auto_3dx.parameters.parameter import (
 
 LENGTH_TOLERANCE: float = 1e-9
 """Absolute tolerance used to compare feature depths with `math.isclose`."""
+
+CIRCULAR_PATTERN_KIND: str = "CircPattern"
+"""`type(item).__name__` of a circular pattern in `Body.Shapes` (probe 44)."""
+
+CIRCULAR_PATTERN_AXIS_Z: str = "Z"
+"""The one verified rotation axis for a circular pattern.
+
+Live (probe 44): passing `OriginElements.PlaneXY` as both the rotation centre and the
+rotation axis patterned a pocket around the Z axis, and the six instances removed exactly
+five extra holes' worth of material. The other two origin planes produced a rotation about
+some other axis whose exact mapping the test geometry could not pin down, so only Z is
+offered (`docs/conventions.md` section 1.12).
+"""
+
+SUPPORTED_CIRCULAR_PATTERN_AXES: "frozenset[str]" = frozenset({CIRCULAR_PATTERN_AXIS_Z})
+"""The rotation axes `create_circular_pattern` accepts."""
+
+_CIRCULAR_RADIAL_INSTANCES: int = 1
+"""One radial row: the verified call patterns around the axis only."""
+
+_CIRCULAR_RADIAL_STEP: float = 1.0
+"""Radial spacing of that single row; unused with one instance, but required."""
+
+_CIRCULAR_ROTATION_ANGLE: float = 0.0
+"""`iRotationAngle`, verified at 0.0."""
+
+_CIRCULAR_AXIS_REVERSED: bool = False
+"""`iIsReversedRotationAxis`, verified at False."""
+
+_CIRCULAR_RADIUS_ALIGNED: bool = True
+"""`iIsRadiusAligned`, verified at True."""
+
+BOOLEAN_REMOVE_KIND: str = "Remove"
+"""`type(item).__name__` of a boolean remove feature."""
+
+BOOLEAN_ADD_KIND: str = "Add"
+"""`type(item).__name__` of a boolean add feature."""
+
+BOOLEAN_INTERSECT_KIND: str = "Intersect"
+"""`type(item).__name__` of a boolean intersect feature."""
+
+BOOLEAN_ASSEMBLE_KIND: str = "Assemble"
+"""`type(item).__name__` of a boolean assemble feature."""
+
+BOOLEAN_KINDS: "tuple[str, ...]" = (
+    BOOLEAN_REMOVE_KIND,
+    BOOLEAN_ADD_KIND,
+    BOOLEAN_INTERSECT_KIND,
+    BOOLEAN_ASSEMBLE_KIND,
+)
+"""Every boolean feature kind this SDK creates and finds, all verified live (probe 44)."""
+
+_ACTIVITY_PARAMETER: str = "Activity"
+"""The `BoolParam` that suppresses a feature, reached through `Part.Parameters`."""
+
+_MAX_OWNER_WALK: int = 6
+"""How far up a feature's `Parent` chain to look for its body and its Part."""
+
 
 PAD_KIND: str = "Pad"
 """The `type(com_object).__name__` value for a CATIA Pad feature."""
@@ -425,7 +484,171 @@ def _validate_non_negative_length(value: float, label: str) -> float:
     return coerced
 
 
-class SketchFeature:
+_MINIMUM_PATTERN_INSTANCES: int = 2
+"""One instance is the seed itself; a pattern needs at least two."""
+
+
+def _validate_instance_count(instances: Any) -> int:
+    """Checks a pattern instance count before CATIA is called.
+
+    Args:
+        instances: The count the caller passed.
+
+    Returns:
+        The count as an `int`.
+
+    Raises:
+        ParameterTypeError: If it is not an integer of at least
+            `_MINIMUM_PATTERN_INSTANCES`.
+    """
+    if isinstance(instances, bool) or not isinstance(instances, int):
+        raise ParameterTypeError(
+            f"instances must be an int, not {type(instances).__name__}."
+        )
+    if instances < _MINIMUM_PATTERN_INSTANCES:
+        raise ParameterTypeError(
+            f"instances must be at least {_MINIMUM_PATTERN_INSTANCES}; got {instances}."
+        )
+    return instances
+
+
+class _FeatureActivity:
+    """Suppression and reactivation, shared by every Part Design feature wrapper.
+
+    CATIA exposes a feature's suppression as a `BoolParam` named `Activity` inside
+    `Part.Parameters`, not as a member of the feature itself: live (probe 44),
+    `feature.Activity` does not exist and `feature.GetItem("Activity")` fails, while
+    `Parameters.Item("<Part>\\<Body>\\<Feature>\\Activity")` returns the parameter. The
+    path is built by walking the feature's own `Parent` chain (`Shapes -> Body -> Bodies
+    -> Part`), so a wrapper needs nothing but the feature it holds.
+
+    Suppression is non-destructive: live, deactivating a fillet and rebuilding gave back
+    the unfilleted volume with the fillet still in the tree, and reactivating it restored
+    the filleted volume exactly.
+    """
+
+    _com_object: Any
+    _generation: ModelGeneration
+
+    def _activity_parameter(self) -> Any:
+        """Finds this feature's `Activity` parameter in the Part.
+
+        Returns:
+            The raw `BoolParam`.
+
+        Raises:
+            AutomationError: If the feature's Part cannot be reached, or the Part has no
+                `Activity` parameter for it.
+        """
+        body_name: str | None = None
+        node = self._com_object
+        part = None
+        for _ in range(_MAX_OWNER_WALK):
+            try:
+                node = node.Parent
+            except (pywintypes.com_error, AttributeError):
+                break
+            if node is None:
+                break
+            if type(node).__name__ == "Body" and body_name is None:
+                try:
+                    body_name = str(node.Name)
+                except (pywintypes.com_error, AttributeError):
+                    body_name = None
+            if hasattr(node, "Parameters"):
+                part = node
+                break
+        if part is None:
+            raise AutomationError(
+                "This feature's Part could not be reached, so its Activity parameter "
+                "cannot be read. Obtain the feature through part.part_design."
+            )
+        name = self.name
+        try:
+            parameters = part.Parameters
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if body_name is not None:
+            try:
+                return parameters.Item(
+                    f"{part.Name}\\{body_name}\\{name}\\{_ACTIVITY_PARAMETER}"
+                )
+            except pywintypes.com_error:
+                # A differently shaped path (a nested body, a renamed Part) still resolves
+                # through the scan below rather than failing here.
+                pass
+        suffix = f"\\{name}\\{_ACTIVITY_PARAMETER}"
+        try:
+            count = int(parameters.Count)
+            for index in range(1, count + 1):
+                candidate = parameters.Item(index)
+                if str(candidate.Name).endswith(suffix):
+                    return candidate
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        raise AutomationError(
+            f"CATIA reports no {_ACTIVITY_PARAMETER} parameter for {name!r}, so this "
+            "feature cannot be suppressed through this release."
+        )
+
+    @property
+    def is_active(self) -> bool:
+        """bool: Whether the feature currently contributes to the geometry.
+
+        `False` means it is suppressed: still in the tree, but with no effect until it is
+        activated again and the Part is rebuilt.
+
+        Raises:
+            AutomationError: If the feature's `Activity` cannot be read.
+        """
+        try:
+            return bool(self._activity_parameter().Value)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def deactivate(self) -> None:
+        """Suppresses the feature. Does not rebuild; call `part.update()`.
+
+        The feature stays in the model and keeps its dimensions; only its contribution to
+        the geometry stops. Suppressing a feature that later features depend on can make
+        the next `Part.Update()` fail (live: suppressing a pad under a fillet did), and
+        the repair is to activate it again and update -- not to delete anything
+        (`docs/api-design.md` section 6).
+
+        Raises:
+            AutomationError: If CATIA refuses the write.
+        """
+        self._set_activity(False)
+
+    def activate(self) -> None:
+        """Un-suppresses the feature. Does not rebuild; call `part.update()`.
+
+        Raises:
+            AutomationError: If CATIA refuses the write.
+        """
+        self._set_activity(True)
+
+    def _set_activity(self, active: bool) -> None:
+        """Writes the `Activity` parameter under one model mutation.
+
+        Suppression can change the whole solid, so this advances the model generation and
+        every outstanding topology snapshot goes stale (`docs/api-design.md` section 7).
+
+        Args:
+            active: The new state.
+
+        Raises:
+            AutomationError: If CATIA refuses the write.
+        """
+        parameter = self._activity_parameter()
+        with self._generation.mutation():
+            try:
+                parameter.Value = active
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+
+class SketchFeature(_FeatureActivity):
     """Common wrapper for a sketch-based Part Design feature (`Pad`/`Pocket`).
 
     Verified structurally identical for both kinds (`docs/conventions.md`
@@ -606,7 +829,7 @@ class Pocket(SketchFeature):
     """
 
 
-class RevolvedFeature:
+class RevolvedFeature(_FeatureActivity):
     """Common wrapper for a sketch-based revolve feature (`Shaft`/`Groove`).
 
     Verified structurally identical for both kinds (`docs/conventions.md`
@@ -802,7 +1025,7 @@ class Groove(RevolvedFeature):
     """
 
 
-class _NamedFeature:
+class _NamedFeature(_FeatureActivity):
     """Shared `com_object`/`name`/`__repr__` handling for a plain feature wrapper.
 
     `Mirror`, `Rib`, and `Slot` carry no depth or angle magnitude the way
@@ -1415,6 +1638,140 @@ class RectangularPattern:
     def __repr__(self) -> str:
         """Returns a debugging representation without unverified COM reads."""
         return "RectangularPattern()"
+
+
+class CircularPattern(_NamedFeature):
+    """Wraps a raw CATIA `CircPattern`: copies of a feature around an axis.
+
+    Created by `AddNewCircPattern` (probe 44) with one radial row, so the pattern is the
+    angular one a bolt circle needs. The angular row is exposed because both of its
+    parameters were verified end to end: read, written, rebuilt, and the resulting volume
+    matched the new instance count.
+
+    Unlike `RectangularPattern`, this one is found again by name in `Body.Shapes`, because
+    CATIA reports it there under the `CircPattern` kind.
+    """
+
+    @property
+    def angular_instances(self) -> int:
+        """int: How many instances the pattern makes around the axis, the seed included.
+
+        Read from `AngularRepartition.InstancesCount.Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return int(self._read_dimension(("AngularRepartition", "InstancesCount")))
+
+    def set_angular_instances(self, instances: int) -> None:
+        """Sets the instance count. Does not rebuild; call `part.update()`.
+
+        Live (probe 44): six instances became eight, the update succeeded and the removed
+        volume grew by exactly two more holes.
+
+        Args:
+            instances: The new count, at least `_MINIMUM_PATTERN_INSTANCES`.
+
+        Raises:
+            ParameterTypeError: If `instances` is not a usable instance count.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        count = _validate_instance_count(instances)
+        dimension = self._dimension(("AngularRepartition", "InstancesCount"))
+        with self._generation.mutation():
+            try:
+                dimension.Value = count
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    @property
+    def angular_spacing_deg(self) -> float:
+        """float: The angle between two neighbouring instances, in degrees.
+
+        Read from `AngularRepartition.AngularSpacing.Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("AngularRepartition", "AngularSpacing"))
+
+    def set_angular_spacing_deg(self, spacing: float, unit: str = DEGREE) -> None:
+        """Sets the angle between instances. Does not rebuild; call `part.update()`.
+
+        Args:
+            spacing: The new angle.
+            unit: The unit `spacing` is expressed in. Defaults to `DEGREE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `spacing` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_angle(("AngularRepartition", "AngularSpacing"), spacing, unit)
+
+    @property
+    def radial_instances(self) -> int:
+        """int: The instance count of the radial row, which this SDK always creates as 1.
+
+        Read-only: no radial spacing has been verified, so a radial pattern is not offered
+        (`docs/conventions.md` section 1.12).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return int(self._read_dimension(("RadialRepartition", "InstancesCount")))
+
+
+class BooleanOperation(_NamedFeature):
+    """Wraps a raw CATIA boolean feature: `Remove`, `Add`, `Intersect` or `Assemble`.
+
+    A boolean takes one tool body and applies it to the body being modelled in. All four
+    were verified live (probe 44) with exact volumes on a disc and a cylinder:
+
+        Remove     111966.36 -> 104897.78   (the 7068.58 overlap taken away)
+        Add        111966.36 -> 133172.11   (the 21205.75 outside the disc added)
+        Intersect  111966.36 ->   7068.58   (only the overlap left)
+        Assemble   111966.36 -> 133172.11   (same as Add for these two solids)
+
+    **The tool body is consumed.** After the operation it reports `InBooleanOperation` and
+    no longer appears in `part.bodies`; it lives under the boolean feature instead. That is
+    why `tool_body_name` is read from the feature rather than from the body collection, and
+    why removal needs `delete_consumed_body=True` (`PartDesign.remove_boolean`).
+    """
+
+    @property
+    def operation(self) -> str:
+        """str: Which boolean this is: `"Remove"`, `"Add"`, `"Intersect"` or `"Assemble"`.
+
+        Taken from the COM wrapper's type name, the same way every other kind in this
+        module is identified.
+        """
+        return type(self._com_object).__name__
+
+    @property
+    def tool_body_name(self) -> str:
+        """str: The name of the body this operation consumed.
+
+        Read from the feature's own `Body` member (probe 44), so it survives into any
+        other process: the body itself is no longer listed in `part.bodies`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return str(self._com_object.Body.Name)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def __repr__(self) -> str:
+        """str: Debug representation naming the operation and its tool body."""
+        try:
+            name = self.name
+            tool: object = self.tool_body_name
+        except Auto3dxError:
+            name = "<unavailable>"
+            tool = "<unavailable>"
+        return f"{type(self).__name__}(name={name!r}, tool_body_name={tool!r})"
 
 
 WORK_AT_FEATURES: tuple = (
@@ -3842,6 +4199,471 @@ class PartDesign:
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
         return RectangularPattern(com_object, self._generation)
+
+    def _owning_body(self, feature: Any) -> "tuple[Any, str | None]":
+        """Walks a feature's `Parent` chain to the body that holds it.
+
+        Args:
+            feature: A raw feature COM object.
+
+        Returns:
+            `(body, body_name)`, both `None` when CATIA does not report a body.
+        """
+        node = feature
+        for _ in range(_MAX_OWNER_WALK):
+            try:
+                node = node.Parent
+            except (pywintypes.com_error, AttributeError):
+                return None, None
+            if node is None:
+                return None, None
+            if type(node).__name__ == "Body":
+                try:
+                    return node, str(node.Name)
+                except (pywintypes.com_error, AttributeError):
+                    return node, None
+        return None, None
+
+    def _require_feature_in_target_body(self, feature: Any, noun: str) -> None:
+        """Refuses a seed feature that lives in a different body from the target one.
+
+        Patterning a feature of one body into another is accepted by CATIA and fails at
+        the next update, the same trap Phase 1 closed for edges and faces.
+
+        Args:
+            feature: The seed feature wrapper.
+            noun: What is being created, for the message.
+
+        Raises:
+            CrossBodyReferenceError: If the seed belongs to another body. Nothing was
+                changed. An owner CATIA does not report is allowed through, exactly as it
+                is for topology references.
+        """
+        owner, owner_name = self._owning_body(feature.com_object)
+        if owner is None:
+            return
+        target = self._body()
+        try:
+            if bool(owner == target):
+                return
+        except pywintypes.com_error:
+            return
+        try:
+            target_name = str(target.Name)
+        except (pywintypes.com_error, AttributeError):
+            target_name = "the target body"
+        raise CrossBodyReferenceError(
+            f"{feature.name!r} belongs to body {owner_name or 'another body'!r}, but the "
+            f"{noun} would be created in {target_name!r}. CATIA would accept that and fail "
+            "the next Part.Update(). Nothing was changed: open part.work_in(body) for the "
+            "body that owns the feature."
+        )
+
+    def create_circular_pattern(
+        self,
+        name: str,
+        feature: Any,
+        angular_instances: int,
+        angular_spacing_deg: float,
+        axis: str = CIRCULAR_PATTERN_AXIS_Z,
+    ) -> CircularPattern:
+        """Creates a circular pattern of an existing feature around an origin axis.
+
+        This is the bolt-circle operation: one hole becomes six around the centre. Live
+        (probe 44), six instances of a pocket spaced 60 degrees apart removed exactly five
+        extra holes' worth of material, and the pattern rebuilt and was found again by
+        name in a fresh process.
+
+        The verified call is `AddNewCircPattern(feature, 1, instances, 1.0, spacing, 1, 1,
+        PlaneXY, PlaneXY, False, 0.0, True)`: one radial row, the angular row the caller
+        asked for, and the XY plane as both rotation centre and rotation axis. Radial rows
+        and a non-zero rotation angle are not exposed, because neither was verified.
+
+        It never calls `Part.Update()`. A pattern that CATIA cannot build leaves a broken
+        feature behind, which `remove_circular_pattern` takes out again.
+
+        Args:
+            name: The new pattern's name. Must be non-empty, without surrounding
+                whitespace, and must not contain `"\\"`.
+            feature: The feature to copy -- a `Pad`, `Pocket`, fillet, and so on, from
+                `part.part_design`. It must belong to the body being modelled in.
+            angular_instances: How many instances in total, the original included.
+            angular_spacing_deg: The angle between neighbouring instances, in degrees.
+            axis: The rotation axis. Only `CIRCULAR_PATTERN_AXIS_Z` is verified.
+
+        Returns:
+            The newly created `CircularPattern`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `feature` is not a feature wrapper, the instance count
+                is not usable, or the spacing is not a number.
+            UnsupportedSupportError: If `axis` is not a verified axis.
+            CrossBodyReferenceError: If the feature belongs to a different body.
+            FeatureConflictError: If a circular pattern named `name` already exists.
+            AmbiguousNameError: If two or more already exist with that name.
+            PartialCreationError: If it was created but the follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        if not isinstance(feature, WORK_AT_FEATURES):
+            raise ParameterTypeError(
+                "A circular pattern copies a Part Design feature from part.part_design, "
+                f"not {type(feature).__name__}."
+            )
+        if axis not in SUPPORTED_CIRCULAR_PATTERN_AXES:
+            raise UnsupportedSupportError(
+                f"axis must be one of {sorted(SUPPORTED_CIRCULAR_PATTERN_AXES)}; got "
+                f"{axis!r}. Only the Z axis has been verified live."
+            )
+        instances = _validate_instance_count(angular_instances)
+        spacing = validate_angle_value(angular_spacing_deg)
+        self._require_feature_in_target_body(feature, "circular pattern")
+        try:
+            reference = self._part_com_object.OriginElements.PlaneXY
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return self._create_feature(
+            name,
+            CIRCULAR_PATTERN_KIND,
+            "AddNewCircPattern",
+            (
+                feature.com_object,
+                _CIRCULAR_RADIAL_INSTANCES,
+                instances,
+                _CIRCULAR_RADIAL_STEP,
+                spacing,
+                _PATTERN_COPY_POSITION,
+                _PATTERN_COPY_POSITION,
+                reference,
+                reference,
+                _CIRCULAR_AXIS_REVERSED,
+                _CIRCULAR_ROTATION_ANGLE,
+                _CIRCULAR_RADIUS_ALIGNED,
+            ),
+            CircularPattern,
+            "circular pattern",
+        )
+
+    @property
+    def circular_patterns(self) -> "list[CircularPattern]":
+        """list[CircularPattern]: Every circular pattern in the body being modelled in.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(CIRCULAR_PATTERN_KIND, CircularPattern)
+
+    def get_circular_pattern(self, name: str) -> CircularPattern:
+        """Finds a circular pattern by name in the body being modelled in.
+
+        Args:
+            name: The pattern's name.
+
+        Returns:
+            The matching `CircularPattern`.
+
+        Raises:
+            FeatureNotFoundError: If no circular pattern has that name.
+            AmbiguousNameError: If two or more do.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(CIRCULAR_PATTERN_KIND, CircularPattern, "circular pattern", name)
+
+    def remove_circular_pattern(self, name: str) -> None:
+        """Removes a circular pattern by name, leaving the feature it copied in place.
+
+        This does not rebuild and never saves.
+
+        Args:
+            name: The pattern's name.
+
+        Raises:
+            FeatureNotFoundError: If no circular pattern has that name.
+            AmbiguousNameError: If two or more do.
+            Auto3dxError: If no editor selection is available, or deletion failed.
+        """
+        self._remove(name, self.get_circular_pattern, "circular pattern")
+
+    def _resolve_tool_body(self, tool_body: Any, noun: str) -> Any:
+        """Resolves and vets the tool body of a boolean operation.
+
+        Args:
+            tool_body: A `Body` wrapper, or the name of a body of this Part.
+            noun: The operation, for the messages.
+
+        Returns:
+            The raw tool `Body` COM object.
+
+        Raises:
+            ParameterTypeError: If `tool_body` is neither a body wrapper nor a name.
+            BooleanOperationError: If it is not a body of this Part, is the body being
+                modelled in, or has already been consumed by another boolean. Nothing
+                was changed.
+            Auto3dxError: If the bodies cannot be read.
+        """
+        if not isinstance(tool_body, str) and not hasattr(tool_body, "com_object"):
+            raise ParameterTypeError(
+                f"The tool body of a boolean {noun} must be a Body from part.bodies or "
+                f"its name, not {type(tool_body).__name__}."
+            )
+        wanted = tool_body if isinstance(tool_body, str) else None
+        raw_wanted = None if wanted is not None else tool_body.com_object
+        try:
+            bodies = self._part_com_object.Bodies
+            count = int(bodies.Count)
+            candidates = [bodies.Item(index) for index in range(1, count + 1)]
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        found = None
+        names = []
+        for candidate in candidates:
+            try:
+                candidate_name = str(candidate.Name)
+            except pywintypes.com_error:
+                continue
+            names.append(candidate_name)
+            if wanted is not None:
+                if candidate_name == wanted:
+                    found = candidate
+            else:
+                try:
+                    if bool(candidate == raw_wanted):
+                        found = candidate
+                except pywintypes.com_error:
+                    continue
+        if found is None:
+            label = wanted if wanted is not None else "that body"
+            raise BooleanOperationError(
+                f"{label!r} is not a body of this Part, so it cannot be the tool of a "
+                f"boolean {noun}. Bodies that are there: {names}. A body already consumed "
+                "by an earlier boolean is no longer listed."
+            )
+        target = self._body()
+        try:
+            if bool(found == target):
+                raise BooleanOperationError(
+                    f"A boolean {noun} cannot use the body it is applied to as its own "
+                    "tool. Open part.work_in(other_body) for the target, or pass a "
+                    "different tool body."
+                )
+        except pywintypes.com_error:
+            pass
+        try:
+            if bool(found.InBooleanOperation):
+                raise BooleanOperationError(
+                    f"Body {str(found.Name)!r} has already been consumed by a boolean "
+                    "operation, so it cannot be used again. Nothing was changed."
+                )
+        except pywintypes.com_error:
+            pass
+        return found
+
+    def _create_boolean(
+        self, name: str, kind: str, factory_method: str, tool_body: Any, noun: str
+    ) -> BooleanOperation:
+        """Creates one boolean feature after vetting its tool body.
+
+        Args:
+            name: The new feature's name.
+            kind: The `type(item).__name__` CATIA gives it.
+            factory_method: The `ShapeFactory` method.
+            tool_body: The tool body wrapper or name.
+            noun: The operation, for messages.
+
+        Returns:
+            The newly created `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            FeatureConflictError: If a feature of this kind already has that name.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        raw_tool = self._resolve_tool_body(tool_body, noun)
+        return self._create_feature(
+            name, kind, factory_method, (raw_tool,), BooleanOperation, f"boolean {noun}"
+        )
+
+    def create_boolean_remove(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Subtracts a tool body from the body being modelled in.
+
+        Live (probe 44): a cylinder removed exactly its overlap from a disc, the update
+        succeeded, and the tool body reported `InBooleanOperation` afterwards.
+
+        **The tool body is consumed**: it disappears from `part.bodies` and lives under
+        this feature instead. Removing the feature later deletes that body with it
+        (`remove_boolean`).
+
+        The target is whichever body is being modelled in, so wrap the call in
+        `part.work_in(target_body)` when it is not the main body. This never calls
+        `Part.Update()`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to subtract, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is the target body, is not a body of
+                this Part, or has already been consumed.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(
+            name, BOOLEAN_REMOVE_KIND, "AddNewRemove", tool_body, "remove"
+        )
+
+    def create_boolean_add(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Adds a tool body into the body being modelled in.
+
+        Live (probe 44): the disc gained exactly the part of the cylinder that lay outside
+        it. The tool body is consumed, exactly as for `create_boolean_remove`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to add, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(name, BOOLEAN_ADD_KIND, "AddNewAdd", tool_body, "add")
+
+    def create_boolean_intersect(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Keeps only what the tool body and the body being modelled in share.
+
+        Live (probe 44): the result was exactly the overlap volume. The tool body is
+        consumed, exactly as for `create_boolean_remove`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to intersect with, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(
+            name, BOOLEAN_INTERSECT_KIND, "AddNewIntersect", tool_body, "intersect"
+        )
+
+    def create_boolean_assemble(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Assembles a tool body into the body being modelled in.
+
+        Live (probe 44) this gave the same volume as `create_boolean_add` for two solids
+        that only overlapped; assemble differs from add by honouring the tool body's own
+        add/remove history, which this SDK has not exercised. The tool body is consumed,
+        exactly as for `create_boolean_remove`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to assemble, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(
+            name, BOOLEAN_ASSEMBLE_KIND, "AddNewAssemble", tool_body, "assemble"
+        )
+
+    @property
+    def boolean_operations(self) -> "list[BooleanOperation]":
+        """list[BooleanOperation]: Every boolean in the body being modelled in.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        found: list[BooleanOperation] = []
+        for kind in BOOLEAN_KINDS:
+            found.extend(self._list(kind, BooleanOperation))
+        return found
+
+    def get_boolean(self, name: str) -> BooleanOperation:
+        """Finds a boolean operation by name, whichever of the four kinds it is.
+
+        Args:
+            name: The feature's name.
+
+        Returns:
+            The matching `BooleanOperation`.
+
+        Raises:
+            FeatureNotFoundError: If no boolean has that name.
+            AmbiguousNameError: If two or more do.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        matches = [item for item in self.boolean_operations if item.name == name]
+        if not matches:
+            raise FeatureNotFoundError(f"No boolean operation named {name!r} was found.")
+        if len(matches) > 1:
+            raise AmbiguousNameError(
+                f"{len(matches)} boolean operations are named {name!r}; refusing to guess."
+            )
+        return matches[0]
+
+    def remove_boolean(self, name: str, *, delete_consumed_body: bool = False) -> None:
+        """Removes a boolean operation -- and the body it consumed.
+
+        **This is destructive beyond the feature itself.** Live (probe 44), deleting a
+        boolean took the consumed tool body with it: the body did not come back, its name
+        could no longer be found, and only the target body's original geometry returned.
+        There is no verified way to release a tool body back out of a boolean, so this asks
+        the caller to say that losing it is intended.
+
+        This does not rebuild and never saves.
+
+        Args:
+            name: The boolean feature's name.
+            delete_consumed_body: Must be `True`. Deleting the feature deletes the tool
+                body and everything in it.
+
+        Raises:
+            FeatureNotFoundError: If no boolean has that name.
+            AmbiguousNameError: If two or more do.
+            BooleanOperationError: If `delete_consumed_body` is not `True`. Nothing was
+                changed.
+            Auto3dxError: If no editor selection is available, or deletion failed.
+        """
+        operation = self.get_boolean(name)
+        if not delete_consumed_body:
+            try:
+                tool = operation.tool_body_name
+            except Auto3dxError:
+                tool = "the consumed body"
+            raise BooleanOperationError(
+                f"Removing boolean {name!r} would also delete {tool!r}, the body it "
+                "consumed, with everything in it; CATIA gives no way to release that body "
+                "again. Nothing was changed. Pass delete_consumed_body=True to confirm."
+            )
+        with self._generation.mutation():
+            delete_via_selection(
+                self._selection,
+                operation.com_object,
+                f"boolean operation {name!r}",
+                self._part_com_object,
+            )
 
     def remove_rectangular_pattern(self, pattern: RectangularPattern) -> None:
         """Removes a rectangular pattern through the owning editor's Selection.
