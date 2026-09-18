@@ -80,6 +80,7 @@ from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
     AutomationError,
+    CrossBodyReferenceError,
     FeatureConflictError,
     FeatureNotFoundError,
     PartialCreationError,
@@ -1199,6 +1200,7 @@ class PartDesign:
                 before this `PartDesign` last changed the model.
         """
         self._generation.require_current(edge.generation, "edge", "part.topology.edges()")
+        self._require_same_body(edge, "edge", noun, "part.topology.edges(body=...)")
 
     def _require_current_face(self, face: Face, noun: str) -> None:
         """Refuses a `Face` whose snapshot predates the latest model change.
@@ -1220,6 +1222,59 @@ class PartDesign:
                 before this `PartDesign` last changed the model.
         """
         self._generation.require_current(face.generation, "face", "part.topology.faces()")
+        self._require_same_body(face, "face", noun, "part.topology.faces(body=...)")
+
+    def _require_same_body(
+        self, reference: Any, kind: str, noun: str, remedy: str
+    ) -> None:
+        """Refuses topology that belongs to a different body from the target one.
+
+        A Part-wide search returns every body's edges and faces in one list
+        (`geometry.edges`), and CATIA accepts a feature built on the wrong body's
+        reference, only failing the next `Part.Update()`. The reference carries the body
+        it was found in, read from the model at snapshot time, so the mismatch is caught
+        before `ShapeFactory` is called and nothing is created.
+
+        An unknown owner is allowed through: CATIA did not say which body the reference
+        belongs to, and refusing on a missing answer would break valid calls. That is the
+        one gap in this guard, and `docs/api-design.md` section 7 records it.
+
+        Args:
+            reference: The `Edge` or `Face` the caller passed.
+            kind: `"edge"` or `"face"`, for the message.
+            noun: What is being created, for the message.
+            remedy: The call that would produce a correctly scoped snapshot.
+
+        Raises:
+            CrossBodyReferenceError: If the reference's body is not the body this
+                `PartDesign` builds in. Nothing was changed.
+        """
+        owner = reference.owner_body
+        if owner is None:
+            return
+        target = self._body()
+        try:
+            same = bool(owner == target)
+        except pywintypes.com_error:
+            # Identity could not be compared; the guard stays silent rather than
+            # refusing a call CATIA might well accept.
+            return
+        if same:
+            return
+        try:
+            target_name = str(target.Name)
+        except (pywintypes.com_error, AttributeError):
+            target_name = "the target body"
+        owner_name = reference.owner_body_name or "another body"
+        feature = reference.owner_feature_name
+        origin = f" (from {feature!r})" if feature else ""
+        raise CrossBodyReferenceError(
+            f"This {kind}{origin} belongs to body {owner_name!r}, but the {noun} would "
+            f"be created in {target_name!r}. CATIA would accept that and fail the next "
+            f"Part.Update(). Nothing was changed: take {remedy} for the body you are "
+            "building in, or open part.work_in(body) for the body that owns this "
+            f"{kind}."
+        )
 
     def _body(self) -> Any:
         """Returns the raw body features are listed in: the work body, or `MainBody`.
@@ -2754,10 +2809,14 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the fillet in the tree,
-        and every later `Part.Update()` fails too until it is removed** --
-        this is exactly what made an earlier probe look like a cascade of
-        unrelated failures. Remove it with `remove_edge_fillet` before
-        retrying; do not retry blindly.
+        and every later `Part.Update()` fails too until the model is valid
+        again** -- this is exactly what made an earlier probe look like a
+        cascade of unrelated failures. Repair before retrying, and prefer
+        rollback to deletion: if the failure followed an edit to something
+        that worked, undo that edit and update again (live, a 1 mm pad under
+        this fillet failed the update, and restoring the pad healed the Part
+        with the fillet intact). Remove the fillet with `remove_edge_fillet`
+        when it never built in the first place. Do not retry blindly.
 
         Args:
             name: The new fillet's name. Must be non-empty, without
@@ -2886,10 +2945,11 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the chamfer in the tree,
-        and every later `Part.Update()` fails too until it is removed** --
-        this is exactly what made an earlier probe look like a cascade of
-        unrelated failures. Remove it with `remove_chamfer` before retrying;
-        do not retry blindly.
+        and every later `Part.Update()` fails too until the model is valid
+        again** -- this is exactly what made an earlier probe look like a
+        cascade of unrelated failures. Undo the edit that broke it and update
+        again, or remove the chamfer with `remove_chamfer` when it never
+        built; do not retry blindly.
 
         Args:
             name: The new chamfer's name. Must be non-empty, without
@@ -3053,10 +3113,11 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the shell in the tree,
-        and every later `Part.Update()` fails too until it is removed** --
-        exactly the edge-feature failure mode documented on
-        `create_edge_fillet`. Remove it with `remove_shell` before retrying;
-        do not retry blindly.
+        and every later `Part.Update()` fails too until the model is valid
+        again** -- exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Undo the edit that broke it and update again, or
+        remove the shell with `remove_shell` when it never built; do not retry
+        blindly.
 
         Args:
             name: The new shell's name. Must be non-empty, without
@@ -3283,10 +3344,11 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the hole in the tree, and
-        every later `Part.Update()` fails too until it is removed** --
-        exactly the edge-feature failure mode documented on
-        `create_edge_fillet`. Remove it with `remove_hole` before retrying;
-        do not retry blindly.
+        every later `Part.Update()` fails too until the model is valid again**
+        -- exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Undo the edit that broke it and update again, or
+        remove the hole with `remove_hole` when it never built; do not retry
+        blindly.
 
         Args:
             name: The new hole's name. Must be non-empty, without

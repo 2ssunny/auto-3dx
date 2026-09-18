@@ -85,7 +85,7 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.geometry._topology_search import search_references
+from auto_3dx.geometry._topology_search import owner_of, search_references
 from auto_3dx.geometry.sketch import _wrap_com_error
 
 FACE_SEARCH_QUERY: str = "Topology.Face,all"
@@ -95,7 +95,16 @@ FACE_SEARCH_QUERY: str = "Topology.Face,all"
 it does for edges; `Search("Topology.Edge,all")` returns edges, which are the
 wrong kind of reference for `AddNewShell`/`AddNewThickness`/`AddNewHole`.
 This is the one string this module ever passes to `Search`
-(`docs/conventions.md` section 1.2.2.2, probe 37).
+(`docs/conventions.md` section 1.2.2.2, probe 37) when the search covers the whole
+Part.
+"""
+
+FACE_SEARCH_QUERY_IN_SELECTION: str = "Topology.Face,sel"
+"""The same search, restricted to whatever is selected when it runs.
+
+Selecting one body and running this returned that body's faces only (probe 42, live
+2026-09-18), which is how `part.topology.faces(body=...)` scopes a snapshot. A body
+whose features have not been rebuilt reports no faces at all rather than failing.
 """
 
 
@@ -120,7 +129,15 @@ class Face:
     `descriptor` again.
     """
 
-    def __init__(self, reference: Any, index: int, generation: int = 0) -> None:
+    def __init__(
+        self,
+        reference: Any,
+        index: int,
+        generation: int = 0,
+        owner_body: Any = None,
+        owner_body_name: "str | None" = None,
+        owner_feature_name: "str | None" = None,
+    ) -> None:
         """Initializes the handle.
 
         Args:
@@ -131,10 +148,41 @@ class Face:
             generation: The model generation the snapshot was taken at, so a
                 later change can mark this handle stale. Defaults to 0 for a
                 `Face` built directly in a test, with no owning `PartDesign`.
+            owner_body: The raw `Body` COM object this face was found in, read
+                from the reference's owner chain at snapshot time. `None` when
+                CATIA did not report one, which leaves the ownership guard in
+                `PartDesign` unable to refuse this face.
+            owner_body_name: That body's name, for error messages.
+            owner_feature_name: The feature the reference came from, for error
+                messages.
         """
         self._reference = reference
         self._index = index
         self._generation = generation
+        self._owner_body = owner_body
+        self._owner_body_name = owner_body_name
+        self._owner_feature_name = owner_feature_name
+
+    @property
+    def owner_body(self) -> Any:
+        """Any: The raw `Body` this face belongs to, or `None` if CATIA did not say.
+
+        Read from the model when the snapshot was taken (`Reference.Parent` up to the
+        owning `Body`, probe 42), never remembered between processes. A feature refuses
+        a face whose owner is a different body from the one it builds in
+        (`CrossBodyReferenceError`).
+        """
+        return self._owner_body
+
+    @property
+    def owner_body_name(self) -> "str | None":
+        """str | None: The name of the body this face belongs to, if known."""
+        return self._owner_body_name
+
+    @property
+    def owner_feature_name(self) -> "str | None":
+        """str | None: The feature this face came from, if known."""
+        return self._owner_feature_name
 
     @property
     def generation(self) -> int:
@@ -286,7 +334,10 @@ class FaceSnapshot:
 
 
 def take_face_snapshot(
-    selection: Any, generation: int = 0, part_com_object: Any = None
+    selection: Any,
+    generation: int = 0,
+    part_com_object: Any = None,
+    body: Any = None,
 ) -> FaceSnapshot:
     """Runs the one verified face search and returns a fresh `FaceSnapshot`.
 
@@ -307,6 +358,10 @@ def take_face_snapshot(
             no owning `PartDesign`.
         part_com_object: The raw Part being searched; the search is refused unless it
             is the active Part.
+        body: The raw `Body` COM object to search inside. `None` searches the whole
+            Part, as `Topology.Face,all` has always done. Passing a body selects it and
+            searches `Topology.Face,sel`, which live returned that body's faces only
+            (probe 42). Either way each `Face` carries the body it was found in.
 
     Returns:
         A fresh `FaceSnapshot` describing every face of the solid as it
@@ -322,9 +377,19 @@ def take_face_snapshot(
         SelectionNotRestoredWarning: If the selection did not fully come back.
             The snapshot is still valid.
     """
-    references = search_references(selection, FACE_SEARCH_QUERY, part_com_object)
-    faces = [
-        Face(reference, position, generation)
-        for position, reference in enumerate(references, start=1)
-    ]
+    query = FACE_SEARCH_QUERY if body is None else FACE_SEARCH_QUERY_IN_SELECTION
+    references = search_references(selection, query, part_com_object, body)
+    faces = []
+    for position, reference in enumerate(references, start=1):
+        owner_body, owner_body_name, owner_feature_name = owner_of(reference)
+        faces.append(
+            Face(
+                reference,
+                position,
+                generation,
+                owner_body,
+                owner_body_name,
+                owner_feature_name,
+            )
+        )
     return FaceSnapshot(faces, generation)

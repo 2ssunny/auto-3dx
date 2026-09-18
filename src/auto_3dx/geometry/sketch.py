@@ -50,6 +50,7 @@ from auto_3dx.errors import (
     SketchAlreadyExistsError,
     SketchNotFoundError,
     SketchSupportMismatchError,
+    SupportNotUpdatedError,
     UnsupportedSupportError,
     ValidationError,
 )
@@ -1438,6 +1439,23 @@ class SketchCollection:
         """
         if isinstance(support, str):
             return self._plane(support)
+        plane = self._user_plane(support)
+        self._require_updated_support(plane)
+        return plane
+
+    def _user_plane(self, support: Any) -> Any:
+        """Unwraps a plane wrapper into the raw plane `Sketches.Add` accepts.
+
+        Args:
+            support: A plane wrapper from `auto_3dx.geometry.planes`.
+
+        Returns:
+            The raw plane COM object.
+
+        Raises:
+            UnsupportedSupportError: If `support` is neither a supported string nor an
+                object exposing `com_object`.
+        """
         # Duck-typed rather than an `isinstance` check against
         # `auto_3dx.geometry.planes.Plane`: that module already imports this
         # module's private plane-resolution helpers (mirroring
@@ -1454,6 +1472,44 @@ class SketchCollection:
                 "exposing `com_object` (e.g. from auto_3dx.geometry.planes), "
                 f"got {type(support).__name__}."
             ) from error
+
+    def _require_updated_support(self, plane: Any) -> None:
+        """Refuses a user plane the Part has not rebuilt yet.
+
+        `Sketches.Add` on a plane created since the last rebuild fails with an opaque
+        `E_FAIL` that says nothing about the cause (live, verified repeatedly).
+        `Part.IsUpToDate(plane)` reports `False` for exactly that plane and `True` once
+        the Part has been updated (probe 42), so the condition is checked here and the
+        caller is told what to do. This only reads status; it never rebuilds anything.
+
+        A status that cannot be read is not treated as a failure: the call goes ahead
+        and CATIA decides.
+
+        Args:
+            plane: The raw plane COM object about to be used as a support.
+
+        Raises:
+            SupportNotUpdatedError: If CATIA reports the plane as not up to date.
+                Nothing was changed.
+        """
+        if self._part_com_object is None:
+            return
+        try:
+            current = self._part_com_object.IsUpToDate(plane)
+        except (pywintypes.com_error, AttributeError, TypeError):
+            return
+        if current:
+            return
+        try:
+            name = str(plane.Name)
+        except (pywintypes.com_error, AttributeError):
+            name = "the support plane"
+        raise SupportNotUpdatedError(
+            f"Plane {name!r} has not been rebuilt yet, and CATIA refuses it as a sketch "
+            "support until it has, failing with an opaque COM error. Nothing was "
+            "changed: call part.update() after creating the plane, then create the "
+            "sketch on it."
+        )
 
     @property
     def count(self) -> int:

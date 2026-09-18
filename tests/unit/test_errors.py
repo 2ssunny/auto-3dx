@@ -28,6 +28,8 @@ CATEGORIES = {
         "UnsupportedMagnitudeError",
         "UnsupportedSupportError",
         "StaleSnapshotError",
+        "CrossBodyReferenceError",
+        "SupportNotUpdatedError",
     },
     "NotFoundError": {
         "ParameterNotFoundError",
@@ -47,6 +49,7 @@ CATEGORIES = {
         "AmbiguousNameError",
         "BodyAlreadyExistsError",
         "BodyRemovalError",
+        "TargetNotUpToDateError",
     },
     "AutomationError": {
         "PartUpdateError",

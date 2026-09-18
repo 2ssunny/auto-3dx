@@ -30,7 +30,7 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx._com import automation_error
+from auto_3dx._com import automation_error, format_hresult, hresult_of
 from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
@@ -40,6 +40,7 @@ from auto_3dx.errors import (
     BodyNotFoundError,
     BodyRemovalError,
     PartialCreationError,
+    PartUpdateError,
     SelectionNotRestoredWarning,
 )
 from auto_3dx.geometry._topology_search import _capture_selection, _restore_selection
@@ -161,6 +162,60 @@ class Body:
             )
         except pywintypes.com_error as error:
             raise automation_error(error, "reading Body.Sketches") from error
+
+    @property
+    def is_up_to_date(self) -> bool:
+        """bool: Whether CATIA has rebuilt this body since its last change.
+
+        A body created or edited inside `part.work_in(body)` is not rebuilt until
+        something updates it, and a body that has not been rebuilt has no valid solid:
+        measuring one fails inside CATIA's inertia service (probe 42). Read-only.
+
+        Raises:
+            AutomationError: If CATIA cannot report the status.
+        """
+        try:
+            result = self._part_com_object.IsUpToDate(self._com_object)
+        except pywintypes.com_error as error:
+            raise automation_error(
+                error, "calling Part.IsUpToDate() for a body"
+            ) from error
+        except (AttributeError, TypeError) as error:
+            raise AutomationError(
+                "Part.IsUpToDate() is unusable in this release: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+        return bool(result)
+
+    def update(self) -> None:
+        """Rebuilds this body alone, through `Part.UpdateObject`.
+
+        `part.update()` rebuilds the whole Part; this rebuilds one body and leaves the
+        rest as it is. Live (probe 42) it made a body whose pad had never been rebuilt
+        up to date and measurable, without moving the In-Work Object. It is the update a
+        `part.work_in(body)` workflow needs, and like every other rebuild in this SDK it
+        is explicit: nothing here updates on its own.
+
+        Raises:
+            PartUpdateError: If CATIA could not rebuild the body. The body is left as
+                CATIA left it; repair what caused the failure and update again
+                (`Part.update`).
+        """
+        with self._generation.mutation():
+            try:
+                self._part_com_object.UpdateObject(self._com_object)
+            except pywintypes.com_error as error:
+                hresult = hresult_of(error)
+                raise PartUpdateError(
+                    f"Part.UpdateObject() failed for body {self.name!r} "
+                    f"(HRESULT={format_hresult(hresult)}).",
+                    hresult,
+                ) from error
+            except (AttributeError, TypeError) as error:
+                raise PartUpdateError(
+                    "Part.UpdateObject() is unusable in this release: "
+                    f"{type(error).__name__}."
+                ) from error
 
     @property
     def is_visible(self) -> bool:

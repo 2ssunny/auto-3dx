@@ -49,14 +49,19 @@ where it matters, not just here:
    selector: a caller cannot store a name or an index and look the same edge
    up again later. `Edge.descriptor` exists only for logging and equality
    comparison within one snapshot, never for storage.
-4. There is no way to scope the search to one feature. Every scoped syntax
-   tried (`Topology.Edge,in,<name>`, `Topology.Edge,sel`, a name filter
-   composed with `&`, ...) either raised a COM error or returned the whole
-   solid (probe 35). `MeasurableService` exposed no length for an edge
-   either, so an edge cannot be picked by measured geometry. A caller who
-   needs "the edges of this pad" has to filter `EdgeSnapshot` results by
-   whatever weaker signal is available to them (e.g. count, or manual
-   inspection), not by anything this module can offer.
+4. The search can be scoped to a BODY, but not to a feature. Selecting one
+   body first and searching `Topology.Edge,sel` returns that body's edges
+   only, and follows the selection rather than the In-Work Object (probe 42,
+   live 2026-09-18); that is what `part.topology.edges(body=...)` does.
+   Scoping to one feature is still unsolved: `Topology.Edge,in,<name>`, a
+   name filter composed with `&` and the rest raised or returned the whole
+   Part (probe 35), and `MeasurableService` exposed no length for an edge,
+   so an edge cannot be picked by measured geometry either. What each edge
+   DOES carry is its owner: `owner_body`, `owner_body_name` and
+   `owner_feature_name` come from walking `Reference.Parent` in the model at
+   snapshot time, so a caller can filter "the edges of this pad" by name and
+   `PartDesign` can refuse an edge belonging to another body before CATIA is
+   called.
 
 WHY THERE IS NO `ensure_edge_fillet`/`ensure_chamfer`. `PartDesign.ensure_pad`
 (`geometry/part_design.py`) reuses an existing feature by comparing its
@@ -81,7 +86,7 @@ from typing import Any
 
 import pywintypes
 
-from auto_3dx.geometry._topology_search import search_references
+from auto_3dx.geometry._topology_search import owner_of, search_references
 from auto_3dx.geometry.sketch import _wrap_com_error
 
 EDGE_SEARCH_QUERY: str = "Topology.Edge,all"
@@ -91,7 +96,16 @@ EDGE_SEARCH_QUERY: str = "Topology.Edge,all"
 `Search("Topology.Face,all")` returns faces, which are rejected by both
 `AddNewEdgeFilletWithConstantRadius` and `AddNewChamfer`. This is the one
 string this module ever passes to `Search` (`docs/conventions.md` section
-1.2.2.2).
+1.2.2.2) when the search covers the whole Part.
+"""
+
+EDGE_SEARCH_QUERY_IN_SELECTION: str = "Topology.Edge,sel"
+"""The same search, restricted to whatever is selected when it runs.
+
+Selecting one body and running this returned that body's edges only, and it followed
+the selection rather than the In-Work Object (probe 42, live 2026-09-18). It is how
+`part.topology.edges(body=...)` scopes a snapshot to one body. `",in"` was also tried
+and returned the whole Part.
 """
 
 
@@ -120,7 +134,15 @@ class Edge:
     `descriptor` again.
     """
 
-    def __init__(self, reference: Any, index: int, generation: int = 0) -> None:
+    def __init__(
+        self,
+        reference: Any,
+        index: int,
+        generation: int = 0,
+        owner_body: Any = None,
+        owner_body_name: "str | None" = None,
+        owner_feature_name: "str | None" = None,
+    ) -> None:
         """Initializes the handle.
 
         Args:
@@ -131,10 +153,42 @@ class Edge:
             generation: The model generation the snapshot was taken at, so a
                 later change can mark this handle stale. Defaults to 0 for an
                 `Edge` built directly in a test, with no owning `PartDesign`.
+            owner_body: The raw `Body` COM object this edge was found in, read
+                from the reference's owner chain at snapshot time. `None` when
+                CATIA did not report one, which leaves the ownership guard in
+                `PartDesign` unable to refuse this edge.
+            owner_body_name: That body's name, for error messages.
+            owner_feature_name: The feature the reference came from (a `Pad`
+                for a solid edge, the `Sketch` for an edge of a consumed
+                sketch), for error messages.
         """
         self._reference = reference
         self._index = index
         self._generation = generation
+        self._owner_body = owner_body
+        self._owner_body_name = owner_body_name
+        self._owner_feature_name = owner_feature_name
+
+    @property
+    def owner_body(self) -> Any:
+        """Any: The raw `Body` this edge belongs to, or `None` if CATIA did not say.
+
+        Read from the model when the snapshot was taken (`Reference.Parent` up to the
+        owning `Body`, probe 42), never remembered between processes. A feature refuses
+        an edge whose owner is a different body from the one it builds in
+        (`CrossBodyReferenceError`).
+        """
+        return self._owner_body
+
+    @property
+    def owner_body_name(self) -> "str | None":
+        """str | None: The name of the body this edge belongs to, if known."""
+        return self._owner_body_name
+
+    @property
+    def owner_feature_name(self) -> "str | None":
+        """str | None: The feature this edge came from, if known."""
+        return self._owner_feature_name
 
     @property
     def generation(self) -> int:
@@ -296,7 +350,10 @@ class EdgeSnapshot:
 
 
 def take_edge_snapshot(
-    selection: Any, generation: int = 0, part_com_object: Any = None
+    selection: Any,
+    generation: int = 0,
+    part_com_object: Any = None,
+    body: Any = None,
 ) -> EdgeSnapshot:
     """Runs the one verified edge search and returns a fresh `EdgeSnapshot`.
 
@@ -317,6 +374,11 @@ def take_edge_snapshot(
             no owning `PartDesign`.
         part_com_object: The raw Part being searched; the search is refused unless it
             is the active Part.
+        body: The raw `Body` COM object to search inside. `None` searches the whole
+            Part, which is what `Topology.Edge,all` has always returned: the edges of
+            every body in one flat list. Passing a body selects it and searches
+            `Topology.Edge,sel` instead, which live returned that body's edges only
+            (probe 42). Either way each `Edge` carries the body it was found in.
 
     Returns:
         A fresh `EdgeSnapshot` describing every edge of the solid as it
@@ -332,9 +394,19 @@ def take_edge_snapshot(
         SelectionNotRestoredWarning: If the selection did not fully come back.
             The snapshot is still valid.
     """
-    references = search_references(selection, EDGE_SEARCH_QUERY, part_com_object)
-    edges = [
-        Edge(reference, position, generation)
-        for position, reference in enumerate(references, start=1)
-    ]
+    query = EDGE_SEARCH_QUERY if body is None else EDGE_SEARCH_QUERY_IN_SELECTION
+    references = search_references(selection, query, part_com_object, body)
+    edges = []
+    for position, reference in enumerate(references, start=1):
+        owner_body, owner_body_name, owner_feature_name = owner_of(reference)
+        edges.append(
+            Edge(
+                reference,
+                position,
+                generation,
+                owner_body,
+                owner_body_name,
+                owner_feature_name,
+            )
+        )
     return EdgeSnapshot(edges, generation)

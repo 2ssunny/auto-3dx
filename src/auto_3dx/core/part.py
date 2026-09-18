@@ -155,10 +155,37 @@ class Part:
         Built on first access and cached afterwards. Its snapshots are stamped with
         this Part's model generation, so they are refused once anything reachable
         from this Part changes the model (``docs/api-design.md`` section 7).
+
+        ``edges()``/``faces()`` cover the whole Part, every body's topology in one list,
+        unless they are scoped: pass ``body=`` or take the snapshot inside
+        ``part.work_in(body)``, where they follow that body like everything else does.
         """
         if self._topology is None:
-            self._topology = Topology(self._selection, self._generation, self._com_object)
+            self._topology = Topology(
+                self._selection,
+                self._generation,
+                self._com_object,
+                self._target_body,
+                self._resolve_topology_body,
+            )
         return self._topology
+
+    def _resolve_topology_body(self, body: Any) -> Any:
+        """Turns a `body` argument of `part.topology` into a raw CATIA body.
+
+        Args:
+            body: A `Body`, the name of one, or a raw body COM object.
+
+        Returns:
+            The raw `Body` COM object to search inside.
+
+        Raises:
+            BodyNotFoundError: If a name matches no body of this Part.
+            AmbiguousNameError: If a name matches more than one.
+        """
+        if isinstance(body, str):
+            return self.bodies.get(body).com_object
+        return getattr(body, "com_object", body)
 
     @property
     def planes(self) -> PlaneCollection:
@@ -220,7 +247,9 @@ class Part:
                 "or Catia.part_named() instead."
             )
         if self._measurement is None:
-            self._measurement = SolidMeasurement(self._editor, self._main_body)
+            self._measurement = SolidMeasurement(
+                self._editor, self._main_body, self.is_up_to_date
+            )
         return self._measurement
 
     @property
@@ -399,38 +428,62 @@ class Part:
             )
         return result
 
-    def update(self) -> None:
-        """Recompute the Part by calling ``Part.Update()``.
+    def update(self, target: Any = None) -> None:
+        """Recompute the Part, or one object in it, by calling CATIA.
 
         This is the only method in the SDK that rebuilds the model
         (``docs/api-design.md`` section 6). It advances the model generation whether
         it succeeds or fails: the rebuild is when CATIA recomputes topology, and a
         failed rebuild leaves the model in a state the caller must repair.
 
-        After ``PartUpdateError``, the feature that caused it is still in the model,
-        and every later update fails until it is removed. Remove it before doing
-        anything else.
+        With no argument it calls ``Part.Update()`` and rebuilds everything. Given a
+        ``target`` it calls ``Part.UpdateObject(target)``, which rebuilds that object
+        alone: live (probe 42) that made a body whose pad had never been rebuilt up to
+        date and measurable while the rest of the Part stayed as it was, and it did not
+        move the In-Work Object. ``body.update()`` is the same call, spelled from the
+        body.
+
+        **After ``PartUpdateError``, prefer repair over deletion.** The feature that
+        failed is still in the model and every later update fails while the model stays
+        invalid, but that does not mean the feature is the problem. When the failure
+        followed an edit to something that used to work -- a dimension, a parameter, a
+        formula -- put the old value back and update again: live, a pad taken from 30 mm
+        to 1 mm broke a fillet that depended on it, and restoring 30 mm rebuilt the Part
+        with the fillet intact (``docs/conventions.md`` section 1.10). Remove the new
+        feature only when it never built in the first place, or when there is nothing to
+        roll back to.
 
         Does not call Save, and does not touch ``Part.Relations`` or any other
         unverified API.
 
+        Args:
+            target: The object to rebuild: a wrapper such as a ``Body``, or a raw CATIA
+                object. Defaults to the whole Part.
+
         Raises:
-            PartUpdateError: ``Part.Update()`` failed, or is unusable in this release.
+            PartUpdateError: The rebuild failed, or the call is unusable in this release.
         """
+        call = "Part.Update()" if target is None else "Part.UpdateObject()"
+        target_com_object = (
+            None if target is None else getattr(target, "com_object", target)
+        )
         with self._generation.mutation():
             try:
-                self._com_object.Update()
+                if target_com_object is None:
+                    self._com_object.Update()
+                else:
+                    self._com_object.UpdateObject(target_com_object)
             except pywintypes.com_error as error:
                 hresult = hresult_of(error)
                 raise PartUpdateError(
-                    f"Part.Update() failed (HRESULT={format_hresult(hresult)}).", hresult
+                    f"{call} failed (HRESULT={format_hresult(hresult)}).", hresult
                 ) from error
             except (AttributeError, TypeError) as error:
                 # A dispatch member missing or rejecting its arguments is a real
                 # possibility in some releases. Anything broader is left unmapped so
                 # a bug in this library is not reported as a CATIA failure.
                 raise PartUpdateError(
-                    f"Part.Update() is unusable in this release: {type(error).__name__}."
+                    f"{call} is unusable in this release: {type(error).__name__}."
                 ) from error
 
     def __repr__(self) -> str:

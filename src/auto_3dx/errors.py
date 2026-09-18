@@ -161,6 +161,34 @@ class UnsupportedSupportError(ValidationError):
     """Raised when a sketch support string is not one of the supported planes."""
 
 
+class CrossBodyReferenceError(ValidationError):
+    """Raised when a topology reference from one body is used to build in another.
+
+    `Selection.Search("Topology.Edge,all")` returns the edges of every body in the
+    Part in one flat list (live, 2026-09-18: a two-body Part reported both bodies'
+    edges together), so it is easy to take an edge that belongs to one body and hand
+    it to a feature being built in another. CATIA accepts the creation call and fails
+    the next `Part.Update()` instead, leaving a broken feature in the tree.
+
+    Every edge and face therefore carries the body it was found in, read from the
+    reference's owner chain in the model, and a feature refuses one that belongs to a
+    different body before CATIA is called. Nothing was changed: take a snapshot of the
+    body you are building in (`part.topology.edges(body=...)`) and use an edge from it.
+    """
+
+
+class SupportNotUpdatedError(ValidationError):
+    """Raised when a sketch is created on a user plane that has not been rebuilt yet.
+
+    A plane made by `part.planes.create_offset`/`create_angle` is not usable as a
+    sketch support until the Part has been rebuilt: `Sketches.Add` fails with an opaque
+    `E_FAIL` (live, verified repeatedly). CATIA reports the plane as not up to date
+    until then, so the SDK checks that first and refuses with this error instead.
+    Nothing was changed; call `part.update()` after creating the plane, then create the
+    sketch.
+    """
+
+
 class StaleSnapshotError(ValidationError):
     """Raised when an `Edge` or `Face` from a snapshot of an older model is used.
 
@@ -251,6 +279,19 @@ class BodyRemovalError(ConflictError):
     """
 
 
+class TargetNotUpToDateError(ConflictError):
+    """Raised when something is measured that CATIA has not rebuilt yet.
+
+    A body whose features have not been rebuilt has no valid solid: the inertia
+    service accepts it and then fails deep inside with `E_FAIL` (live, 2026-09-18,
+    a pad created in a body that had not been updated). `Part.IsUpToDate(body)` reports
+    that state reliably, so measurement checks it first and says what to do instead of
+    surfacing a COM failure. Nothing was changed and nothing was rebuilt: measurement
+    is read-only. Call `part.update()`, or `body.update()` for one body, and measure
+    again.
+    """
+
+
 class SketchSupportMismatchError(ConflictError):
     """Raised when an existing sketch's plane does not match the requested support.
 
@@ -284,10 +325,18 @@ class AmbiguousNameError(ConflictError):
 
 
 class PartUpdateError(AutomationError):
-    """Raised when Part.Update() fails.
+    """Raised when a rebuild fails.
 
-    The feature that caused the failure is still in the model, and every later
-    update fails until it is removed. Remove it before doing anything else.
+    The model is left as CATIA left it -- nothing is rolled back and nothing is deleted
+    -- and every later update fails while it stays invalid, so repair it before doing
+    anything else.
+
+    **Repair usually means undoing the change, not deleting the feature.** When the
+    failure followed an edit to something that already worked, put the old value back and
+    update again: live, a pad taken from 30 mm to 1 mm broke a fillet that depended on it,
+    and restoring 30 mm rebuilt the Part with the fillet intact. Removing the feature is
+    for the other case, where a newly created feature never built at all, or where there
+    is no previous value to restore.
     """
 
 
