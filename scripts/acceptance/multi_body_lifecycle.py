@@ -41,7 +41,7 @@ def target_part():
         sys.exit(f"Refusing to run: set {PART_ENV_VAR} to the disposable test Part.")
     catia = Catia.attach()
     part = catia.active_part()
-    caption = str(catia.com_object.ActiveWindow.Caption)
+    caption = catia.active_window_title
     if target not in (part.name, caption):
         sys.exit(
             f"Refusing to run: the active Part is {part.name!r} ({caption!r}), not {target!r}."
@@ -51,7 +51,6 @@ def target_part():
 
 def observable_state(part, catia) -> dict:
     summary = part.inspect.summary()
-    selection = catia.active_editor().Selection  # only its count and names are read
     volumes = {}
     for body in part.bodies.list():
         try:
@@ -76,7 +75,6 @@ def observable_state(part, catia) -> dict:
         "topology": [summary.topology.edges, summary.topology.faces]
         if summary.topology
         else None,
-        "selection_count": int(selection.Count),
         "volumes": volumes,
     }
 

@@ -53,7 +53,7 @@ def target_part():
         sys.exit(f"Refusing to run: set {PART_ENV_VAR} to the disposable test Part.")
     catia = Catia.attach()
     part = catia.active_part()
-    caption = str(catia.com_object.ActiveWindow.Caption)
+    caption = catia.active_window_title
     if target not in (part.name, caption):
         sys.exit(
             f"Refusing to run: the active Part is {part.name!r} ({caption!r}), not {target!r}."
