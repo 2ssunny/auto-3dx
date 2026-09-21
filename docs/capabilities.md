@@ -7,9 +7,9 @@
 - 대상 설치본: B428_Cloud
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
   pywin32 312. 두 환경 모두 unit과 live integration을 통과했다(README "검증된 Python 환경")
-- 현재 정적 검증: **1089 unit 통과**
-- 현재 라이브 검증: 2026-09-19 빈 테스트 Part `3D Shape00422558`에서 재실행 기준
-  **62 integration 중 56 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
+- 현재 정적 검증: **1156 unit 통과**
+- 현재 라이브 검증: 2026-09-21 빈 테스트 Part `3D Shape00422558`에서 재실행 기준
+  **68 integration 중 62 통과, 6 skip**(빈 main body나 수동 파라미터가 필요한 테스트). 실행 뒤
   모델이 실행 전 상태와 같았다
 
 ---
@@ -433,11 +433,17 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 스케치 제약 삭제 | 동작 | `sketch.constraints.remove(제약 또는 이름)`. edition 안에서 지우고, 이미 edit() 안이면 그 세션을 재사용한다 |
 | feature 억제/해제 | 동작 | `feature.is_active` / `activate()` / `deactivate()`. 모든 Part Design feature. 억제는 model generation을 올려 옛 topology 스냅샷을 무효화한다 |
 | 활성 창 제목 | 동작 | `catia.active_window_title` (읽기 전용). 창 조작은 하지 않는다 |
+| 면·모서리 측정 사실 | 동작 | `face.geometry`: 평면/원통/unknown, 면적(mm²), 중심, 둘레, 평면 법선(**부호는 바깥 방향이 아님**), 원통 반지름. `edge.geometry`: 직선/원/호/unknown, 길이, 시작·중간·끝점, 방향, 반지름·중심·각도. lazy, 한 번만 측정, stale이면 거부 |
+| 의미 기반 topology 쿼리 | 동작 | `snapshot.query()` → `planar()`/`cylindrical()`/`lines()`/`circular()`/`normal_parallel`/`parallel`/`radius_near`/`area_between`/`length_between`/`nearest`/`extreme`/`largest`/`longest`/`owned_by`. 허용오차 명시, 동률 유지. `one()`은 0개면 `TopologyQueryNoMatchError`, 여러 개면 `TopologyQueryAmbiguousError` |
+| Pad/Pocket 방향 | 동작 | `create_pad/create_pocket(..., direction=...)`, `feature.direction`/`set_direction`/`reverse_direction`. 기본값은 CATIA 그대로(pad along, pocket **against**) — 부피로 확인해야 하는 이유 |
+| 평면 치수 편집 | 동작 | `offset_plane.set_offset(v)`, `angle_plane.set_angle(deg)`. update하면 그 위 스케치와 feature가 따라온다 |
+| 사용 중인 평면 삭제 가드 | 동작 | `part.planes.dependents(plane)`, `remove(plane)`/`remove_geometrical_set()`은 스케치가 쓰면 `ReferenceInUseError`. `force=True`로만 삭제 |
+| update 진단 | 부분 | `part.inspect.update_issues()`, `PartUpdateError.issues`. not-up-to-date·억제된 feature를 나열한다. **원인이 아니라 증상**이다 |
 | 기존 feature 치수 편집 | 동작 | fillet `radius`, chamfer `length1`/`angle`, hole `diameter`/`depth`, shell `internal_thickness`/`external_thickness`, thickness `offset`. setter는 재빌드하지 않는다. 검증 표는 conventions 1.11 |
 | 스케치 요소 재발견 | 동작 | `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`kind`/`radius`(원만). 이름이 지속 identity이고 새 프로세스에서도 제약에 재사용된다 |
 | feature 위치에서 작업 | 동작 | `with part.work_at(feature):` — 그 feature 바로 뒤에 삽입된다. 이전 In-Work Object는 예외가 나도 복원된다 |
 | 파라미터 의존성 조회/보호 | 동작 (formula 한정) | `part.parameters.dependents(name)`, `remove()`가 `ParameterInUseError`로 거부. rule/check/law/program/design table은 미탐지 |
-| 모서리·면 소유 body | 동작 | `edge.owner_body_name`/`owner_feature_name`. 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError` |
+| 모서리·면 소유 body | 동작 | `edge.owner_body_name`/`owner_feature_name`. 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError`. Parent 체인이 body에 닿지 않으면 body 소속으로 찾는다. `owner_feature_name`은 **현재 소유 feature**(필렛 뒤엔 전부 필렛)이지 provenance가 아니다 |
 | body 삭제 | 동작 (가드) | `part.bodies.remove(name, delete_contents=False)`. main body는 거부, 내용이 있으면 `delete_contents=True`가 있어야 지운다. 활성 Part만 |
 | boolean 연산 (Add/Remove/Intersect/Assemble) | 미지원 | 미검증 |
 | body 이름 변경·순서, body 안의 기하 세트 | 미지원 | |
@@ -665,10 +671,30 @@ part.topology.faces(body=body)     -> FaceSnapshot
 # work_in(body) 안에서는 인자 없이도 그 body가 기본 범위다
 
 edge.owner_body_name    # 이 모서리가 속한 body 이름 (CATIA가 모르면 None)
-edge.owner_feature_name # 이 모서리를 만든 feature (Pad, 소비된 Sketch 등)
+edge.owner_feature_name # 지금 CATIA가 보고하는 소유 feature. provenance가 아니다:
+                        # 필렛 뒤에는 솔리드 모서리 전부가 필렛을 가리킨다
+edge.current_owner_feature_name   # 같은 값, 의미가 드러나는 이름
 edge.owner_body         # raw Body COM 객체
 # body의 모서리에는 그 body가 소비한 스케치의 wire 모서리도 들어 있다.
-# fillet은 솔리드 모서리만 받으므로 owner_feature_name으로 고른다.
+
+# 측정 사실 (lazy, 한 번만 측정, stale 핸들은 StaleSnapshotError)
+face.geometry  -> FaceGeometry(surface_type, area_mm2, center_mm, perimeter_mm,
+                               normal, plane_origin_mm, radius_mm)
+edge.geometry  -> EdgeGeometry(curve_type, length_mm, start_mm, mid_mm, end_mm,
+                               direction, radius_mm, center_mm, angle_deg)
+# surface_type: "planar" | "cylindrical" | "unknown"
+# curve_type:   "line" | "circle" | "arc" | "unknown"
+# normal의 부호는 바깥 방향이 아니다 (윗면·아랫면 모두 +Z였다)
+
+# 쿼리 (불변, 단계마다 새 쿼리)
+faces.query().planar().normal_parallel((0, 0, 1)).extreme((0, 0, 1)).one()   # 윗면
+faces.query().cylindrical().radius_near(6.0, 0.01).one()
+edges.query().circular().radius_near(6.0, 0.01).nearest((30, 0, 25)).one()
+edges.query().lines().parallel((0, 0, 1)).nearest((40, 25, 5)).one()
+# of_type / area_between / length_between / largest / smallest / longest / shortest /
+# owned_by(feature_name) / first() / all() / count()
+# one(): 0개 TopologyQueryNoMatchError, 여러 개 TopologyQueryAmbiguousError
+# 스냅샷이 stale이 되면 쿼리도 stale. 새 스냅샷에 같은 쿼리를 다시 돌린다
 ```
 
 ### PartDesign / Pad / Pocket
@@ -677,8 +703,8 @@ edge.owner_body         # raw Body COM 객체
 part.part_design.pads / .pockets / .shafts / .grooves / .mirrors
                 .get_pad(name) / .get_pocket(name) / .get_shaft(name)
                 .get_groove(name) / .get_mirror(name)
-                .create_pad(name, sketch, height, unit="mm")
-                .create_pocket(name, sketch, depth, unit="mm")
+                .create_pad(name, sketch, height, unit="mm", direction=None)
+                .create_pocket(name, sketch, depth, unit="mm", direction=None)
                  .create_shaft(name, sketch)        # 스케치에 축 필요
                  .create_groove(name, sketch)
                  .create_mirror(name, support="YZ")
@@ -686,6 +712,11 @@ part.part_design.pads / .pockets / .shafts / .grooves / .mirrors
                      pad, 2, 1, 60, 60, direction_1="X", direction_2="Y"
                  )
                  .ensure_*(...)   /  .remove_*(name)
+
+# 방향 (DIRECTION_ALONG_SKETCH_NORMAL / DIRECTION_AGAINST_SKETCH_NORMAL)
+# None이면 CATIA 기본: pad along, pocket against. 블록 아래 XY 스케치의 기본 pocket은
+# 아무것도 자르지 않고 update는 성공한다 -> 부피로 확인
+pad.direction / pad.set_direction(d) / pad.reverse_direction()   # pocket도 같음, 재빌드 안 함
 
 # 원형 패턴 (Z축만 검증)
 part.part_design.create_circular_pattern(name, feature, instances, spacing_deg, axis="Z")
@@ -786,12 +817,13 @@ part.planes.create_offset(name, support, offset, orientation=False) -> OffsetPla
            .list()                        -> [OffsetPlane | AnglePlane]  # 모델에서 다시 찾음
            .names()                       -> [str]
            .get(name)                     -> Plane  # 없으면 PlaneNotFoundError
-           .remove(plane)                 # 평면 하나만
-           .remove_geometrical_set()      # 이 컬렉션이 만든 전부(축 점·선 포함)
+           .dependents(plane)             -> [str]  # 이 평면을 쓰는 스케치 (frame 비교)
+           .remove(plane, force=False)    # 스케치가 쓰면 ReferenceInUseError
+           .remove_geometrical_set(force=False)   # 이 컬렉션이 만든 전부(축 점·선 포함)
 
 plane.com_object / plane.name / plane.base_display_name
-offset_plane.offset     # OffsetPlane 전용
-angle_plane.angle       # AnglePlane 전용
+offset_plane.offset / set_offset(mm)     # OffsetPlane 전용, 재빌드 안 함
+angle_plane.angle / set_angle(deg)       # AnglePlane 전용, 재빌드 안 함
 
 # ensure_offset / ensure_angle 없음. support는 "XY"/"YZ"/"ZX" 또는
 # 이 컬렉션이 이미 만든 Plane.
@@ -852,7 +884,8 @@ Auto3dxError
 │   ├── FormulaNotFoundError       이름으로 formula를 못 찾음
 │   ├── ConstraintNotFoundError    이름으로 제약을 못 찾음
 │   ├── BodyNotFoundError          이름으로 body를 못 찾음
-│   └── SketchElementNotFoundError 이름으로 스케치 요소를 못 찾음
+│   ├── SketchElementNotFoundError 이름으로 스케치 요소를 못 찾음
+│   └── TopologyQueryNoMatchError  topology 쿼리의 one()이 아무것도 못 찾음
 ├── ConflictError            모델의 이름·상태가 요청을 막음. 아무것도 만들지 않았다
 │   ├── ParameterAlreadyExistsError  이미 있는 이름으로 생성 시도
 │   ├── SketchAlreadyExistsError     이미 있는 이름으로 생성 시도
@@ -864,9 +897,11 @@ Auto3dxError
 │   ├── TargetNotUpToDateError       재빌드되지 않은 대상 측정
 │   ├── ParameterInUseError          formula가 읽는 파라미터 삭제 시도
 │   ├── BooleanOperationError        boolean이 거부됨, 또는 소비된 body 확인 없이 삭제
+│   ├── TopologyQueryAmbiguousError  topology 쿼리의 one()이 여러 개를 찾음
+│   ├── ReferenceInUseError          스케치가 쓰는 평면 삭제 시도 (force 없이)
 │   └── AmbiguousNameError           같은 이름이 둘 이상
 └── AutomationError          CATIA가 COM 호출을 거부하거나 실패함. hresult 속성을 가짐
-    ├── PartUpdateError            Part.Update() 실패
+    ├── PartUpdateError            Part.Update() 실패. issues에 실패 직후 진단
     └── PartialCreationError       생성은 됐는데 이름 지정이 실패 (모델에 흔적 남음)
 ```
 

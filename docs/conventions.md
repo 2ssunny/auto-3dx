@@ -1572,6 +1572,104 @@ True 그대로이며, 측정은 Phase 1 가드에 걸린다. pad Activity를 되
 `ActivatePosition`으로 개별 인스턴스를 끄는 것, boolean으로 소비된 body를 되살리는 것,
 rect 패턴의 치수 편집은 모두 미검증이다.
 
+### 1.13 기하 사실 측정, 방향, 평면 편집, update 진단 (probe 45, 실측 2026-09-20~21)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**측정 경로는 `MeasurableService`다.**
+
+```text
+Editor.GetService("MeasurableService").GetMeasurable(reference, CATMeasurableType)
+  -> win32com.client.CastTo(item, "MeasurablePlane" | "MeasurableCylinder" | ...)
+CATMeasurableType  Circle=2 Cone=3 Curve=4 Cylinder=5 Line=6 Plane=7 Sphere=9 Surface=10
+                   (probe 31이 넘긴 1은 틀린 값이었다)
+MeasureService.GetMeasureItem의 분류 값  -> 모든 요소에 unknown(5/5/7). 쓰지 않는다
+측정은 모델을 바꾸지 않는다 (generation 불변, update 상태 불변)
+```
+
+**단위가 섞여 있다.**
+
+| getter | 단위 | SDK 변환 |
+|---|---|---|
+| `GetArea` | **m²** | ×1e6 → `area_mm2` |
+| `GetCOfG`, `GetPerimeter`, `GetRadius`, `GetLength`, `GetPoints`, `GetPlane` | mm | 그대로 |
+| `GetAngle` (원) | deg | 그대로 |
+
+**Cast는 실패하지 않는다. 분류는 "어느 typed getter가 답하느냐"로 한다.**
+
+```text
+면  MeasurablePlane.GetPlane([0.0]*9) 성공 -> 평면 (origin, u, v)
+    Cylinder.GetRadius 성공 + Cone.GetAngle 실패 + Sphere.GetCenter 실패 -> 원통
+    Sphere.GetRadius는 원통에서도 성공한다 -> 판별에 쓰지 않는다
+    그 밖 -> "unknown"
+모서리  MeasurableCurve.GetPoints(seed, seed, seed) -> (start, mid, end), 모든 모서리에서 성공
+    Circle.GetRadius/GetCenter/GetAngle 성공 -> 원 (angle 360) 또는 호
+        필렛 호 r=3 angle 90, 구멍 테두리 r=5 angle 360
+    Circle 실패 + |end-start| = length + mid가 정확히 중점 -> 직선
+    Line getter는 원에서도 답하지만 값이 쓰레기다 -> 판별에 쓰지 않는다
+    그 밖 -> "unknown"
+```
+
+**평면 법선(u×v)의 부호는 바깥 방향이 아니다.** 블록의 윗면과 아랫면이 **둘 다 +Z**였다.
+옆면은 우연히 바깥이었다. 그래서 SDK는 법선을 축으로만 쓰고(`normal_parallel`은 부호 무관),
+"윗면"은 `extreme((0, 0, 1))`처럼 중심 위치로 고른다.
+
+**owner는 provenance가 아니다.** 필렛 뒤에는 필렛이 건드리지 않은 모서리까지 솔리드 모서리 전부의
+`Reference.Parent`가 FILLET이었다. 마지막으로 결과를 만든 feature다.
+
+**Parent 체인은 세션에 따라 body에 닿지 않는다.** 2026-09-21 3DEXPERIENCE 재시작 뒤, pad가
+소비한 스케치의 wire edge에서 `Parent`를 따라가니 `Sketch -> AnyObject:CATIABase1481 ->
+AnyObject:CATIABase1482 -> ...`로 Body가 나오지 않았다(probe 42에서는 `Sketch -> Pad -> Shapes ->
+Body`). 솔리드 모서리는 여전히 Body에 닿았다. 그래서 체인이 실패하면 Part의 모든 body의
+`Shapes`/`Sketches`에서 그 feature 이름을 찾아, **정확히 한 body**에만 있을 때 그 body로 본다
+(`_topology_search.BodyIndex`). 둘 이상이면 모른다(None)로 둔다.
+
+**Pad/Pocket 방향은 `DirectionOrientation`이다.**
+
+```text
+0 = 스케치 법선 방향(along), 1 = 반대(against). Pad와 Pocket 모두 같은 의미
+CATIA 기본값    Pad 0, Pocket 1
+블록 아래 XY 스케치의 기본 pocket   -> 제거 0 mm3, update 성공  (zero-effect pocket)
+같은 pocket을 0으로                 -> 제거 502.655 mm3 = 기대값 정확히 일치
+Pad를 1로                           -> 무게중심 z가 -방향으로 이동
+```
+
+**평면 편집.**
+
+```text
+HybridShapePlaneOffset.Offset.Value 40 -> 55, update -> 스케치와 pad가 따라 이동, 새 wrapper가 55를 읽음
+HybridShapePlaneAngle.Angle.Value 30 -> 45, update   -> 스케치 frame 회전
+편집 전후 모두 sketch frame == plane frame
+Sketch에는 support 멤버가 없다 -> 의존 스케치는 frame 비교로 찾는다
+사용 중인 평면 삭제 -> 성공하지만 스케치와 pad가 고아가 되고 다음 update가 실패한다
+```
+
+**update 진단.**
+
+```text
+Part.IsUpToDate(feature), Part.IsInactive(feature)  -> 둘 다 동작
+base pad 억제: pad IsUpToDate True, IsInactive True / 하류 fillet IsUpToDate False
+fillet 반지름 500: fillet만 표시된다
+acceptance, boss 높이 1: RIM_FILLET과 SLOT이 표시되고 boss는 표시되지 않았다
+-> "up to date 아님"은 증상이지 원인이 아니다
+```
+
+**그 밖.**
+
+```text
+Sketch.rectangle()           -> 선 4개, 제약 0개 (구속 헬퍼는 다음 단계)
+원형 패턴 씨앗 pocket 삭제   -> 그 스케치는 함께 지워지지 않는다. 스케치를 따로 지워야 한다
+```
+
+**성능** (18면 + 41모서리 = 59요소, 원형 패턴 12개가 있는 판):
+
+```text
+faces + edges 스냅샷      1.024 s
+59요소 전부 측정          0.588 s (요소당 약 10 ms)
+측정된 스냅샷에서 쿼리 2개  1.1 ms
+새 edge 스냅샷 + 측정 쿼리  0.873 s
+```
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:

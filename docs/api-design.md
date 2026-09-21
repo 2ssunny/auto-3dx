@@ -279,12 +279,13 @@ edges = part.topology.edges()            # every body's edges, in one flat list
 edges = part.topology.edges(body=tray)   # that body's edges only
 edges = part.topology.edges(body=None)   # the whole Part, even inside work_in
 
-edge = [e for e in edges if e.owner_feature_name == "TrayFloor"][0]
+edge = edges.query().lines().parallel((0, 0, 1)).nearest((40, 25, 5)).one()   # section 19
 fillet = part.part_design.create_edge_fillet("F1", edge, 1.0)
 part.update()
 
 faces = part.topology.faces(body=tray)   # a NEW snapshot: the model changed
-part.part_design.create_shell("S1", faces[0], 2.0, 0.0)
+top = faces.query().planar().normal_parallel((0, 0, 1)).extreme((0, 0, 1)).one()
+part.part_design.create_shell("S1", top, 2.0, 0.0)
 ```
 
 **A Part-wide snapshot mixes bodies, so topology is scoped and owned.** `Topology.Edge,all`
@@ -302,11 +303,22 @@ that:
   `Body`. `PartDesign` compares that body with the one it is building in and raises
   `CrossBodyReferenceError` before calling `ShapeFactory`, so the model is untouched. Ownership
   is re-read from the model on every snapshot, never remembered between calls or processes.
+  When the `Parent` walk does not reach a body (live, 2026-09-21: a consumed sketch's chain
+  was generic `AnyObject` wrappers after a session restart), the owner is looked up by name
+  among every body's `Shapes` and `Sketches`, and attributed only when exactly one body holds
+  that name.
   When CATIA reports no owner, the guard allows the call: refusing on a missing answer would
   break valid work. That is the one gap in this guard.
 
 A body's edges include the wire edges of the sketches its features consumed, which a fillet
-cannot use; `owner_feature_name` is how a caller picks a solid edge.
+cannot use; `owner_feature_name` tells them apart.
+
+**`owner_feature_name` is not provenance.** It is the feature CATIA currently reports as the
+reference's owner, which for a solid is the *last* feature that produced the result: after a
+fillet, every edge of the solid (live, probe 45), including the untouched ones, reports the
+fillet. It does not say which feature created an edge. `current_owner_feature_name` is an alias
+whose name says so; new code should prefer it, and should select by geometry (section 19)
+rather than by owner.
 
 - A snapshot covers one body or the whole Part. No verified search scopes it to one feature.
 - `Edge.index` is a position in one snapshot, not an identity.
@@ -328,9 +340,10 @@ CATIA and raises `InactivePartError` (a `SessionError`) otherwise. The guard sta
 per-editor path is verified. Parameters, formulas, creation and measurement do not use the
 selection and are not guarded.
 
-**Persistent semantic identity is not solved.** A future selector may choose an edge or face by
-measurable properties such as geometry type, normal, radius, area or position. No such selector
-is public until the properties it depends on are live-verified and the choice is deterministic.
+**Persistent semantic identity is not solved.** Section 19 chooses an edge or face by measured
+properties inside one snapshot, and the same query re-run on a fresh snapshot finds the element
+again. That is re-identification by description, not a stored identity: nothing survives a
+mutation, and a description that matches two elements is refused rather than guessed.
 
 ---
 
@@ -859,6 +872,137 @@ are safe.
 
 ---
 
+## 19. Geometry facts, semantic queries and safe modification
+
+Status: Implemented (Phase 4). Evidence: probe 45 and `docs/conventions.md` section 1.13.
+
+Phase 4's principle: an agent must be able to say *which* geometry a command acts on before
+it gets more commands. Every selection below is made from measured facts, never from an index
+or a descriptor string.
+
+### 19.1 Measured facts
+
+```python
+face.geometry.surface_type    # "planar" | "cylindrical" | "unknown"
+face.geometry.area_mm2        # mm2 (CATIA answers in m2; converted)
+face.geometry.center_mm       # centre of gravity, mm
+face.geometry.perimeter_mm
+face.geometry.normal          # planar only: unit plane normal, SIGN NOT OUTWARD
+face.geometry.radius_mm       # cylindrical only
+
+edge.geometry.curve_type      # "line" | "circle" | "arc" | "unknown"
+edge.geometry.length_mm, start_mm, mid_mm, end_mm
+edge.geometry.direction       # line only: unit vector start -> end
+edge.geometry.radius_mm, center_mm, angle_deg    # circle / arc only
+```
+
+- `geometry` is **lazy** and measured **once** per handle (`FaceGeometry`/`EdgeGeometry` are
+  frozen dataclasses). It uses the editor's `MeasurableService`, only reads, and does not
+  advance the generation.
+- A stale handle refuses with `StaleSnapshotError` before measuring. A handle built without a
+  measurer (a hand-made wrapper) raises `AutomationError` pointing at `part.topology`.
+- Classification follows which typed getter CATIA answers (conventions 1.13). Anything else is
+  `"unknown"`, never guessed: cones, spheres, splines and B-surfaces are unknown here.
+- **The plane normal's sign is not the outward direction.** Live, the top and the bottom face
+  of a block both reported +Z. Treat it as an axis only.
+
+### 19.2 Queries
+
+```python
+faces = part.topology.faces(body="PartBody")
+top  = faces.query().planar().normal_parallel((0, 0, 1)).extreme((0, 0, 1)).one()
+bore = faces.query().cylindrical().radius_near(6.0, 0.01).one()
+
+edges = part.topology.edges(body="PartBody")
+rim = (edges.query().circular().radius_near(6.0, 0.01)
+       .nearest((30.0, 0.0, 25.0)).one())
+corner = (edges.query().lines().parallel((0, 0, 1))
+          .nearest((40.0, 25.0, 5.0)).one())
+```
+
+| Step | Faces | Edges |
+|---|---|---|
+| type | `of_type`, `planar`, `cylindrical` | `of_type`, `lines`, `circular` (circle or arc) |
+| orientation | `normal_parallel(axis, tolerance_deg=1.0)` (either sign) | `parallel(axis, tolerance_deg=1.0)` |
+| size | `radius_near`, `area_between`, `largest`, `smallest` | `radius_near`, `length_between`, `longest`, `shortest` |
+| position | `nearest(point)`, `extreme(direction)` | same; a circle's position is its centre, other edges their midpoint |
+| owner | `owned_by(feature_name)` (current owner, not provenance) | same |
+| result | `one()`, `first()`, `all()`, `count()`, `len()` | same |
+
+- Queries are immutable: every step returns a new query, so a partial query can be reused.
+- Tolerances are explicit parameters with documented defaults (1 degree, 1e-3 mm, 1e-3 mm2).
+  Rankings keep every element **tied within the tolerance**, so a symmetric part yields a tie
+  instead of an arbitrary winner.
+- `one()` raises `TopologyQueryNoMatchError` (a `NotFoundError`) on zero matches and
+  `TopologyQueryAmbiguousError` (a `ConflictError`) on more than one. Both messages list the
+  query steps and the measured facts of the candidates. `first()` is an explicit decision to
+  accept the first of several.
+- A query holds its snapshot's handles and goes stale with them. After a mutation, take a new
+  snapshot and run the same query again: that is how an element is found again, in the same
+  process or in another one.
+
+### 19.3 Pad and Pocket direction
+
+```python
+from auto_3dx.geometry.part_design import (
+    DIRECTION_ALONG_SKETCH_NORMAL, DIRECTION_AGAINST_SKETCH_NORMAL,
+)
+hole = part.part_design.create_pocket("HOLE", sketch, 20.0,
+                                      direction=DIRECTION_ALONG_SKETCH_NORMAL)
+hole.direction                 # read back from DirectionOrientation
+hole.set_direction(DIRECTION_AGAINST_SKETCH_NORMAL)
+hole.reverse_direction()       # neither rebuilds, like every setter
+```
+
+`direction=None` keeps CATIA's default: **along** the sketch normal for a Pad and **against**
+it for a Pocket. That default is the zero-effect pocket trap. A pocket sketched on XY under a
+block cuts downward into nothing, and `part.update()` still succeeds with the volume unchanged
+(live: 0 mm3 removed; with `ALONG`, exactly the expected 502.655 mm3). Verify every cut by
+volume.
+
+### 19.4 Editable reference planes
+
+```python
+plane = part.planes.get("BOSS_PLANE")
+plane.set_offset(8.0)           # OffsetPlane; AnglePlane has set_angle(degrees)
+part.update()                   # the sketch on it and every feature on that sketch follow
+
+part.planes.dependents(plane)   # ['BOSS_SK'] -- sketches whose frame is this plane
+part.planes.remove(plane)       # ReferenceInUseError while a sketch uses it
+part.planes.remove(plane, force=True)   # explicit; the dependants will fail to update
+```
+
+Deleting a plane that a sketch uses succeeds in CATIA, but orphans the sketch and every feature
+on it, and the next `update()` fails. Sketches expose no support member, so the dependency is
+found by comparing each sketch's frame with the plane's frame. A sketch on a *different* plane
+with an identical frame counts too, which errs on the side of refusing. The same guard covers
+`remove_geometrical_set()`.
+
+### 19.5 Update diagnostics
+
+```python
+part.inspect.update_issues()   # tuple[UpdateIssue]: name, kind, body_name, up_to_date, active
+try:
+    part.update()
+except PartUpdateError as error:
+    error.issues               # the same, read right after the failure; () if unreadable
+```
+
+This asks `Part.IsUpToDate(feature)` and `Part.IsInactive(feature)` for every feature in every
+body. **It lists symptoms, not the cause.** Live, an invalid boss height flagged the fillet and
+the pocket downstream of the boss, not the boss itself. Suppressing a base pad flagged the pad
+as inactive and its dependants as not up to date. Diagnostics say where to look, not what to
+change; the recovery rule of section 6 (undo the edit, then update) is unchanged.
+
+### 19.6 Not covered
+
+- Cone, sphere, torus, spline and B-surface facts; outward normals; face adjacency.
+- A persistent topology identity, or provenance (which feature *created* an edge).
+- Direction for Shaft, Groove and Rib.
+- Constraints from `Sketch.rectangle()`: it draws four lines and creates **no** constraints.
+
+---
+
 ## Migration status
 
 | Item | Section | State |
@@ -899,6 +1043,15 @@ are safe.
 | `sketch.constraints.remove()` | 18 | Done; runs inside a sketch edition |
 | Feature suppression (`is_active`/`activate`/`deactivate`) | 18 | Done; advances the generation |
 | `catia.active_window_title` | 15 | Done; the only window read, so acceptance needs no raw COM |
+| `inspect.summary()` classifies CircPattern and the four boolean kinds | 11 | Done |
+| `Face.geometry` / `Edge.geometry` measured facts | 19 | Done; planar/cylindrical, line/circle/arc |
+| `snapshot.query()` semantic selection, `one()` refuses zero or several | 19 | Done |
+| `current_owner_feature_name`; `owner_feature_name` documented as not provenance | 7 | Done |
+| Owner resolution by body membership when the `Parent` walk fails | 7 | Done |
+| Pad/Pocket `direction` at creation and afterwards | 19 | Done; Pocket default cuts against the sketch normal |
+| `OffsetPlane.set_offset` / `AnglePlane.set_angle` | 19 | Done |
+| Plane removal guard and `planes.dependents()` | 19 | Done; frame equality |
+| `inspect.update_issues()` and `PartUpdateError.issues` | 19 | Done; symptoms, not the cause |
 | `part.bodies`: `list`/`names`/`get`/`main`/`create`/guarded `remove` | 16 | Done |
 | `part.work_in(body)`: sketches and Part Design in a chosen body, In-Work Object restored | 16 | Done |
 | `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |

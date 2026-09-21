@@ -41,7 +41,7 @@ object model이나 설치 경로가 달라질 수 있으므로, 다른 릴리스
 
 | 환경 | Python | pywin32 | 설치 방법 | 단위 테스트 | live 통합 테스트 |
 |---|---|---|---|---|---|
-| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 1089 통과 | 56 통과, 6 skip (2026-09-19, 빈 테스트 Part, 패턴·boolean·억제 포함) |
+| 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install -e .` | 1156 통과 | 62 통과, 6 skip (2026-09-21, 빈 테스트 Part, 기하 사실·쿼리·방향·평면 편집 포함) |
 | 표준 CPython venv | 3.14.2 (python.org, 64-bit) | 312 | `pip install ".[test]"` (editable 아님) | 868 통과 (평면 조회 추가 전) | 실행 안 함 |
 | Conda env | 3.11.16 (Anaconda, 64-bit) | 312 | `pip install -e .` | 868 통과 (평면 조회 추가 전) | 38 통과, 1 skip (그 전) |
 | Conda base | 3.13.9 (Anaconda, 64-bit) | 311 | 설치 없이 `PYTHONPATH=src` | 868 통과 (평면 조회 추가 전) | 개발 중 실행, 통과 |
@@ -577,7 +577,9 @@ tray_edges[0].owner_body_name      # 'LEDTray'
 tray_edges[0].owner_feature_name   # 'TRAY_PAD' 또는 그 body가 소비한 스케치 이름
 
 # body의 모서리에는 그 body가 소비한 스케치의 wire 모서리도 섞여 있습니다.
-# 필렛은 솔리드 모서리만 받으므로 owner_feature_name으로 고릅니다.
+# 필렛은 솔리드 모서리만 받으므로 owner_feature_name으로 가를 수 있습니다.
+# (소유 feature는 지금의 것입니다. 필렛 뒤에는 전부 필렛을 가리키므로, 특정 모서리는
+#  아래 "기하 사실과 의미 기반 선택"의 쿼리로 고르세요.)
 solid = [edge for edge in tray_edges if edge.owner_feature_name == "TRAY_PAD"]
 
 with part.work_in(tray):
@@ -835,6 +837,101 @@ part.update()                    # 부피가 정확히 원래대로 돌아옵니
 (라이브에서 pad를 억제하니 그 위 필렛 때문에 실패했습니다). 이때도 복구는 "되돌리고 다시
 update"입니다. 어떤 억제가 안전한지 SDK가 미리 판단해 주지는 않습니다.
 
+## 기하 사실과 의미 기반 선택
+
+인덱스나 descriptor 문자열이 아니라 **측정한 사실**로 면과 모서리를 고릅니다.
+
+### 측정
+
+```python
+faces = part.topology.faces(body="PartBody")
+face = faces.query().planar().normal_parallel((0, 0, 1)).extreme((0, 0, 1)).one()
+
+face.geometry.surface_type   # 'planar' / 'cylindrical' / 'unknown'
+face.geometry.area_mm2       # mm² (CATIA는 m²로 답해서 변환합니다)
+face.geometry.center_mm      # 무게중심
+face.geometry.normal         # 평면만. 부호는 바깥 방향이 아닙니다
+face.geometry.radius_mm      # 원통만
+
+edge.geometry.curve_type     # 'line' / 'circle' / 'arc' / 'unknown'
+edge.geometry.length_mm, edge.geometry.start_mm, edge.geometry.end_mm
+edge.geometry.direction      # 직선만
+edge.geometry.radius_mm, edge.geometry.center_mm, edge.geometry.angle_deg   # 원·호만
+```
+
+`geometry`는 처음 읽을 때 한 번만 측정합니다(요소당 약 10 ms). 모델이 바뀐 뒤의 옛 핸들은
+측정 전에 `StaleSnapshotError`로 거부합니다. 원뿔, 구, 스플라인은 `'unknown'`으로 둡니다.
+
+**평면 법선의 부호를 믿지 마세요.** 라이브에서 블록의 윗면과 아랫면이 둘 다 +Z를 보고했습니다.
+그래서 "윗면"은 법선이 Z축과 나란한 평면 중 **중심이 가장 높은 것**(`extreme`)으로 고릅니다.
+
+### 쿼리
+
+```python
+bore = faces.query().cylindrical().radius_near(6.0, 0.01).one()
+
+edges = part.topology.edges(body="PartBody")
+rim = edges.query().circular().radius_near(6.0, 0.01).nearest((30.0, 0.0, 25.0)).one()
+corner = edges.query().lines().parallel((0, 0, 1)).nearest((40.0, 25.0, 5.0)).one()
+part.part_design.create_edge_fillet("CORNER", corner, 3.0)
+part.update()
+```
+
+- 단계마다 새 쿼리를 돌려주는 불변 객체입니다. 허용오차는 인자로 명시하고 기본값이 문서화돼
+  있습니다(각도 1도, 길이 1e-3 mm, 면적 1e-3 mm²).
+- `one()`은 0개면 `TopologyQueryNoMatchError`, 여러 개면 `TopologyQueryAmbiguousError`를
+  냅니다. 메시지에 쿼리 단계와 후보의 측정값이 들어갑니다. 허용오차 안의 동률은 동률로 남기므로
+  대칭 형상에서 임의로 하나를 고르지 않습니다.
+- 모델을 바꾼 뒤에는 새 스냅샷을 떠서 **같은 쿼리**를 다시 돌리면 됩니다. 새 프로세스에서도
+  같습니다.
+
+`owner_feature_name`은 그 요소를 **만든** feature가 아니라 CATIA가 지금 보고하는 소유
+feature입니다. 필렛 뒤에는 필렛이 건드리지 않은 모서리까지 모두 필렛을 가리킵니다.
+`current_owner_feature_name`은 그 의미를 이름에 드러낸 별칭입니다.
+
+### Pad/Pocket 방향
+
+```python
+from auto_3dx.geometry.part_design import DIRECTION_ALONG_SKETCH_NORMAL
+
+hole = part.part_design.create_pocket("BORE", sketch, 30.0,
+                                      direction=DIRECTION_ALONG_SKETCH_NORMAL)
+hole.direction            # 'along_sketch_normal'
+hole.reverse_direction()  # 재빌드하지 않습니다
+```
+
+`direction`을 주지 않으면 CATIA 기본값을 그대로 씁니다. pad는 스케치 법선 방향, **pocket은
+반대 방향**입니다. 블록 아래 XY 평면에 그린 기본 pocket은 아무것도 자르지 못했는데 update는
+성공했습니다. 자르는 feature는 부피로 확인하세요.
+
+### 평면 편집과 삭제 가드
+
+```python
+plane = part.planes.get("BOSS_PLANE")
+plane.set_offset(8.0)            # AnglePlane은 set_angle(도)
+part.update()                    # 그 평면의 스케치와 feature가 따라 움직입니다
+
+part.planes.dependents(plane)    # ['BOSS_SK']
+part.planes.remove(plane)        # ReferenceInUseError
+```
+
+스케치가 쓰는 평면은 CATIA에서 지워지기는 하지만, 그 스케치와 feature가 고아가 되어 다음 update가
+실패합니다. 그래서 `force=True` 없이는 지우지 않습니다.
+
+### update 진단
+
+```python
+try:
+    part.update()
+except PartUpdateError as error:
+    for issue in error.issues:   # part.inspect.update_issues()와 같은 내용
+        print(issue.name, issue.kind, issue.up_to_date, issue.active)
+```
+
+up to date가 아니거나 억제된 feature를 나열합니다. **원인이 아니라 증상**입니다. 라이브에서
+boss 높이를 잘못 주자 boss가 아니라 그 아래쪽 필렛과 pocket이 표시됐습니다. 복구 방법은
+그대로 "편집을 되돌리고 다시 update"입니다.
+
 ## 기존 모델 편집
 
 이미 만들어진 Part에 다시 붙어서 고치는 흐름입니다. 파이썬 객체가 남아 있지 않아도 됩니다.
@@ -1046,9 +1143,9 @@ Automation 경로의 PLM Physical Product/3D Shape 생성은 설치 환경에서
 `Shell`/`Thickness`/`Hole`(면 참조)을 제공합니다.
 `Selection.Search('Topology.Edge,all')` / `('Topology.Face,all')` +
 `SelectedElement.Reference`로 모서리·면 `Reference`를 얻는 경로가 뚫렸을 뿐이고,
-그 모서리·면을 재빌드 너머로 다시 지목하는 방법은 없습니다(`part.topology.edges()`
-/ `part.topology.faces()`를 다시 불러야 합니다. body 단위 범위 지정은 되지만 feature
-단위는 안 됩니다). `Draft`처럼 나머지 면 reference
+그 모서리·면을 재빌드 너머로 저장해 두는 identity는 없습니다. 새 스냅샷에 같은 의미 기반
+쿼리(`snapshot.query()`)를 다시 돌려 찾습니다(body 단위 범위 지정은 되지만 feature 단위는
+안 됩니다). `Draft`처럼 나머지 면 reference
 feature는 아직 제공하지 않습니다.
 
 Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더라도
@@ -1056,7 +1153,8 @@ follow-up `Part.Update()`에서 실패한 사례가 있어 검증된 API로 승�
 않았습니다. GSD surface(평면 생성에 쓰는 것 외의 HybridShape), assembly
 constraint, 축 시스템, 평면용 세트 외의 HybridBody도 현재 public wrapper 범위 밖입니다.
 원형 패턴의 X/Y축과 반경 방향 행, 개별 인스턴스 비활성화, 사각 패턴의 치수 편집도
-아직 검증하지 않았습니다.
+아직 검증하지 않았습니다. 원뿔·구·스플라인 면의 측정 사실, 바깥 방향 법선, 면 인접 관계,
+Shaft/Groove/Rib의 방향, `rectangle()`의 자동 구속(지금은 제약 0개)도 아직 없습니다.
 
 ## 테스트
 
@@ -1096,7 +1194,8 @@ python -m pytest tests/integration -m integration -q
 
 `scripts/acceptance/`의 Multi-sections Solid 수명 주기, NACA 날개, Multi-Body A→B 수명 주기,
 다섯 body enclosure, 안전 배치 1(`batch1_safety.py`), 기존 모델 편집(`phase2_editing.py`),
-패턴·boolean·억제(`phase3_operations.py`) 스크립트도 같은 변수로 Part를 골라 공개 API만
+패턴·boolean·억제(`phase3_operations.py`), 기하 사실·쿼리·방향·평면 편집(`phase4_geometry.py`)
+스크립트도 같은 변수로 Part를 골라 공개 API만
 사용합니다. 대상 Part 확인까지 공개 API(`catia.active_window_title`)로 합니다. 빈 main body가
 필요 없는 테스트는 빈 Part에서도 돌고, 이미 solid가 있어야 하는 측정·Mirror 테스트는 skip됩니다.
 
@@ -1109,8 +1208,8 @@ python -m pytest tests/integration -m integration -q
 `.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
 CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
 
-현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 1089개입니다. B428_Cloud
-live 통합 테스트는 62개이고, 2026-09-19 빈 테스트 Part에서 56개 통과, 6개 skip(빈 main body나
+현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 1156개입니다. B428_Cloud
+live 통합 테스트는 68개이고, 2026-09-21 빈 테스트 Part에서 62개 통과, 6개 skip(빈 main body나
 수동 파라미터가 필요한 테스트)이었으며 실행 뒤 Part가 실행 전과 같았습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
 

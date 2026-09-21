@@ -17,7 +17,9 @@
   판정 추가 후), Conda에서 38 통과·1 skip(그 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **1089 unit 통과**. 2026-09-19 Phase 3(원형 패턴·boolean·제약 삭제·feature 억제) 뒤
+- 테스트: **1156 unit 통과**. 2026-09-21 Phase 4(기하 사실 측정·의미 기반 쿼리·방향·평면 편집·update 진단) 뒤
+  빈 테스트 Part `3D Shape00422558`에서 integration **62 통과, 6 skip**, A→B
+  acceptance(`phase4_geometry.py`)와 Phase 1–3 acceptance 재실행 통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **1089 unit 통과**. 2026-09-19 Phase 3(원형 패턴·boolean·제약 삭제·feature 억제) 뒤
   빈 테스트 Part `3D Shape00422558`에서 integration **56 통과, 6 skip**, A→B
   acceptance(`phase3_operations.py`) 통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **1036 unit 통과**. 2026-09-18 Phase 2(기존 모델 편집) 뒤 빈 테스트 Part
   `3D Shape00422558`에서 integration **49 통과, 6 skip**, A→B acceptance(`phase2_editing.py`)
@@ -29,7 +31,7 @@
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
   검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **42 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
-- probe: `scripts/probes/`에 44개 존재
+- probe: `scripts/probes/`에 45개 존재
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -391,6 +393,14 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 30 | 스케치 제약 삭제 | 완료 | `sketch.constraints.remove()`. `Constraints.Remove`는 인덱스를 받고 제약끼리는 COM 동일성 비교가 안 돼서 이름으로 인덱스를 찾는다. edition 안에서 지우고, 이미 edit() 안이면 그 세션을 재사용한다 (conventions 1.12) |
 | 31 | feature 억제 | 완료 | `is_active`/`activate()`/`deactivate()`. Activity는 feature 멤버가 아니라 `Part.Parameters`의 BoolParam이라 Parent 체인으로 Part를 찾아 읽는다. 억제는 generation을 올려 옛 스냅샷을 무효화한다. 상류 feature를 억제하면 update가 실패하고, 되돌리면 복구된다 (conventions 1.12) |
 | 32 | 공개 세션 제목 | 완료 | `catia.active_window_title` 하나만 열어 acceptance 스크립트에서 raw COM을 없앴다. 창 조작은 하지 않는다 |
+| 33 | 검사 분류 수정 | 완료 | `inspect.summary()`가 CircPattern과 boolean 네 종류를 `supported=True`로 보고한다. 처리하는 kind 목록과 `SUPPORTED_FEATURE_KINDS`가 어긋나지 않게 단위 테스트로 묶었다 |
+| 34 | 면·모서리 측정 사실 | 완료 (평면·원통, 직선·원·호) | `MeasurableService`로 면적·중심·법선·반지름·길이·끝점을 읽는다. 면적만 m²라 변환한다. 분류는 typed getter의 응답으로 하고, 원뿔·구·스플라인은 unknown이다. 평면 법선 부호는 바깥 방향이 아니다 (conventions 1.13) |
+| 35 | 의미 기반 topology 쿼리 | 완료 | `snapshot.query()`. 인덱스·descriptor 없이 윗면, 구멍 벽, 구멍 테두리, 수직 모서리를 골랐고, 새 프로세스에서 같은 쿼리로 다시 찾았다. `one()`은 0개·여러 개를 거부한다 |
+| 36 | owner 의미 정정 | 완료 | `owner_feature_name`은 현재 소유 feature다. 필렛 뒤에는 모든 솔리드 모서리가 필렛을 가리킨다. `current_owner_feature_name` 별칭 추가. Parent 체인이 body에 닿지 않는 세션(재시작 뒤 AnyObject 체인)에서는 body 소속으로 찾는다 |
+| 37 | Pad/Pocket 방향 | 완료 | `direction=` 인자와 `set_direction`/`reverse_direction`. CATIA 기본 pocket 방향은 스케치 법선 반대라 XY 아래 블록에서 **0 mm³를 자르고도 update가 성공**했다 |
+| 38 | 평면 편집과 삭제 가드 | 완료 | `set_offset`/`set_angle` 후 update하면 스케치와 feature가 따라온다. 사용 중인 평면 삭제는 CATIA에서 성공하지만 다음 update가 실패하므로 `ReferenceInUseError`로 막고 `force=True`를 요구한다 |
+| 39 | update 진단 | 부분 | `inspect.update_issues()`와 `PartUpdateError.issues`. `IsUpToDate`/`IsInactive`로 증상을 나열할 뿐 원인은 알려주지 않는다(boss 높이 오류에서 boss가 아니라 하류 fillet·pocket이 표시됨) |
+| 40 | 사각형 구속 헬퍼 | 보류 | `rectangle()`은 선 4개에 제약 0개다. 다음 단계에서 다룬다 |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸고, 면은
 probe 37에서 같은 경로로 뚫렸으므로, 남은 것은 "어느 모서리·어느 면인가"를 안정적으로
