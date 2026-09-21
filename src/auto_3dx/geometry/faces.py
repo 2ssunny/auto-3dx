@@ -81,12 +81,21 @@ which both snapshot functions call.
 """
 
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pywintypes
 
-from auto_3dx.geometry._topology_search import owner_of, search_references
+from auto_3dx.errors import AutomationError
+from auto_3dx.geometry._topology_search import (
+    BodyIndex,
+    owner_of,
+    search_references,
+)
+from auto_3dx.geometry.facts import FaceGeometry
 from auto_3dx.geometry.sketch import _wrap_com_error
+
+if TYPE_CHECKING:
+    from auto_3dx.geometry.query import FaceQuery
 
 FACE_SEARCH_QUERY: str = "Topology.Face,all"
 """The only verified `Selection.Search` query that enumerates solid faces.
@@ -137,6 +146,8 @@ class Face:
         owner_body: Any = None,
         owner_body_name: "str | None" = None,
         owner_feature_name: "str | None" = None,
+        measurer: Any = None,
+        model_generation: Any = None,
     ) -> None:
         """Initializes the handle.
 
@@ -153,6 +164,11 @@ class Face:
                 CATIA did not report one, which leaves the ownership guard in
                 `PartDesign` unable to refuse this face.
             owner_body_name: That body's name, for error messages.
+            measurer: The `GeometryMeasurer` that measures this face on demand, from
+                the Part's editor. `None` for a handle built directly, which then cannot
+                report `geometry`.
+            model_generation: The owning Part's `ModelGeneration`, checked before
+                `geometry` is read so a stale handle is refused.
             owner_feature_name: The feature the reference came from, for error
                 messages.
         """
@@ -162,6 +178,9 @@ class Face:
         self._owner_body = owner_body
         self._owner_body_name = owner_body_name
         self._owner_feature_name = owner_feature_name
+        self._measurer = measurer
+        self._model_generation = model_generation
+        self._geometry: Any = None
 
     @property
     def owner_body(self) -> Any:
@@ -180,8 +199,51 @@ class Face:
         return self._owner_body_name
 
     @property
+    def current_owner_feature_name(self) -> "str | None":
+        """str | None: The feature CATIA currently attributes this face to.
+
+        Same value as `owner_feature_name`, under a name that says what it is. It is read
+        from `Reference.Parent`, which names the feature whose RESULT carries the face
+        now -- usually the latest solid feature in the body. It is NOT the feature that
+        first created the face: live, after one fillet every edge of a block reported the
+        fillet as its owner (probe 45). Use it to scope a query to "what the current solid
+        is made of", never as history.
+        """
+        return self._owner_feature_name
+
+    @property
+    def geometry(self) -> FaceGeometry:
+        """FaceGeometry: What this face is, measured through `MeasurableService`.
+
+        Measured on first access and kept for the life of this handle, which is safe only
+        because a handle belongs to one model generation: once anything changes the model,
+        reading it raises `StaleSnapshotError` instead of returning numbers about geometry
+        that may no longer exist.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If this face was not taken through `part.topology` (there is
+                nothing to measure it with), or CATIA cannot measure it.
+        """
+        if self._model_generation is not None:
+            self._model_generation.require_current(self._generation, "face", "part.topology.faces()")
+        if self._measurer is None:
+            raise AutomationError(
+                "This face has no measurer. Take it through part.topology.faces(), which measures "
+                "through the Part's own editor."
+            )
+        if self._geometry is None:
+            self._geometry = self._measurer.face(self._reference)
+        return self._geometry
+
+    @property
     def owner_feature_name(self) -> "str | None":
-        """str | None: The feature this face came from, if known."""
+        """str | None: The feature CATIA currently attributes this face to, if known.
+
+        Read from `Reference.Parent`: the feature whose result carries the face now,
+        usually the latest solid feature in the body. Not historical provenance --
+        see `current_owner_feature_name`.
+        """
         return self._owner_feature_name
 
     @property
@@ -289,6 +351,19 @@ class FaceSnapshot:
         """int: The model generation this snapshot was taken at."""
         return self._generation
 
+    def query(self) -> "FaceQuery":
+        """Starts a geometry query over this snapshot's faces.
+
+        The query is bound to this snapshot, so it inherits its staleness: once the model
+        changes, reading any face's geometry raises `StaleSnapshotError`.
+
+        Returns:
+            A `FaceQuery` over every face in this snapshot.
+        """
+        from auto_3dx.geometry.query import FaceQuery
+
+        return FaceQuery(list(self._faces))
+
     def __len__(self) -> int:
         """Returns how many faces this snapshot found.
 
@@ -338,6 +413,8 @@ def take_face_snapshot(
     generation: int = 0,
     part_com_object: Any = None,
     body: Any = None,
+    measurer: Any = None,
+    model_generation: Any = None,
 ) -> FaceSnapshot:
     """Runs the one verified face search and returns a fresh `FaceSnapshot`.
 
@@ -379,9 +456,10 @@ def take_face_snapshot(
     """
     query = FACE_SEARCH_QUERY if body is None else FACE_SEARCH_QUERY_IN_SELECTION
     references = search_references(selection, query, part_com_object, body)
+    index = BodyIndex(part_com_object) if part_com_object is not None else None
     faces = []
     for position, reference in enumerate(references, start=1):
-        owner_body, owner_body_name, owner_feature_name = owner_of(reference)
+        owner_body, owner_body_name, owner_feature_name = owner_of(reference, index)
         faces.append(
             Face(
                 reference,
@@ -390,6 +468,8 @@ def take_face_snapshot(
                 owner_body,
                 owner_body_name,
                 owner_feature_name,
+                measurer,
+                model_generation,
             )
         )
     return FaceSnapshot(faces, generation)

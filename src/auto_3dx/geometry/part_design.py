@@ -648,6 +648,46 @@ class _FeatureActivity:
                 raise _wrap_com_error(error) from error
 
 
+DIRECTION_ALONG_SKETCH_NORMAL: str = "along_sketch_normal"
+"""A pad or pocket that goes the way its sketch plane's normal points.
+
+`DirectionOrientation = catRegularOrientation (0)`. For a sketch on XY that is +Z: a pad
+went up and a pocket cut into material above XY (probe 45).
+"""
+
+DIRECTION_AGAINST_SKETCH_NORMAL: str = "against_sketch_normal"
+"""A pad or pocket that goes against its sketch plane's normal.
+
+`DirectionOrientation = catInverseOrientation (1)`. For a sketch on XY that is -Z.
+"""
+
+SUPPORTED_DIRECTIONS: "frozenset[str]" = frozenset(
+    {DIRECTION_ALONG_SKETCH_NORMAL, DIRECTION_AGAINST_SKETCH_NORMAL}
+)
+"""The directions `create_pad`/`create_pocket` and `set_direction` accept."""
+
+_ORIENTATION_BY_DIRECTION: "dict[str, int]" = {
+    DIRECTION_ALONG_SKETCH_NORMAL: 0,
+    DIRECTION_AGAINST_SKETCH_NORMAL: 1,
+}
+_DIRECTION_BY_ORIENTATION: "dict[int, str]" = {
+    orientation: direction for direction, orientation in _ORIENTATION_BY_DIRECTION.items()
+}
+
+
+def _validate_direction(direction: Any) -> int:
+    """Turns a public direction into CATIA's `DirectionOrientation`, before any COM call.
+
+    Raises:
+        ParameterTypeError: If `direction` is not one of `SUPPORTED_DIRECTIONS`.
+    """
+    if direction not in _ORIENTATION_BY_DIRECTION:
+        raise ParameterTypeError(
+            f"direction must be one of {sorted(SUPPORTED_DIRECTIONS)}, not {direction!r}."
+        )
+    return _ORIENTATION_BY_DIRECTION[direction]
+
+
 class SketchFeature(_FeatureActivity):
     """Common wrapper for a sketch-based Part Design feature (`Pad`/`Pocket`).
 
@@ -734,6 +774,63 @@ class SketchFeature(_FeatureActivity):
                 self._com_object.FirstLimit.Dimension.Value = coerced
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
+
+    @property
+    def direction(self) -> str:
+        """str: Which way the feature goes relative to its sketch plane's normal.
+
+        `DIRECTION_ALONG_SKETCH_NORMAL` or `DIRECTION_AGAINST_SKETCH_NORMAL`, read from
+        `DirectionOrientation` (0 or 1). The same mapping held live for a Pad and a Pocket
+        (probe 45). Note that CATIA creates a Pocket AGAINST the normal by default and a Pad
+        ALONG it.
+
+        Raises:
+            AutomationError: If CATIA reports an orientation this SDK does not know.
+        """
+        try:
+            orientation = int(self._com_object.DirectionOrientation)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if orientation not in _DIRECTION_BY_ORIENTATION:
+            raise AutomationError(
+                f"DirectionOrientation reported {orientation}, which is not a known direction."
+            )
+        return _DIRECTION_BY_ORIENTATION[orientation]
+
+    def set_direction(self, direction: str) -> None:
+        """Sets which way the feature goes. Does not rebuild; call `part.update()`.
+
+        Live (probe 45): a pocket on XY created with CATIA's default removed nothing from a
+        block above XY; setting it `DIRECTION_ALONG_SKETCH_NORMAL` and updating removed
+        exactly the expected 502.655 mm3.
+
+        Args:
+            direction: `DIRECTION_ALONG_SKETCH_NORMAL` or
+                `DIRECTION_AGAINST_SKETCH_NORMAL`.
+
+        Raises:
+            ParameterTypeError: If `direction` is not one of those.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        orientation = _validate_direction(direction)
+        with self._generation.mutation():
+            try:
+                self._com_object.DirectionOrientation = orientation
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    def reverse_direction(self) -> None:
+        """Flips the feature to the other side of its sketch plane. Does not rebuild.
+
+        Raises:
+            Auto3dxError: If CATIA refuses the read or the write.
+        """
+        current = self.direction
+        self.set_direction(
+            DIRECTION_AGAINST_SKETCH_NORMAL
+            if current == DIRECTION_ALONG_SKETCH_NORMAL
+            else DIRECTION_ALONG_SKETCH_NORMAL
+        )
 
     def sketch(self) -> Sketch:
         """Returns the sketch this feature was built from.
@@ -2092,6 +2189,7 @@ class PartDesign:
         factory_method: str,
         wrapper_cls: type,
         noun: str,
+        direction: "str | None" = None,
     ) -> Any:
         """Creates a new sketch-based feature with a length magnitude (Pad/Pocket).
 
@@ -2130,8 +2228,21 @@ class PartDesign:
         validate_parameter_name(name)
         validate_length_unit(unit)
         coerced = validate_length_value(depth)
+        configure = None
+        if direction is not None:
+            orientation = _validate_direction(direction)
+
+            def configure(feature: Any) -> None:
+                feature.DirectionOrientation = orientation
+
         return self._create_feature(
-            name, kind, factory_method, (sketch.com_object, coerced), wrapper_cls, noun
+            name,
+            kind,
+            factory_method,
+            (sketch.com_object, coerced),
+            wrapper_cls,
+            noun,
+            configure,
         )
 
     def _create_feature(
@@ -2442,6 +2553,7 @@ class PartDesign:
         sketch: Sketch,
         height: float,
         unit: str = MILLIMETRE,
+        direction: "str | None" = None,
     ) -> Pad:
         """Creates a new pad extruding `sketch` by `height`.
 
@@ -2451,6 +2563,9 @@ class PartDesign:
             sketch: The `Sketch` to extrude.
             height: The extrusion height.
             unit: The unit `height` is expressed in. Defaults to `MILLIMETRE`.
+            direction: `DIRECTION_ALONG_SKETCH_NORMAL` or
+                `DIRECTION_AGAINST_SKETCH_NORMAL`, set right after creation. `None` (the
+                default) keeps CATIA's own default, which for a pad is along the normal.
 
         Returns:
             The newly created `Pad`, already renamed to `name`.
@@ -2465,7 +2580,9 @@ class PartDesign:
                 rename failed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        return self._create(name, sketch, height, unit, PAD_KIND, "AddNewPad", Pad, "pad")
+        return self._create(
+            name, sketch, height, unit, PAD_KIND, "AddNewPad", Pad, "pad", direction
+        )
 
     def ensure_pad(
         self,
@@ -2548,6 +2665,7 @@ class PartDesign:
         sketch: Sketch,
         depth: float,
         unit: str = MILLIMETRE,
+        direction: "str | None" = None,
     ) -> Pocket:
         """Creates a new pocket removing material along `sketch` by `depth`.
 
@@ -2557,6 +2675,12 @@ class PartDesign:
             sketch: The `Sketch` to cut along.
             depth: The removal depth.
             unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
+            direction: `DIRECTION_ALONG_SKETCH_NORMAL` or
+                `DIRECTION_AGAINST_SKETCH_NORMAL`, set right after creation. `None` (the
+                default) keeps CATIA's own default, which for a pocket is AGAINST the
+                normal. **A pocket that cuts the wrong way still creates and updates,
+                removing nothing** (probe 45): measure the volume before and after to
+                confirm a cut.
 
         Returns:
             The newly created `Pocket`, already renamed to `name`.
@@ -2573,7 +2697,15 @@ class PartDesign:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         return self._create(
-            name, sketch, depth, unit, POCKET_KIND, "AddNewPocket", Pocket, "pocket"
+            name,
+            sketch,
+            depth,
+            unit,
+            POCKET_KIND,
+            "AddNewPocket",
+            Pocket,
+            "pocket",
+            direction,
         )
 
     def ensure_pocket(

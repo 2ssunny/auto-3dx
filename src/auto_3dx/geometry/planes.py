@@ -93,11 +93,15 @@ from auto_3dx.errors import (
     ParameterTypeError,
     PartialCreationError,
     PlaneNotFoundError,
+    ReferenceInUseError,
     UnsupportedSupportError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
+from auto_3dx.geometry._frames import plane_frame
 from auto_3dx.geometry.sketch import (
+    _AXIS_DATA_SEED,
     SUPPORTED_SKETCH_SUPPORTS,
+    _axis_data_matches,
     _PLANE_ATTRIBUTE_BY_SUPPORT,
     _wrap_com_error,
 )
@@ -363,6 +367,31 @@ class OffsetPlane(Plane):
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    def set_offset(self, offset: float) -> None:
+        """Moves the plane to a new offset from its base plane, in millimetres.
+
+        Live (probe 45): writing `Offset.Value` from 40 to 55 marked the Part out of date,
+        and after `part.update()` the sketch on the plane and the pad built from it moved
+        with it, the sketch's frame still equal to the plane's, and a fresh wrapper read 55.
+
+        This does not rebuild; call `part.update()`. If the new position breaks something
+        downstream, put the old offset back and update again rather than deleting
+        (`docs/api-design.md` section 6).
+
+        Args:
+            offset: The new offset. May be negative or zero, as at creation.
+
+        Raises:
+            ParameterTypeError: If `offset` is not a finite number.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        value = _validate_finite_length(offset, "offset")
+        with self._generation.mutation():
+            try:
+                self._com_object.Offset.Value = value
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
 
 class AnglePlane(Plane):
     """Wraps a raw CATIA `HybridShapePlaneAngle` COM object."""
@@ -386,6 +415,29 @@ class AnglePlane(Plane):
             return self._com_object.Angle.Value
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    def set_angle(self, angle: float) -> None:
+        """Turns the plane to a new angle about its axis, in degrees.
+
+        Live (probe 45): writing `Angle.Value` from 30 to 45 and updating rotated the sketch
+        on the plane to the new frame exactly (its second axis went from (-0.866, 0, 0.5)
+        to (-0.707, 0, 0.707)) and the frames stayed equal.
+
+        This does not rebuild; call `part.update()`.
+
+        Args:
+            angle: The new angle, in the unit `AddNewPlaneAngle` itself expects (degrees).
+
+        Raises:
+            ParameterTypeError: If `angle` is not a finite number.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        value = _validate_finite_angle(angle, "angle")
+        with self._generation.mutation():
+            try:
+                self._com_object.Angle.Value = value
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
 
 _PLANE_WRAPPER_BY_KIND: "dict[str, type[Plane]]" = {
@@ -899,7 +951,78 @@ class PlaneCollection:
             )
         return matches[0]
 
-    def remove(self, plane: Plane) -> None:
+    def _all_sketches(self) -> "list[Any]":
+        """Every sketch in every body of the Part, read from the model."""
+        sketches: list[Any] = []
+        try:
+            bodies = self._part_com_object.Bodies
+            for body_index in range(_FIRST_COM_INDEX, int(bodies.Count) + _FIRST_COM_INDEX):
+                collection = bodies.Item(body_index).Sketches
+                if collection is None:
+                    continue
+                for index in range(
+                    _FIRST_COM_INDEX, int(collection.Count) + _FIRST_COM_INDEX
+                ):
+                    sketches.append(collection.Item(index))
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return sketches
+
+    def dependents(self, plane: Plane) -> "list[str]":
+        """Names the sketches that sit on a plane.
+
+        A sketch has no Automation member naming its support, so the dependency is found by
+        the one signal that was verified live: a sketch built on a plane reports exactly
+        that plane's frame from `GetAbsoluteAxisData` (`docs/conventions.md` 1.7), and it
+        kept reporting it after the plane was moved or turned (probe 45). The comparison is
+        conservative: a sketch that merely has the same frame, on another plane or a face,
+        is also reported, which can only make a removal more cautious, never less.
+
+        Only sketches in bodies are searched, which is where this SDK creates them.
+
+        Args:
+            plane: A plane this collection created.
+
+        Returns:
+            The names of the sketches whose frame equals the plane's, in body order.
+
+        Raises:
+            ParameterTypeError: If `plane` is not a `Plane`.
+            Auto3dxError: If the plane or the sketches cannot be read.
+        """
+        if not isinstance(plane, Plane):
+            raise ParameterTypeError(f"plane must be a Plane, not {type(plane).__name__}.")
+        frame = plane_frame(plane.com_object)
+        if frame is None:
+            return []
+        names: list[str] = []
+        for sketch in self._all_sketches():
+            try:
+                data = tuple(sketch.GetAbsoluteAxisData(list(_AXIS_DATA_SEED)))
+            except (pywintypes.com_error, TypeError):
+                continue
+            if _axis_data_matches(data, frame):
+                try:
+                    names.append(str(sketch.Name))
+                except pywintypes.com_error:
+                    names.append("<unnamed sketch>")
+        return names
+
+    def _refuse_if_in_use(self, planes: "list[Plane]", action: str) -> None:
+        """Raises `ReferenceInUseError` if any of these planes supports a sketch."""
+        blocking: list[str] = []
+        for plane in planes:
+            for sketch in self.dependents(plane):
+                blocking.append(f"{sketch!r} on {plane.name!r}")
+        if blocking:
+            raise ReferenceInUseError(
+                f"Refusing to {action}: {', '.join(blocking)}. CATIA would delete the plane "
+                "anyway and leave those sketches, and every feature built from them, without "
+                "a support -- live, the next Part.Update() failed. Nothing was changed. "
+                "Remove or move the sketches first, or pass force=True to accept that."
+            )
+
+    def remove(self, plane: Plane, *, force: bool = False) -> None:
         """Deletes one plane from the model.
 
         Deletion goes through the editor's `Selection`, the same route
@@ -914,14 +1037,21 @@ class PlaneCollection:
         everything this collection created at once.
 
         This deletes model content. It does not call `Part.Update()`, and it
-        never saves. Any sketch built on the plane is invalidated by its
-        removal, so remove the sketch first.
+        never saves.
+
+        **A plane a sketch sits on is refused.** CATIA deletes it without complaint and
+        leaves the sketch, and everything built from it, without a support: live, the next
+        `Part.Update()` failed (probe 45). `dependents(plane)` names what is in the way.
 
         Args:
             plane: A plane this collection created.
+            force: Delete it even though sketches sit on it, accepting that they and
+                their features will fail to rebuild.
 
         Raises:
             ParameterTypeError: If `plane` is not a `Plane`.
+            ReferenceInUseError: If a sketch sits on it and `force` is `False`. Nothing
+                was changed.
             Auto3dxError: If no editor selection is available, or the
                 deletion failed.
         """
@@ -929,6 +1059,8 @@ class PlaneCollection:
             raise ParameterTypeError(
                 f"plane must be a Plane, not {type(plane).__name__}."
             )
+        if not force:
+            self._refuse_if_in_use([plane], f"remove plane {plane.name!r}")
         # One mutation for the whole operation: the delete and the follow-up
         # in-work-object reclaim are one logical change, so the generation
         # advances exactly once, even if the missing-selection check inside
@@ -939,7 +1071,7 @@ class PlaneCollection:
             )
             self._reclaim_main_body()
 
-    def remove_geometrical_set(self) -> None:
+    def remove_geometrical_set(self, *, force: bool = False) -> None:
         """Deletes the geometrical set holding every plane this collection made.
 
         This is the only way to clear an angled plane's axis points and line,
@@ -954,12 +1086,24 @@ class PlaneCollection:
         Does nothing if the Part has no such set, so it is safe to call in a
         `finally`. It does not call `Part.Update()`, and it never saves.
 
+        It is refused while any plane in the set still has a sketch on it, for the same
+        reason `remove` is.
+
+        Args:
+            force: Delete the set even though sketches sit on its planes.
+
         Raises:
+            ReferenceInUseError: If a sketch sits on one of the set's planes and `force`
+                is `False`. Nothing was changed.
             AmbiguousNameError: If two or more geometrical sets share the name.
             Auto3dxError: If no editor selection is available, or the
                 deletion failed.
         """
         hybrid_body = self._find_geometrical_set()
+        if hybrid_body is not None and not force:
+            self._refuse_if_in_use(
+                self.list(), f"remove the geometrical set {GEOMETRICAL_SET_NAME!r}"
+            )
         if hybrid_body is None:
             # There is no such set in the model, so there is nothing to touch in
             # CATIA and no reason to advance the generation (`docs/api-design.md`

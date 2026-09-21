@@ -30,6 +30,7 @@ from auto_3dx.errors import (
 )
 from auto_3dx.formulas.collection import FormulaCollection
 from auto_3dx.geometry.bodies import Body, BodyCollection
+from auto_3dx.geometry.facts import GeometryMeasurer
 from auto_3dx.geometry.part_design import (
     WORK_AT_FEATURES as _WORK_AT_FEATURES,
 )
@@ -201,6 +202,7 @@ class Part:
                 self._com_object,
                 self._target_body,
                 self._resolve_topology_body,
+                GeometryMeasurer(self._editor) if self._editor is not None else None,
             )
         return self._topology
 
@@ -507,6 +509,21 @@ class Part:
             return "The In-Work Object did not return to the object it was before work_in()."
         return None
 
+    def _issues_after_failure(self) -> "tuple[Any, ...]":
+        """Reads per-feature state after a failed rebuild, without ever raising.
+
+        Attached to `PartUpdateError.issues` so a caller sees what CATIA reported at the
+        moment of failure. A failure to read is swallowed: the rebuild error is the one that
+        matters, and a diagnostic must never replace it.
+
+        Returns:
+            The `UpdateIssue` tuple, or an empty tuple if it could not be read.
+        """
+        try:
+            return self.inspect.update_issues()
+        except (Auto3dxError, pywintypes.com_error, AttributeError, TypeError):
+            return ()
+
     def _main_body(self) -> Any:
         """Returns the raw ``MainBody``, the default thing to measure.
 
@@ -619,9 +636,11 @@ class Part:
                     self._com_object.UpdateObject(target_com_object)
             except pywintypes.com_error as error:
                 hresult = hresult_of(error)
-                raise PartUpdateError(
+                failure = PartUpdateError(
                     f"{call} failed (HRESULT={format_hresult(hresult)}).", hresult
-                ) from error
+                )
+                failure.issues = self._issues_after_failure()
+                raise failure from error
             except (AttributeError, TypeError) as error:
                 # A dispatch member missing or rejecting its arguments is a real
                 # possibility in some releases. Anything broader is left unmapped so

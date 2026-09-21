@@ -59,6 +59,7 @@ class Topology:
         part_com_object: Any = None,
         body_target: Any = None,
         resolve_body: Any = None,
+        measurer: Any = None,
     ) -> None:
         """Initializes the namespace.
 
@@ -77,12 +78,16 @@ class Topology:
                 object. `part.topology` supplies `part.bodies.get` for names; without it,
                 a wrapper is unwrapped through `com_object` and anything else is used
                 as-is.
+            measurer: The `GeometryMeasurer` every edge and face measures itself with,
+                on demand. `part.topology` supplies one built from the Part's editor;
+                without it, `geometry` on a snapshot element raises.
         """
         self._selection = selection
         self._part_com_object = part_com_object
         self._generation = generation if generation is not None else ModelGeneration()
         self._body_target = body_target
         self._resolve_body = resolve_body
+        self._measurer = measurer
 
     def _scope(self, body: Any) -> Any:
         """Returns the raw body a snapshot should be restricted to, or `None`.
@@ -141,6 +146,8 @@ class Topology:
             self._generation.value,
             self._part_com_object,
             self._scope(body),
+            self._measurer,
+            self._generation,
         )
 
     def faces(self, body: Any = WORK_BODY) -> FaceSnapshot:
@@ -175,6 +182,8 @@ class Topology:
             self._generation.value,
             self._part_com_object,
             self._scope(body),
+            self._measurer,
+            self._generation,
         )
 
     def __repr__(self) -> str:

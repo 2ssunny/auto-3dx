@@ -234,6 +234,16 @@ class FormulaNotFoundError(NotFoundError):
     """Raised when a formula cannot be found by name in a Relations collection."""
 
 
+class TopologyQueryNoMatchError(NotFoundError):
+    """Raised when a geometry query that must find something finds nothing.
+
+    `one()` and `first()` on a face or edge query raise this rather than returning
+    `None`, so an agent cannot carry on with a selection that never happened. The message
+    lists the filters that were applied. Loosen a tolerance, check the body scope, or
+    take a fresh snapshot after the model changed.
+    """
+
+
 class SketchElementNotFoundError(NotFoundError):
     """Raised when a sketch holds no geometric element with the requested name.
 
@@ -289,6 +299,28 @@ class BodyRemovalError(ConflictError):
 
     Deleting a body deletes every feature and sketch in it, so a body that still holds
     content is removed only when the caller says so. Nothing was changed.
+    """
+
+
+class TopologyQueryAmbiguousError(ConflictError):
+    """Raised when a geometry query meant to identify one element matches several.
+
+    `one()` never picks among candidates: two faces of equal area, or two edges equally
+    near a point, are reported with their measured values so the query can be narrowed.
+    Rankings such as `largest()` keep every element tied within their tolerance, which is
+    what lets this error see a tie instead of silently choosing whichever came first.
+    """
+
+
+class ReferenceInUseError(ConflictError):
+    """Raised when deleting a reference plane that a sketch still sits on.
+
+    CATIA deletes the plane without complaint, leaving the sketch -- and every feature
+    built from it -- without a support: live, the next `Part.Update()` failed (probe 45).
+    A sketch has no Automation member naming its support, so the dependency is found by
+    the one verified signal: the sketch's absolute axis equals the plane's own frame
+    exactly (`docs/conventions.md` 1.7). Nothing was changed. Remove or move the sketches
+    first, or pass `force=True` to accept breaking them.
     """
 
 
@@ -382,7 +414,16 @@ class PartUpdateError(AutomationError):
     and restoring 30 mm rebuilt the Part with the fillet intact. Removing the feature is
     for the other case, where a newly created feature never built at all, or where there
     is no previous value to restore.
+
+    Attributes:
+        issues: What CATIA reported per feature right after the failure: a tuple of
+            `auto_3dx.inspect.UpdateIssue`, each saying whether a feature is up to date and
+            whether it is suppressed. Empty when nothing could be read. These are
+            observations, not a root cause: the feature reported out of date is where the
+            rebuild stopped, not necessarily what broke it (`part.inspect.update_issues()`).
     """
+
+    issues: tuple = ()
 
 
 class PartialCreationError(AutomationError):

@@ -106,7 +106,67 @@ a longer chain without walking the whole document.
 """
 
 
-def owner_of(reference: Any) -> "tuple[Any, str | None, str | None]":
+class BodyIndex:
+    """Finds the body that holds a feature, by looking in every body of the Part.
+
+    The fallback for `owner_of` when walking `Parent` does not reach a body. Live
+    (2026-09-21, after a session restart) a sketch consumed by a pad reported a `Parent`
+    chain of generic `AnyObject` wrappers that never reached its body, while in probe 42
+    the same chain was `Sketch -> Pad -> Shapes -> Body`. Membership is read from the
+    model: each body's `Shapes` and `Sketches` are listed by name, once per snapshot, and a
+    feature is attributed to a body only when exactly one body holds that name. A name
+    held by two bodies stays unknown rather than guessed.
+    """
+
+    def __init__(self, part_com_object: Any) -> None:
+        """Initializes the index without reading anything yet.
+
+        Args:
+            part_com_object: The raw Part whose bodies are searched.
+        """
+        self._part = part_com_object
+        self._bodies_by_name: "dict[str, list[Any]] | None" = None
+
+    def _build(self) -> "dict[str, list[Any]]":
+        found: dict[str, list[Any]] = {}
+        try:
+            bodies = self._part.Bodies
+            for body_index in range(_FIRST_COM_INDEX, int(bodies.Count) + _FIRST_COM_INDEX):
+                body = bodies.Item(body_index)
+                for collection in (body.Shapes, body.Sketches):
+                    if collection is None:
+                        continue
+                    for index in range(
+                        _FIRST_COM_INDEX, int(collection.Count) + _FIRST_COM_INDEX
+                    ):
+                        name = str(collection.Item(index).Name)
+                        holders = found.setdefault(name, [])
+                        if not any(holder is body for holder in holders):
+                            holders.append(body)
+        except (pywintypes.com_error, AttributeError):
+            return {}
+        return found
+
+    def __call__(self, feature_name: str) -> "tuple[Any, str | None]":
+        """Returns `(body, body_name)` for the one body holding `feature_name`.
+
+        Returns:
+            `(None, None)` when no body, or more than one, holds that name.
+        """
+        if self._bodies_by_name is None:
+            self._bodies_by_name = self._build()
+        holders = self._bodies_by_name.get(feature_name, [])
+        if len(holders) != 1:
+            return None, None
+        try:
+            return holders[0], str(holders[0].Name)
+        except (pywintypes.com_error, AttributeError):
+            return holders[0], None
+
+
+def owner_of(
+    reference: Any, fallback: "BodyIndex | None" = None
+) -> "tuple[Any, str | None, str | None]":
     """Finds the body a topology reference belongs to, by walking its owner chain.
 
     `Reference.Parent` is the feature the edge or face came from -- a `Pad` for a solid
@@ -115,8 +175,13 @@ def owner_of(reference: Any) -> "tuple[Any, str | None, str | None]":
     read from the model, so a snapshot taken in one process owns as much as one taken
     in another; nothing is remembered between them.
 
+    When the walk does not reach a body -- live, a consumed sketch's `Parent` can be a
+    chain of generic wrappers that never gets there -- `fallback` looks the feature up by
+    name in the Part's bodies (`BodyIndex`).
+
     Args:
         reference: One raw `Reference` from a topology search.
+        fallback: A `BodyIndex` of the Part, consulted only when the walk fails.
 
     Returns:
         `(body, body_name, feature_name)`, where `body` is the raw owning `Body` COM
@@ -144,6 +209,10 @@ def owner_of(reference: Any) -> "tuple[Any, str | None, str | None]":
             node = node.Parent
         except (pywintypes.com_error, AttributeError):
             break
+    if fallback is not None and feature_name is not None:
+        body, body_name = fallback(feature_name)
+        if body is not None:
+            return body, body_name, feature_name
     return None, None, feature_name
 
 

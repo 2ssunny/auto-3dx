@@ -40,6 +40,7 @@ CATEGORIES = {
         "PlaneNotFoundError",
         "BodyNotFoundError",
         "SketchElementNotFoundError",
+        "TopologyQueryNoMatchError",
     },
     "ConflictError": {
         "ParameterAlreadyExistsError",
@@ -53,6 +54,8 @@ CATEGORIES = {
         "TargetNotUpToDateError",
         "ParameterInUseError",
         "BooleanOperationError",
+        "TopologyQueryAmbiguousError",
+        "ReferenceInUseError",
     },
     "AutomationError": {
         "PartUpdateError",

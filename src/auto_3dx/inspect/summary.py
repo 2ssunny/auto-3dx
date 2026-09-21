@@ -42,7 +42,9 @@ import pywintypes
 from auto_3dx._com import automation_error
 from auto_3dx.errors import InactivePartError, ValidationError
 from auto_3dx.geometry.part_design import (
+    BOOLEAN_KINDS,
     CHAMFER_KIND,
+    CIRCULAR_PATTERN_KIND,
     EDGE_FILLET_KIND,
     GROOVE_KIND,
     HOLE_KIND,
@@ -81,9 +83,18 @@ SUPPORTED_FEATURE_KINDS: frozenset[str] = frozenset(
         SHELL_KIND,
         THICKNESS_KIND,
         HOLE_KIND,
+        CIRCULAR_PATTERN_KIND,
+        *BOOLEAN_KINDS,
     }
 )
-"""The feature kinds `part.part_design` can create, list and remove."""
+"""The feature kinds `part.part_design` can create, list and remove.
+
+Each entry is the COM wrapper type name CATIA reports for that feature -- the same
+string `part_design` itself filters `Body.Shapes` by -- so a feature is reported as
+supported exactly when the SDK can find it again. Circular patterns and the four
+boolean kinds were missing here after Phase 3 and so were reported as unsupported even
+though `part_design` created them (Discovery Pass 3).
+"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +195,32 @@ class InWorkObjectInfo:
     name: str
     kind: str
     is_main_body: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class UpdateIssue:
+    """One feature that is not up to date, or is suppressed, read from CATIA after the fact.
+
+    These are observations, not a diagnosis. Live (probe 45), suppressing a base pad made
+    `Part.Update()` fail, and the feature reported NOT up to date was the fillet downstream
+    -- the pad itself reported up to date and inactive. So `up_to_date=False` says where
+    CATIA stopped being able to rebuild, and `active=False` points at a common cause; neither
+    says which change broke the model. When the failure followed an invalid dimension, the
+    feature with that dimension was the one reported (a 500 mm fillet radius).
+
+    Attributes:
+        name: The feature's name.
+        kind: The feature's COM wrapper type name, as in `FeatureInfo.kind`.
+        body_name: The body the feature is in.
+        up_to_date: `Part.IsUpToDate(feature)`.
+        active: `not Part.IsInactive(feature)`; `False` when the feature is suppressed.
+    """
+
+    name: str
+    kind: str
+    body_name: str
+    up_to_date: bool
+    active: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -545,6 +582,50 @@ class Inspector:
                 )
             )
         return tuple(features)
+
+    def update_issues(self) -> "tuple[UpdateIssue, ...]":
+        """Lists the features CATIA reports as not up to date or suppressed.
+
+        Every feature in every listed body is asked `Part.IsUpToDate` and `Part.IsInactive`
+        (both verified live, probe 45). A healthy model returns an empty tuple. Read-only.
+
+        Bodies consumed by a boolean are not listed in `Part.Bodies`, so their features are
+        not visited.
+
+        Returns:
+            One `UpdateIssue` per feature that is not up to date or is inactive, in body and
+            tree order. See `UpdateIssue` for what these can and cannot tell.
+
+        Raises:
+            AutomationError: If the bodies or their features cannot be read.
+        """
+        raw = self._part.com_object
+        issues: list[UpdateIssue] = []
+        bodies = _read("Part.Bodies", lambda: raw.Bodies)
+        for body in _items(bodies, "Part.Bodies"):
+            body_name = str(_read("Body.Name", lambda body=body: body.Name))
+            shapes = _read("Body.Shapes", lambda body=body: body.Shapes)
+            if shapes is None:
+                continue
+            for shape in _items(shapes, "Body.Shapes"):
+                up_to_date = bool(
+                    _read("Part.IsUpToDate", lambda shape=shape: raw.IsUpToDate(shape))
+                )
+                inactive = bool(
+                    _read("Part.IsInactive", lambda shape=shape: raw.IsInactive(shape))
+                )
+                if up_to_date and not inactive:
+                    continue
+                issues.append(
+                    UpdateIssue(
+                        name=str(_read("feature Name", lambda shape=shape: shape.Name)),
+                        kind=type(shape).__name__,
+                        body_name=body_name,
+                        up_to_date=up_to_date,
+                        active=not inactive,
+                    )
+                )
+        return tuple(issues)
 
     def __repr__(self) -> str:
         """str: Debug representation; does not contact CATIA."""
