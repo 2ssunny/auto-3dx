@@ -50,10 +50,16 @@ Catia                                    one attached session
     ├── part_design   PartDesign            solid features (Pad, Pocket, Hole, ...)
     ├── topology      Topology              edges() and faces() snapshots
     ├── measurement   SolidMeasurement      volume, area, mass, centre of gravity
-    ├── inspect       Inspector             structured read-only model summary
+    ├── inspect       Inspector             structured read-only model summary; facts(...)
+    ├── bodies        BodyCollection        Body -> features (BodyFeatures), sketches
+    ├── geometry      PartGeometry          semantic finders (section 20)
     ├── is_up_to_date()                     CATIA rebuild status
     └── update()                            the only call that rebuilds the model
 ```
+
+`bodies`, `geometry`, `inspect.facts`, `body.features.*` builders and the `Sketch.rectangle`/
+`centered_rectangle`/`circle` primitives form the intent layer (Level 3, section 20). Everything
+else above is Level 2.
 
 Rules:
 
@@ -372,6 +378,8 @@ Auto3dxError
 │   ├── UnsupportedUnitError
 │   ├── UnsupportedMagnitudeError
 │   ├── UnsupportedSupportError
+│   ├── UnsupportedOperationError   the SDK has no evidence for doing this safely
+│   ├── UnknownFactError            inspect.facts() was asked for an unknown fact
 │   └── StaleSnapshotError
 ├── NotFoundError            no object with that name exists
 │   ├── ParameterNotFoundError
@@ -385,6 +393,7 @@ Auto3dxError
 │   ├── FormulaAlreadyExistsError
 │   ├── FeatureConflictError
 │   ├── SketchSupportMismatchError
+│   ├── FactUnavailableError        a requested fact cannot be read in this model state
 │   └── AmbiguousNameError
 └── AutomationError          CATIA rejected or failed a call
     ├── PartUpdateError
@@ -443,8 +452,10 @@ A wrapper can carry facts a raw object cannot. A `SketchElement` records the ske
 drawn in, so passing an element from one sketch into another sketch's constraint or centre line
 is refused with `ValidationError` before any COM call. Sketches are compared with COM `==`, which
 is live-verified for sketches, not Python `is`. A raw object carries no owner and is not checked.
-`SketchElement` deliberately exposes no geometry reads such as radius or coordinates: their live
-evidence varies by property, so those stay behind `com_object` until each is verified.
+Since Phase 5 a `SketchElement` reads its geometry -- `geometry()` for lines, circles/arcs and
+points, `is_construction` -- because each read was verified one at a time with the edition
+closed (probes 46a-46h, 46ab). The reads are refused while the owning sketch's edition is open:
+the only run that read during an open edition left CATIA unresponsive (section 20).
 
 ---
 
@@ -742,9 +753,9 @@ with sketch.edit() as editor:
 The name CATIA gives an element is its durable identity; a collection index is not. A
 rediscovered `SketchElement` carries its `name`, its `kind` and its owning sketch, so it
 goes straight back into the constraint methods, which still require `edit()`. Reading does
-not. `radius` is exposed for circles because it reads live; line coordinates are not
-exposed at all, because this release's `Line2D` has no coordinate members (conventions
-1.11). A missing name raises `SketchElementNotFoundError` listing what the sketch does
+not. `radius` is exposed for circles because it reads live. Line coordinates were once
+believed unavailable (probe 43 found no coordinate member); `Line2D.GetEndPoints(seed)` reads
+them, and `SketchElement.geometry()` exposes them since Phase 5 (conventions 1.14). A missing name raises `SketchElementNotFoundError` listing what the sketch does
 hold.
 
 **`work_at(feature)` chooses the history position.**
@@ -803,10 +814,15 @@ pattern.set_angular_instances(8)      # no rebuild here either
 part.update()
 ```
 
-Only the Z axis is offered. Passing the XY plane as both rotation centre and rotation axis
-patterned around Z and removed exactly five extra holes' worth of material; the other two
-origin planes rotated about something else that the test geometry could not identify, so
-`axis` accepts `"Z"` and refuses the rest (`UnsupportedSupportError`). The angular row's
+The axis is `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge` (Phase 5). An origin
+plane passed as both rotation centre and rotation axis turns the pattern about its normal:
+probe 46t identified YZ -> X, ZX -> Y and XY -> Z by centre of gravity, correcting the Phase 3
+conclusion that YZ/ZX could not be identified. A cylindrical face turns it about the cylinder's
+axis (46u) and a linear edge about the edge (46v); both get the staleness, same-Part and
+same-body checks of any topology handle and are measured first. `reverse=True` flips the sense
+(46x: about Z the default is clockwise seen from +Z). Anything else is refused
+(`UnsupportedSupportError`). Complete-crown mode was accepted by CATIA and ignored (46w), so it
+is not offered. The angular row's
 `angular_instances` and `angular_spacing_deg` are readable and writable; `radial_instances`
 is read-only, because this SDK always creates one radial row. The seed feature must belong
 to the body being patterned in, checked with the same ownership machinery as topology
@@ -996,10 +1012,68 @@ change; the recovery rule of section 6 (undo the edit, then update) is unchanged
 
 ### 19.6 Not covered
 
-- Cone, sphere, torus, spline and B-surface facts; outward normals; face adjacency.
+- Cone, sphere, torus, spline and B-surface facts; outward normals; face adjacency (Phase 5
+  tried two routes and both failed live; `EdgeQuery.on_plane_of` is a plane fact instead).
 - A persistent topology identity, or provenance (which feature *created* an edge).
 - Direction for Shaft, Groove and Rib.
-- Constraints from `Sketch.rectangle()`: it draws four lines and creates **no** constraints.
+- A fully constrained rectangle. `SketchEditor.rectangle()` still draws four lines and no
+  constraints; the Phase 5 `Sketch.rectangle(constraints=...)` adds orientation and dimension
+  constraints but never corner coincidence (section 20).
+
+---
+
+## 20. The intent layer (Phase 5)
+
+Status: Implemented, pinned by `tests/unit/test_phase5_highlevel.py`,
+`tests/unit/test_highlevel_boundary.py`, `test_phase5_low_level.py`,
+`test_phase5_sketch_reads.py`, and live by `tests/integration/test_phase5_live.py`.
+Design, audit and evidence ledger: `docs/phase5-api-design.md`.
+
+### 20.1 Three levels
+
+```text
+Level 3  auto_3dx.highlevel   body.features.pad(...), sketch.rectangle(...),
+                              part.geometry.top_face(), part.inspect.facts(...)
+Level 2  public SDK           everything in sections 2-19
+Level 1  internals            private helpers, _com, _generation, transport
+```
+
+**Level 3 composes Level 2 and nothing else.** Every intent method resolves to Level 2 calls a
+script could write -- `create_pad` inside `part.work_in(body)`, `topology.faces().query()...
+one()`, one `measurement.measure()` -- so validation, staleness, cross-body checks, naming and
+errors are Level 2's, not a copy. `tests/unit/test_highlevel_boundary.py` parses the package
+and fails if it imports a COM library, reads `com_object`, touches a CATIA-style member,
+reaches into another object's private state, or calls `update()`/`summary()`.
+
+### 20.2 Rules the intent layer keeps
+
+- **No rebuild.** `part.update()` stays explicit (section 6).
+- **No guessing.** A direction it cannot determine (`"into_material"` on a sketch not created
+  on a face, `"+X"` on a sketch whose normal is not X) raises `UnsupportedOperationError`.
+  `"forward"`/`"reverse"` are not accepted. A hole only drills into the material.
+- **Finders are queries.** `part.geometry` takes one fresh snapshot per call and returns
+  `one()`; "top" is planar + normal parallel to the axis + extreme centre (section 19).
+- **Targeted reads.** `part.inspect.facts(...)` reads only what is named and never searches
+  topology; a fact the model state does not allow is reported, not raised.
+- **Honest primitives.** `Sketch.rectangle(constraints=)` offers `"none"`, `"orientation"`,
+  `"dimensioned"`; no option claims full constraint.
+- `Body.features` is still the `FeatureInfo` tuple (a subclass carrying the builders).
+
+### 20.3 Session state that leaks between holes
+
+CATIA gives a new hole the previous hole's settings: bottom type, limit mode and diameter
+(probe 46q; live, a legacy `create_hole(face, 5)` came out through-all after a through-all hole).
+`create_hole` therefore always writes the limit (a depth means blind), and the intent layer
+writes diameter, bottom and limit. Diameter and bottom of a Level 2 call without them remain
+whatever the session carries. The live Phase 5 module ends by leaving the session's hole
+settings at a fresh session's (12 mm, V, blind).
+
+### 20.4 Evidence discipline
+
+The first Phase 5 probe batched many unknown calls and left CATIA unresponsive, so every
+Phase 5 capability was established by a micro-probe answering one question with flushed
+markers around each Automation call (`scripts/probes/_micro.py`). A member present in the type
+library is not evidence; see the ledger in `docs/phase5-api-design.md` section 3.
 
 ---
 
@@ -1057,3 +1131,11 @@ change; the recovery rule of section 6 (undo the edit, then update) is unchanged
 | `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |
 | Selection-based operations refuse a non-active Part (`InactivePartError`) | 7 | Done; per-editor search unsolved |
 | File export | 12 | Probed: unavailable for PLM-backed documents |
+| Sketch element geometry, `Sketch.frame()`/`geometry()`, `Constraint.mode`/`element_name` | 9, 20 | Done; refused inside an open edition |
+| Sketch on a planar face (`sketches.create(support=face)`), `body.sketches` | 20 | Done; planar faces of the target body only |
+| Hole origin, diameter, flat/V bottom, blind/through-all | 20 | Done; the limit is always written |
+| Circular pattern about X, Y, Z, a cylindrical face or a linear edge; `reverse` | 18 | Done; crown mode not offered |
+| `EdgeQuery.on_plane_of` | 19, 20 | Done; a plane fact, not adjacency |
+| Property setters on feature and plane dimensions | 17, 20 | Done; each calls its `set_*` |
+| `auto_3dx.highlevel`: `BodyFeatures`, profiles, `PartGeometry`, `inspect.facts` | 20 | Done; AST-enforced Level 2 only |
+| Face/edge adjacency | 19 | Not available: two routes failed live |

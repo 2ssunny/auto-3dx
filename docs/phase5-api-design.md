@@ -1,9 +1,9 @@
 # Phase 5 API design: a thin intent layer on a verified low-level SDK
 
-Status: **design + evidence**. Sections 1-3 describe what exists today and what was measured
-live. Sections 4-8 describe what Phase 5 adds; each item is marked with the evidence it rests
-on. Nothing in sections 4-8 is implemented by this document; the migration table at the end is
-updated as work lands.
+Status: **implemented and live-validated** (2026-09-27). Sections 1-3 are the audit of the
+pre-Phase-5 API and the evidence gathered live. Sections 4-8 were written as the design before
+any code; they now describe what is implemented, and section 9 records the live results. The
+architectural rules that outlive this phase are in `docs/api-design.md` section 20.
 
 Baseline: auto-3dx `6a74d07` (develop, version 0.1.0, 1156 unit tests), benchmark
 `auto-3dx-benchmark` v1.0.0 (`4cb69a7`, read only). Live target: the disposable Part
@@ -242,8 +242,13 @@ hole.set_limit("blind", depth=8.0)       # blind needs a depth: CATIA overwrote 
 hole.bottom, hole.set_bottom("v")        # "flat" | "v"
 ```
 
-- Without `origin` the verified `AddNewHole(face, depth)` path runs exactly as before.
-- `bottom=None` leaves CATIA's carried-over default (46q) and says so in the docstring.
+- Without `origin` the verified `AddNewHole(face, depth)` path runs as before, except that the
+  limit is now always written (blind when a depth is given). CATIA carries the previous hole's
+  limit over: after the Phase 5 live stages made through-all holes, the unchanged Phase 2 test
+  `create_hole(face, 5)` came out through-all with depth 30. Writing the limit keeps the call
+  meaning what it says; `LimitMode` writes are verified (46n, 46s).
+- `diameter=None`/`bottom=None` leave CATIA's carried-over values (46q) and the docstring says so;
+  the intent API always passes them.
 - The drilling direction is CATIA's default, verified into the material on two faces; no
   reversal is offered (`Reverse()` is TYPELIB_ONLY).
 
@@ -415,15 +420,36 @@ agent tool schemas and the skill (deferred by scope).
 
 ---
 
+## 9. Live results (2026-09-27, `3D Shape00422558`)
+
+| Run | Result |
+|---|---|
+| Micro-probes 46a-46z2, 46aa-46ae, 46af | 29 questions + 1 maintenance script; none hung; baseline re-verified after each |
+| `test_phase5_live.py`, stage by stage | 11/11 passed, CATIA responsive and the Part blank after each stage |
+| Full live suite (Phases 1-5), before the hole fix | 72 passed, 1 failed (legacy hole inherited through-all), 6 skipped |
+| Full live suite, after the hole fix | **73 passed, 6 skipped** (the same six environment skips as before Phase 5) |
+| `examples/build_part.py` (Phase 1 example) | unchanged behaviour; cleaned up |
+| `examples/intent_api.py` | volume 23031.68 mm3 = the hand calculation; cleaned up |
+| `inspect.facts("volume", "up_to_date", ...)` | 0.038 s, against 1-3.5 s for `inspect.summary()` |
+
+Two facts came out of the live runs rather than the probes: a circular pattern whose seed is a
+Hole works (stage 10: exactly six, then four holes' worth of material), and deleting a pad whose
+face had served as a pattern axis leaves its sketch behind (46u cleanup). After the runs the
+session's carried-over hole settings were put back to a fresh session's (Ø12, V, blind) and
+confirmed on a new hole (`46af`).
+
+---
+
 ## Migration status
 
 | Item | Section | State |
 |---|---|---|
 | Probe 46 series and `_micro.py` scaffolding | 3 | Done |
-| Sketch geometry reads, `frame()`, `geometry()` | 4.1 | Planned |
-| Sketch on a planar face | 4.2 | Planned |
-| Hole origin / diameter / bottom / through-all | 4.3 | Planned |
-| Circular pattern X/Y, face and edge axes, `reverse` | 4.4 | Planned |
-| `EdgeQuery.on_plane_of` | 4.5 | Planned |
-| Property setters | 4.6 | Planned |
-| `auto_3dx.highlevel`: `BodyFeatures`, profiles, finders, facts | 5 | Planned |
+| Sketch geometry reads, `frame()`, `geometry()` | 4.1 | Done |
+| Sketch on a planar face | 4.2 | Done |
+| Hole origin / diameter / bottom / through-all | 4.3 | Done; the limit is always written |
+| Circular pattern X/Y, face and edge axes, `reverse` | 4.4 | Done |
+| `EdgeQuery.on_plane_of` | 4.5 | Done |
+| Property setters | 4.6 | Done |
+| `auto_3dx.highlevel`: `BodyFeatures`, profiles, finders, facts | 5 | Done |
+| Face/edge adjacency | 8 | Not available (two routes failed live) |

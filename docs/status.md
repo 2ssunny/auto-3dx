@@ -17,7 +17,10 @@
   판정 추가 후), Conda에서 38 통과·1 skip(그 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **1156 unit 통과**. 2026-09-21 Phase 4(기하 사실 측정·의미 기반 쿼리·방향·평면 편집·update 진단) 뒤
+- 테스트: **1266 unit 통과**. 2026-09-27 Phase 5(스케치 기하 읽기·평면 면 위 스케치·Hole 위치/관통·
+  원형 패턴 X/Y/원통면/모서리 축·의도 기반 상위 API) 뒤 빈 테스트 Part `3D Shape00422558`에서 integration
+  **73 통과, 6 skip**(새 Phase 5 스테이지 11개 포함), 예제 두 개 live 실행, 실행 뒤 기준 상태와 같음.
+  micro-probe 29개(`scripts/probes/46*`)가 근거다. 그 전 기록: **1156 unit 통과**. 2026-09-21 Phase 4(기하 사실 측정·의미 기반 쿼리·방향·평면 편집·update 진단) 뒤
   빈 테스트 Part `3D Shape00422558`에서 integration **62 통과, 6 skip**, A→B
   acceptance(`phase4_geometry.py`)와 Phase 1–3 acceptance 재실행 통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **1089 unit 통과**. 2026-09-19 Phase 3(원형 패턴·boolean·제약 삭제·feature 억제) 뒤
   빈 테스트 Part `3D Shape00422558`에서 integration **56 통과, 6 skip**, A→B
@@ -31,7 +34,7 @@
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
   검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **42 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
-- probe: `scripts/probes/`에 45개 존재
+- probe: `scripts/probes/`에 45개 + Phase 5 micro-probe 29개(`46*`, 공통 틀 `_micro.py`)
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -385,10 +388,10 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 22 | 평면 support 사전 조건 | 완료 | 재빌드 안 된 평면 위 스케치는 `SupportNotUpdatedError`로 거부한다. 전에는 opaque E_FAIL이었다 |
 | 23 | PartUpdateError 복구 정책 | 완료 (문서·안내) | 정상이던 값을 바꿔 실패한 경우는 값을 되돌리고 다시 update하는 것이 먼저다. 삭제는 애초에 만들어지지 않은 feature나 되돌릴 값이 없을 때만. live로 pad 30→1→30 복구 확인 (conventions 1.10) |
 | 24 | 기존 feature 치수 편집 | 완료 | fillet `radius`, chamfer `length1`/`angle`, hole `diameter`/`depth`, shell 두 두께, thickness `offset`. 읽기·쓰기·update·형상 변화·새 wrapper·새 프로세스까지 확인한 것만 공개했다. setter는 재빌드하지 않고, 실패한 update는 값을 되돌려 복구한다 (conventions 1.11) |
-| 25 | 스케치 요소 재발견 | 완료 | `sketch.get_element(name)`/`elements()`와 `SketchElement.name`/`radius`. CATIA 이름이 지속 identity이고, 새 프로세스에서 재발견한 선으로 새 제약을 만들고 update까지 성공했다. 선 좌표는 이 릴리스의 `Line2D`가 노출하지 않는다 (conventions 1.11) |
+| 25 | 스케치 요소 재발견 | 완료 | `sketch.get_element(name)`/`elements()`와 `SketchElement.name`/`radius`. CATIA 이름이 지속 identity이고, 새 프로세스에서 재발견한 선으로 새 제약을 만들고 update까지 성공했다. 선 좌표는 Phase 5에서 `geometry()`로 열렸다(46번) (conventions 1.11, 1.14) |
 | 26 | feature 단위 작업 위치 | 완료 | `part.work_at(feature)`. 라이브에서 `PAD, FILLET` 트리의 `PAD`에서 작업하니 새 pad가 `PAD, NEW, FILLET`로 **바로 뒤에 삽입**됐다. 트리 재정렬이 아니다. 이전 In-Work Object는 정상·예외 모두 복원된다 (conventions 1.11) |
 | 27 | 파라미터 의존성 보호 | 완료 (formula 한정) | `Formula.GetInParameter`로 각 formula의 입력을 읽어 `parameters.dependents(name)`을 만들고, 참조 중인 파라미터 삭제는 `ParameterInUseError`로 거부한다. 전에는 CATIA가 formula를 `deleted_*`로 고쳐 쓰고 Part가 not-up-to-date가 됐다. rule/check/law/program/design table은 미탐지 (conventions 1.11) |
-| 28 | 원형 패턴 | 완료 (Z축) | `create_circular_pattern`과 `CircularPattern.angular_instances`/`angular_spacing_deg`. 디스크에서 6개 패턴이 구멍 5개 분량을 정확히 제거했고, 8개로 바꾸면 7개 분량이 됐다. 원점 XY 평면을 회전 중심·축으로 주면 Z축이다. YZ/ZX는 Z가 아니었지만 어느 축인지 확정 못 해 거부한다 (conventions 1.12) |
+| 28 | 원형 패턴 | 완료 | `create_circular_pattern`과 `CircularPattern.angular_instances`/`angular_spacing_deg`. 디스크에서 6개 패턴이 구멍 5개 분량을 정확히 제거했고, 8개로 바꾸면 7개 분량이 됐다. Phase 5에서 X/Y축, 원통면·직선 모서리 축, `reverse`가 열렸다(49번) (conventions 1.12, 1.14) |
 | 29 | body boolean 네 가지 | 완료 | remove/add/intersect/assemble 모두 부피로 검증. 대상은 work_in 중인 body, tool body는 소비되어 `part.bodies`에서 사라진다. `tool_body_name`은 feature에서 읽는다. **삭제하면 소비된 body까지 사라지고 되살릴 방법이 없어** `delete_consumed_body=True`를 요구한다 (conventions 1.12) |
 | 30 | 스케치 제약 삭제 | 완료 | `sketch.constraints.remove()`. `Constraints.Remove`는 인덱스를 받고 제약끼리는 COM 동일성 비교가 안 돼서 이름으로 인덱스를 찾는다. edition 안에서 지우고, 이미 edit() 안이면 그 세션을 재사용한다 (conventions 1.12) |
 | 31 | feature 억제 | 완료 | `is_active`/`activate()`/`deactivate()`. Activity는 feature 멤버가 아니라 `Part.Parameters`의 BoolParam이라 Parent 체인으로 Part를 찾아 읽는다. 억제는 generation을 올려 옛 스냅샷을 무효화한다. 상류 feature를 억제하면 update가 실패하고, 되돌리면 복구된다 (conventions 1.12) |
@@ -400,7 +403,16 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 37 | Pad/Pocket 방향 | 완료 | `direction=` 인자와 `set_direction`/`reverse_direction`. CATIA 기본 pocket 방향은 스케치 법선 반대라 XY 아래 블록에서 **0 mm³를 자르고도 update가 성공**했다 |
 | 38 | 평면 편집과 삭제 가드 | 완료 | `set_offset`/`set_angle` 후 update하면 스케치와 feature가 따라온다. 사용 중인 평면 삭제는 CATIA에서 성공하지만 다음 update가 실패하므로 `ReferenceInUseError`로 막고 `force=True`를 요구한다 |
 | 39 | update 진단 | 부분 | `inspect.update_issues()`와 `PartUpdateError.issues`. `IsUpToDate`/`IsInactive`로 증상을 나열할 뿐 원인은 알려주지 않는다(boss 높이 오류에서 boss가 아니라 하류 fillet·pocket이 표시됨) |
-| 40 | 사각형 구속 헬퍼 | 보류 | `rectangle()`은 선 4개에 제약 0개다. 다음 단계에서 다룬다 |
+| 40 | 사각형 구속 헬퍼 | 완료 (부분) | `Sketch.rectangle(constraints="none"|"orientation"|"dimensioned")`. 수평·수직 4개와 가로·세로 길이 2개까지 실측(46ad/46ae). 모서리 일치 구속은 근거가 없어 완전 구속 옵션은 없다. `SketchEditor.rectangle()`은 그대로 제약 0개 |
+| 41 | Phase 5 탐사 방식 | 완료 | 단일 probe 46이 열린 스케치 편집 중 읽기와 제약 여러 개를 섞다가 3DEXPERIENCE를 응답 없음으로 만들었다(호출 미특정, 사용자가 재시작). 이후 질문 하나당 micro-probe 하나, 모든 Automation 호출 앞뒤 flush 마커, 호출마다 정리·기준 재확인. 29개 모두 멈추지 않았다 (conventions 1.14) |
+| 42 | 스케치 기하 읽기 | 완료 | `SketchElement.geometry()`(선 끝점, 원/호 중심·반지름·닫힘, 점), `is_construction`, `Sketch.frame()`/`geometry()`, `Constraint.mode`/`element_name()`. 편집을 닫은 뒤만 읽고 열린 편집 중에는 COM 전에 거부 (46a-46h, 46ab, 46ac) |
+| 43 | 평면 면 위 스케치 | 완료 | `sketches.create(name, support=<평면 Face>)`, `body.sketches`. stale·다른 Part·다른 body·비평면 면은 COM 전에 거부. 면 스케치 법선은 윗면·아랫면·옆면·포켓 바닥 모두 재료 바깥, pocket 기본 방향이 재료 안쪽을 자르고, pad 높이가 바뀌면 스케치가 면을 따라간다 (46i-46l, 46aa) |
+| 44 | Hole 위치와 한계 | 완료 | `create_hole(origin=, diameter=, limit="blind"|"through_all", bottom="flat"|"v")`, `Hole.origin/direction/limit/set_limit/bottom/set_bottom`. 관통으로 가면 CATIA가 깊이를 다시 쓰므로 blind로 돌아갈 때 깊이를 요구한다. 방향 뒤집기·나사·카운터보어는 미검증 (46m-46s, 46p) |
+| 45 | Hole 설정의 세션 이월 | 완료 (대응) | 새 Hole은 직전 Hole의 바닥·limit·지름을 물려받는다. Phase 5 live 뒤 기존 Phase 2 테스트의 `create_hole(face, 5)`가 관통(깊이 30)이 되어 실패한 것으로 발견했다. `create_hole`이 limit을 항상 쓰도록 고쳤고, `46af` 스크립트와 live 모듈 종료 fixture가 세션 기본값을 (12, V, blind)로 되돌린다 (46q, conventions 1.14) |
+| 46 | 원형 패턴 축 | 완료 | `axis="X"|"Y"|"Z"`, 원통 `Face`, 직선 `Edge`, `reverse=`. 무게중심·부피로 확인. Hole 씨앗 패턴도 live로 확인. complete crown은 CATIA가 무시해서 제공하지 않는다 (46t-46x) |
+| 47 | 면·모서리 인접 | 미지원 | 면 범위 selection 검색은 0개, `DistanceMinToPoint`는 호출 형식이 맞지 않았다. 대신 `EdgeQuery.on_plane_of(face)`(평면 위에 놓인 모서리, 인접 주장 없음) (46y, 46z) |
+| 48 | 의도 기반 상위 API | 완료 | `auto_3dx.highlevel`: `body.features.pad/pocket/hole/fillet/chamfer/circular_pattern`, `sketch.rectangle/centered_rectangle/circle`, `part.geometry.top_face/find_*`, `part.inspect.facts(...)`, 속성 setter. 모두 Level 2 공개 API의 조합이고 AST 테스트가 COM 접근을 막는다. `body.features`는 여전히 `FeatureInfo` 튜플이다 (api-design 20절, `docs/phase5-api-design.md`) |
+| 49 | 선택적 검사 | 완료 | `inspect.facts("volume", "up_to_date", ...)` live 0.038 s (`summary()`는 1-3.5 s). topology 검색을 하지 않는다 |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸고, 면은
 probe 37에서 같은 경로로 뚫렸으므로, 남은 것은 "어느 모서리·어느 면인가"를 안정적으로

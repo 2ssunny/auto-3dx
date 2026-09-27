@@ -97,6 +97,70 @@ print(part.parameters.user_names())
 연결하지 못하면 `CatiaConnectionError`, `Com3dxNotFoundError` 같은
 `Auto3dxError` 계열 예외를 발생시킵니다.
 
+## 의도 기반 API (Phase 5)
+
+엔지니어링 의도로 쓰는 얇은 상위 API입니다. 모든 호출은 아래 절들의 저수준 공개 API
+(`part.sketches`, `part.part_design`, `part.topology`, `part.measurement`)를 조합할 뿐이고,
+COM을 직접 부르지 않습니다. 표현할 수 없는 작업은 언제든 저수준 API로 내려가면 됩니다.
+어떤 것도 스스로 재빌드하지 않으니 `part.update()`는 계속 직접 부릅니다.
+
+```python
+catia = Catia.attach()
+part = catia.part_named("3D Shape00422558")
+body = part.bodies.main                       # property (예전 그대로)
+
+sketch = part.sketches.create("BaseProfile", support="XY")
+sketch.centered_rectangle(width=60, height=40)            # edit() 한 번에 선 4개
+base = body.features.pad("Base", profile=sketch, length=20, direction="+Z")
+part.update()
+
+part.inspect.facts("volume", "up_to_date")    # topology 검색 없이 필요한 것만 읽기
+# PartFacts(values={'volume': 48000.0, 'up_to_date': True}, unavailable={})
+
+top = part.geometry.top_face()                # planar + 법선이 Z와 평행 + 가장 높은 것
+cut = part.sketches.create("PocketProfile", support=top)   # 평면 면 위의 스케치
+cut.circle(center=cut.frame().to_local((10, 5, 20)), radius=3)
+body.features.pocket("Pocket", profile=cut, depth=4, direction="into_material")
+
+top = part.geometry.top_face()                # 모델이 바뀌면 다시 찾습니다
+hole = body.features.hole("MountingHole", support=top, center=(20, 15),
+                          diameter=6, limit="through_all")
+body.features.circular_pattern("Bolts", feature=hole, instances=6,
+                               total_angle_deg=360, axis="Z")
+part.update()
+
+edge = part.geometry.find_edge(kind="line", parallel="Z", nearest=(30, 20, 10))
+fillet = body.features.fillet("Round", edges=[edge], radius=3)
+part.update()
+fillet.radius = 4                             # = set_radius(4). 재빌드하지 않습니다
+part.update()
+```
+
+| 상위 API | 내부에서 부르는 저수준 공개 API |
+|---|---|
+| `body.features.pad/pocket` | `part.work_in(body)` 안의 `part_design.create_pad/create_pocket` |
+| `body.features.hole` | `part_design.create_hole(..., origin=, diameter=, limit=, bottom=)` |
+| `body.features.fillet/chamfer` | `create_edge_fillet` / `create_chamfer`(길이·각도 모드) |
+| `body.features.circular_pattern` | `create_circular_pattern(..., axis=, reverse=)` |
+| `sketch.rectangle/centered_rectangle/circle` | `sketch.edit()` 안의 `editor.rectangle/circle` + 제약 메서드 |
+| `part.geometry.top_face()/find_*` | `part.topology.faces()/edges().query()...one()` |
+| `part.inspect.facts(...)` | `part.is_up_to_date()`, `part.measurement.measure()` 한 번 |
+
+- `body.features`는 예전처럼 `FeatureInfo` 튜플이면서 위 메서드도 가진 튜플 하위 클래스입니다.
+- 방향: `"+X"`...`"-Z"`는 스케치 프레임에서 판단하고, `"into_material"`/`"out_of_material"`은
+  **SDK가 면 위에 만든 스케치에서만** 답합니다(그 스케치의 법선은 재료 바깥을 향한다는 것이
+  실측됐습니다). 판단할 수 없으면 추측하지 않고 `UnsupportedOperationError`를 냅니다.
+- `rectangle(constraints=...)`은 `"none"`, `"orientation"`(수평·수직), `"dimensioned"`(+ 가로·세로
+  길이)만 있습니다. 모서리 일치 구속은 실측 근거가 없어 "완전 구속" 옵션은 없습니다.
+- Hole은 이전 Hole의 설정을 이어받습니다(CATIA 세션 상태). 그래서 SDK는 깊이를 주면 blind를
+  항상 명시적으로 쓰고, 상위 API는 지름·바닥·limit을 모두 씁니다.
+- 필렛은 모서리 하나만 받습니다. 여러 모서리를 한 번에 거는 것은 실측 근거가 없습니다.
+- 면·모서리 인접 관계(adjacency)는 검증된 경로가 없어 제공하지 않습니다.
+  `EdgeQuery.on_plane_of(face)`/`find_edge(on_plane_of=face)`는 "그 면의 평면 위에 놓인
+  모서리"라는 기하 사실이고, 인접을 주장하지 않습니다.
+
+실행 예제는 `examples/intent_api.py`, 설계와 실측 근거는 `docs/phase5-api-design.md`에 있습니다.
+
 ### com3dx 경로 지정
 
 경로는 디렉터리가 아니라 `com3dx.py` 파일 전체 경로입니다. 탐색 순서는
@@ -307,9 +371,13 @@ editor.set_construction(element, True)
 ```
 
 geometry 메서드는 `SketchElement`를 반환합니다. `kind`는 CATIA 타입 이름(`"Line2D"`
-등)이고, 반지름이나 좌표 같은 raw 속성이 필요하면 `element.com_object`로 읽습니다.
-속성마다 live 검증 상태가 달라서 `SketchElement` 자체에는 geometry 읽기를 두지
-않았습니다. `SketchElement`는 자기가 그려진 스케치를 기억하므로, 다른 스케치에서
+등)입니다. 선·원(호)·점은 `element.geometry()`로 스케치 로컬 좌표를 읽고
+(`LineGeometry`/`CircleGeometry`/`PointGeometry`), `is_construction`으로 construction 여부를
+읽습니다. 모든 읽기는 **편집을 닫은 뒤에만** 검증됐으므로 `edit()` 블록 안에서 읽으면
+COM 전에 `ValidationError`가 납니다. 스플라인 같은 나머지 종류는 `UnsupportedOperationError`입니다.
+`sketch.geometry()`는 선·원·점·제약(이름, 종류, driving/driven, 상태, 값, 대상 요소)과
+`sketch.frame()`(로컬 원점과 축)을 COM 객체 없는 값으로 한 번에 돌려줍니다.
+`SketchElement`는 자기가 그려진 스케치를 기억하므로, 다른 스케치에서
 그린 요소를 제약이나 `set_center_line`에 넘기면 CATIA에 닿기 전에
 `ValidationError`가 납니다. 이전처럼 raw 2D COM 객체를 넘겨도 동작하지만 그 경우에는
 스케치 검사를 하지 않습니다.
@@ -757,9 +825,12 @@ pattern.set_angular_instances(8) # 여기서 재빌드하지 않습니다
 part.update()
 ```
 
-- **Z축만** 지원합니다. 원점 XY 평면을 회전 중심·축으로 넘기면 Z축 회전이고, 라이브에서 구멍
-  6개가 정확히 구멍 5개분을 더 제거했습니다. YZ/ZX는 Z축이 아니었지만 어느 축인지 확정하지
-  못해서 `axis="X"`/`"Y"`는 거부합니다.
+- 축은 `axis="X"`/`"Y"`/`"Z"`(원점을 지나는 전역 축), 원통 `Face`(그 축, 예: 보스나 보어),
+  직선 `Edge`입니다. 원점 평면을 회전 중심·축으로 넘기면 그 평면의 법선이 축이 되고, 세 축 모두
+  무게중심으로 확인했습니다(probe 46t). 원통면·직선 모서리 축도 부피와 무게중심으로 확인했습니다.
+- `reverse=True`는 회전 방향을 뒤집습니다. Z축에서 기본은 +Z에서 볼 때 시계 방향입니다. 다른
+  축의 방향은 측정하지 않았습니다. complete crown 모드는 CATIA가 받아들이고도 무시해서 제공하지
+  않습니다. 상위 API의 `total_angle_deg`는 검증된 간격으로 환산합니다.
 - `angular_instances`와 `angular_spacing_deg`는 읽고 쓸 수 있습니다. `radial_instances`는
   읽기 전용(항상 1)입니다.
 - 씨앗 feature는 패턴을 만들 body에 있어야 합니다. 다른 body의 feature면
@@ -987,8 +1058,8 @@ part.update()
 ```
 
 읽기는 `edit()` 없이도 됩니다. 없는 이름은 `SketchElementNotFoundError`로 알려주고 스케치가 실제로
-가진 이름을 함께 보여줍니다. 선의 좌표는 이 릴리스의 `Line2D`가 아예 노출하지 않아 제공하지
-않습니다(원의 `radius`는 됩니다).
+가진 이름을 함께 보여줍니다. 선의 좌표도 `line.geometry()`로 읽습니다. probe 43이 좌표를 못 읽은
+것은 `GetEndPoints`/`GetCenter`에 seed 배열을 넘기지 않아서였습니다(probe 46a/46b).
 
 ### feature 위치에서 작업하기
 
@@ -1152,9 +1223,10 @@ Stiffener, CircPattern, UserPattern 등은 `AddNew*`가 객체를 반환하더�
 follow-up `Part.Update()`에서 실패한 사례가 있어 검증된 API로 승격하지
 않았습니다. GSD surface(평면 생성에 쓰는 것 외의 HybridShape), assembly
 constraint, 축 시스템, 평면용 세트 외의 HybridBody도 현재 public wrapper 범위 밖입니다.
-원형 패턴의 X/Y축과 반경 방향 행, 개별 인스턴스 비활성화, 사각 패턴의 치수 편집도
-아직 검증하지 않았습니다. 원뿔·구·스플라인 면의 측정 사실, 바깥 방향 법선, 면 인접 관계,
-Shaft/Groove/Rib의 방향, `rectangle()`의 자동 구속(지금은 제약 0개)도 아직 없습니다.
+원형 패턴의 반경 방향 행, complete crown, 개별 인스턴스 비활성화, 사각 패턴의 치수 편집도
+아직 검증하지 않았습니다. 원뿔·구·스플라인 면의 측정 사실, 바깥 방향 법선, 면·모서리 인접 관계,
+Shaft/Groove/Rib의 방향, 완전 구속 사각형, Hole 방향 뒤집기·나사·카운터보어, 곡면 위 스케치도
+아직 없습니다.
 
 ## 테스트
 

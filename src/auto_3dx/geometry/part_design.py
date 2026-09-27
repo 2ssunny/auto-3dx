@@ -4504,10 +4504,12 @@ class PartDesign:
 
         `diameter`, `limit` and `bottom` are written right after creation, before any
         rebuild (probe 46s: all three, then one update, removed exactly the expected
-        volume). **Only what is passed is written.** CATIA carries the previous hole's
-        settings over to the next one (probe 46q: a new hole inherited a flat bottom from
-        the hole before it), so pass every attribute whose value matters rather than
-        relying on a default.
+        volume). CATIA carries the previous hole's settings over to the next one (probe
+        46q: a new hole inherited a flat bottom from the hole before it; live, a hole made
+        with depth 5 after a through-all hole came out through-all). So the limit is
+        ALWAYS written -- blind when a depth is given, through-all when asked -- which keeps
+        `create_hole(name, face, depth)` meaning what it says. Diameter and bottom are
+        written only when passed: pass every attribute whose value matters.
 
         A successful call here does not mean the feature is valid
         (`docs/conventions.md` section 1.2.2.1): this method never calls
@@ -4531,7 +4533,7 @@ class PartDesign:
                 the plane of `face`, which must be planar; both are checked by measuring
                 the face before CATIA is called. `None` leaves the position to CATIA.
             diameter: The hole diameter. `None` keeps CATIA's (carried-over) value.
-            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`. `None` writes nothing.
+            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`. `None` means blind.
             bottom: `HOLE_BOTTOM_FLAT` or `HOLE_BOTTOM_V`. `None` writes nothing.
 
         Returns:
@@ -4563,7 +4565,10 @@ class PartDesign:
             )
         self._require_current_face(face, "hole")
         validate_length_unit(unit)
-        limit_mode = None if limit is None else _validate_hole_limit(limit)
+        # A depth always means a blind hole: the limit is written explicitly because CATIA
+        # carries the previous hole's limit over (live: after a through-all hole, a new
+        # hole made with depth 5 came out through-all, depth 30).
+        limit_mode = _validate_hole_limit(HOLE_LIMIT_BLIND if limit is None else limit)
         bottom_type = None if bottom is None else _validate_hole_bottom(bottom)
         if limit == HOLE_LIMIT_THROUGH_ALL:
             if depth is not None:
@@ -4593,11 +4598,8 @@ class PartDesign:
                 hole.Diameter.Value = coerced_diameter
             if bottom_type is not None:
                 hole.BottomType = bottom_type
-            if limit_mode is not None:
-                hole.BottomLimit.LimitMode = limit_mode
+            hole.BottomLimit.LimitMode = limit_mode
 
-        needs_configure = not (coerced_diameter is None and bottom_type is None
-                               and limit_mode is None)
         return self._create_feature(
             name,
             HOLE_KIND,
@@ -4605,7 +4607,7 @@ class PartDesign:
             factory_args,
             Hole,
             "hole",
-            configure if needs_configure else None,
+            configure,
         )
 
     @staticmethod

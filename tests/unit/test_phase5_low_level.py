@@ -306,14 +306,17 @@ def test_a_body_sketch_collection_adds_to_that_body() -> None:
 # --- hole placement and limits -----------------------------------------------------------------
 
 
-def test_the_legacy_hole_call_is_unchanged() -> None:
+def test_the_legacy_hole_call_keeps_its_meaning_a_blind_hole_of_that_depth() -> None:
+    # The factory call is unchanged. The blind limit is written explicitly because CATIA
+    # carries the previous hole's limit over: live, after a through-all hole, a legacy
+    # create_hole(face, 5) came out through-all with depth 30.
     part, raw = _setup()
     face = _face(part, raw, TOP)
 
     hole = part.part_design.create_hole("H", face, 5.0)
 
     assert raw.ShapeFactory.calls == [("AddNewHole", (TOP, 5.0))]
-    assert hole.com_object.log == []  # nothing written beyond what was asked for
+    assert hole.com_object.log == ["LimitMode=0"]  # diameter and bottom are not touched
 
 
 def test_a_positioned_hole_writes_every_attribute_before_any_update() -> None:
@@ -393,6 +396,7 @@ def test_a_hole_limit_and_bottom_can_be_changed_afterwards() -> None:
     hole.depth = 11.0
 
     assert hole.com_object.log == [
+        "LimitMode=0",  # written at creation: a depth means a blind hole
         "LimitMode=2",
         "LimitMode=0",
         "BottomType=1",

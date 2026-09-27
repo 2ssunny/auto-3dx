@@ -1670,6 +1670,114 @@ faces + edges 스냅샷      1.024 s
 새 edge 스냅샷 + 측정 쿼리  0.873 s
 ```
 
+### 1.14 Phase 5: 스케치 읽기, 면 위 스케치, Hole 위치·한계, 패턴 축 (probe 46 계열, 실측 2026-09-27)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 빈 기준 상태로 복원해 다시 확인했다.
+
+**단일 probe가 CATIA를 멈추게 했다.** 처음의 probe 46은 한 번에 스케치 요소를 만들고, 열린 편집
+안에서 `GetEndPoints`/`GetOrigin`/`GetDirection`/`CenterPoint.GetCoordinates`/`GetParamExtents`
+등을 읽고, 사각형에 제약 여러 개를 걸었다. 그 단계에서 3DEXPERIENCE가 CPU 한 코어를 쓴 채 응답
+없음이 됐고 출력이 버퍼링돼 호출을 특정하지 못했다(사용자가 재시작, 대상 Part에는 남은 것이
+없었다). 이후로는 질문 하나당 micro-probe 하나(`scripts/probes/46*.py`, 공통 틀 `_micro.py`):
+대상·빈 기준 확인, 모든 Automation 호출 앞뒤에 flush된 BEFORE/AFTER 마커, `python -u`, 정리 뒤
+기준 재확인. 29개 모두 멈추지 않았다. **타입 라이브러리에 있다는 것은 런타임에 안전하다는 뜻이
+아니다.**
+
+**스케치 읽기 (편집을 닫은 뒤)**
+
+```text
+Line2D.GetEndPoints([0]*4)        -> (10, 5, 40.00000000000001, 25.000000000000007)   46a
+Circle2D.GetCenter([0]*2)         -> (20, 15)   probe 43은 seed 없이 불러 실패했다     46b
+Circle2D.Radius                   -> 4.0
+호 CreateCircle(-20,-10,6,0,pi/2) -> GetEndPoints (-14,-10,-20,-4): 매개변수는 radian   46c
+닫힌 원 GetEndPoints              -> 시작 == 끝 (2e-15 차이). 호는 다르다               46ab
+Point2D.GetCoordinates([0]*2)     -> (-5, 7.5)                                          46g
+Construction 읽기                 -> False / True                                       46f
+Constraint.Mode                   -> 0 (driving), Status 0, Type 5, Dimension.Value 30  46d
+GetConstraintElement(1)           -> Reference, DisplayName 'Line.1'                    46e
+GetConstraintElement(1)/(2)       -> 수직 제약의 'Line.1', 'Line.2'                      46ac
+GeometricElements.Item(name)      -> 새 attach에서도 같은 값. 첫 요소는 AbsoluteAxis(Axis2D) 46h
+열린 편집 안에서의 읽기           -> 일부러 반복하지 않았다. 멈춤의 용의자 (UNKNOWN)
+```
+
+SDK는 편집이 열린 동안의 geometry 읽기를 COM 전에 `ValidationError`로 거부한다.
+
+**평면 면 위 스케치**
+
+```text
+Sketches.Add(<윗면 Reference>)      -> Sketch, frame (0,0,20 | X | Y), update 성공         46i
+아랫면                             -> (0,0,0 | X | -Y), 법선 -Z = 재료 바깥                46j
++X 옆면                            -> (30,-20,0 | Y | Z), 법선 +X = 재료 바깥. 원점은 면 중심이 아니다
+포켓 바닥(오목한 면)               -> (0,0,16 | X | Y), 법선 +Z = 재료 바깥               46aa
+윗면 스케치 로컬 (10,5) 원 + pocket 기본 방향(DirectionOrientation 1)
+                                   -> 정확히 113.097 mm3 제거, 보어 중심 (10,5,18)          46k
+pad 높이 20 -> 30, update          -> 스케치 원점 z 30, pocket이 면을 따라감               46l
+원통면 위 스케치                   -> 시도하지 않음. SDK가 평면이 아닌 면을 COM 전에 거부
+```
+
+그래서 SDK가 면 위에 만든 스케치에 한해 "into_material" = 법선 반대, "out_of_material" = 법선 방향으로
+답한다. 다시 찾은 스케치는 support를 읽을 멤버가 없어 이 판단을 하지 않는다.
+
+**Hole**
+
+```text
+AddNewHoleFromPoint(10,5,20, 윗면, 8) -> GetOrigin (10,5,20) update 전후 동일, 보어 중심 (10,5,16)  46m
+기본값                              -> Diameter 12, LimitMode 0, BottomType 1(V), BottomAngle 120
+BottomLimit.LimitMode = 2           -> 20 mm 관통 정확히. CATIA가 깊이 치수를 8 -> 20으로 다시 씀   46n
+  다시 0                            -> 깊이는 20 그대로. blind로 돌아갈 때 깊이를 다시 줘야 한다
+BottomType = 0                      -> 평평한 바닥, 정확한 원통 부피                              46o
+새 Hole (아무것도 안 씀)            -> 직전 Hole의 BottomType 0을 물려받음                          46q
+  BottomAngle (평평할 때)           -> E_FAIL
+BottomType = 1                      -> V, 120, 46m과 같은 부피                                    46r
+Diameter/BottomType/LimitMode를 첫 update 전에 모두 씀 -> 정확한 관통 부피                          46s
++X 옆면 Hole GetDirection           -> (-1,0,0): 재료 안쪽                                        46p
+Reverse/SetOrigin/SetDirection/나사/카운터보어 -> 호출하지 않음 (TYPELIB_ONLY)
+```
+
+**Hole 설정은 세션 상태로 이어진다.** Phase 5 live 스테이지가 관통 Hole을 만든 뒤, 기존 Phase 2 테스트의
+`create_hole(name, face, 5.0)`이 관통 Hole(깊이 30)이 되어 실패했다. LimitMode도 BottomType처럼 이어진다.
+그래서 `create_hole`은 이제 limit을 항상 명시적으로 쓴다(깊이가 있으면 blind). 지름과 바닥은 넘긴 경우에만
+쓴다. 상위 API는 모두 쓴다. `scripts/probes/46af_restore_hole_session_defaults.py`가 세션 기본값을
+(12, V, blind)로 되돌리고 새 Hole로 확인한다.
+
+**원형 패턴**
+
+```text
+큐브(중심 (25,0,5)) 4 x 90도
+  PlaneYZ를 중심·축으로  -> COG (25,0,0): X축                                           46t
+  PlaneZX                -> COG (0,0,0):  Y축
+  PlaneXY                -> COG (0,0,5):  Z축
+원통면 Reference (허브 r5, (50,40)) -> 부피 4785.398, COG (50,40,5): 허브 축              46u
+직선 모서리 Reference ((30,5) 수직) -> 부피 4000, COG (30,5,5): 모서리 축                 46v
+CircularPatternParameters = 1 (complete crown) -> 기록·읽기는 되지만 형상은 10도 간격 그대로 46w
+  기본값 읽기                     -> E_FAIL
+iIsReversedRotationAxis False/True (Z축) -> 복사본이 -Y / +Y: +Z에서 볼 때 시계 / 반시계   46x
+Hole을 씨앗으로 6개, 360도 (live stage 10) -> 정확히 6개 분량, instances=4로 바꾸면 4개 분량
+```
+
+**인접 관계는 검증된 경로가 없다.**
+
+```text
+면 하나 선택 + Search("Topology.Edge,sel")           -> 0개                                 46y
+MeasurableBetween.DistanceMinToPoint(x,y,z [, seeds]) -> "Invalid number of parameters"      46z, 46z2
+```
+
+대신 `EdgeQuery.on_plane_of(face)`는 측정된 시작·중간·끝점이 그 면의 평면 위에 있는 모서리를 남긴다.
+평면 사실이지 인접이 아니다.
+
+**사각형 제약**
+
+```text
+H(아래), H(위), V(오른쪽), V(왼쪽)          -> 4개 모두 Parallelism(8), 상태 0, update 성공  46ad
++ 길이(아래)=12, 길이(왼쪽)=8               -> 6개, 상태 0, update 성공                   46ae
+```
+
+모서리 일치 구속(점 제약)은 근거가 없어 "완전 구속" 옵션은 두지 않았다.
+
+**기타.** 허브 면을 패턴 축으로 쓴 pad를 지웠더니 그 스케치가 **연쇄 삭제되지 않았다**(46u 정리 중
+발견). probe 정리는 이제 접두어로 남은 것을 쓸어낸다(`_micro.sweep`). `inspect.facts("volume",
+"up_to_date", ...)`는 live에서 0.038 s였다(`summary()`는 1-3.5 s).
+
 ## 2. 코드 스타일
 
 전역 규칙(`global-instructions/code_style.md`)을 따른다. 요약:
