@@ -29,10 +29,13 @@ def main() -> None:
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         constraints = step("Sketch.Constraints", lambda: sketch.Constraints)
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        line = step("Factory2D.CreateLine(0, 0, 30, 0)",
-                    lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0))
-        constraint = step("Constraints.AddMonoEltCst(length, line)",
-                          lambda: constraints.AddMonoEltCst(CONSTRAINT_LENGTH, line))
+        line = step(
+            "Factory2D.CreateLine(0, 0, 30, 0)", lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0)
+        )
+        constraint = step(
+            "Constraints.AddMonoEltCst(length, line)",
+            lambda: constraints.AddMonoEltCst(CONSTRAINT_LENGTH, line),
+        )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
         step("Constraint.Name", lambda: constraint.Name, fatal=False)

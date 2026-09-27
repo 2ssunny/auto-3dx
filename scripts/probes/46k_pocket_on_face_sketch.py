@@ -16,8 +16,14 @@ removed = pi * 3^2 * 4 = 113.097 mm3, and the new cylindrical face centred at (1
 import math
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46K"
@@ -29,28 +35,37 @@ def main() -> None:
     pad = face_sketch = pocket = None
     try:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
-        before = step("[composite, verified] measurement.measure().volume_mm3",
-                      lambda: part.measurement.measure().volume_mm3)
+        before = step(
+            "[composite, verified] measurement.measure().volume_mm3",
+            lambda: part.measurement.measure().volume_mm3,
+        )
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         sketches = step("MainBody.Sketches", lambda: raw.MainBody.Sketches)
         face_sketch = step("Sketches.Add(top face Reference)", lambda: sketches.Add(top.com_object))
         step("Sketch.Name = ...", lambda: setattr(face_sketch, "Name", f"{PREFIX}_TOP_SK"))
         factory = step("Sketch.OpenEdition (face sketch)", face_sketch.OpenEdition)
-        step("Factory2D.CreateClosedCircle(10, 5, 3)",
-             lambda: factory.CreateClosedCircle(10.0, 5.0, 3.0))
+        step(
+            "Factory2D.CreateClosedCircle(10, 5, 3)",
+            lambda: factory.CreateClosedCircle(10.0, 5.0, 3.0),
+        )
         step("Sketch.CloseEdition (face sketch)", face_sketch.CloseEdition)
         shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-        pocket = step("ShapeFactory.AddNewPocket(face sketch, 4)",
-                      lambda: shape_factory.AddNewPocket(face_sketch, 4.0))
+        pocket = step(
+            "ShapeFactory.AddNewPocket(face sketch, 4)",
+            lambda: shape_factory.AddNewPocket(face_sketch, 4.0),
+        )
         step("Pocket.Name = ...", lambda: setattr(pocket, "Name", f"{PREFIX}_POCKET"))
         step("Pocket.DirectionOrientation (default)", lambda: pocket.DirectionOrientation)
         step("Part.Update", raw.Update)
-        after = step("[composite, verified] measurement.measure().volume_mm3",
-                     lambda: part.measurement.measure().volume_mm3)
-        marker(f"[RESULT] removed {before - after:.3f} mm3; a full cut is "
-               f"{math.pi * 9 * 4:.3f}")
-        bore = step("[composite, verified] faces().query().cylindrical().one()",
-                    lambda: part.topology.faces(body=None).query().cylindrical().one())
+        after = step(
+            "[composite, verified] measurement.measure().volume_mm3",
+            lambda: part.measurement.measure().volume_mm3,
+        )
+        marker(f"[RESULT] removed {before - after:.3f} mm3; a full cut is {math.pi * 9 * 4:.3f}")
+        bore = step(
+            "[composite, verified] faces().query().cylindrical().one()",
+            lambda: part.topology.faces(body=None).query().cylindrical().one(),
+        )
         marker(f"[RESULT] bore centre {bore.geometry.center_mm} radius {bore.geometry.radius_mm}")
     finally:
         if pocket is not None:

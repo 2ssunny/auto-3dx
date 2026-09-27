@@ -251,6 +251,16 @@ class Face:
         """int: The model generation this face's snapshot was taken at."""
         return self._generation
 
+    def _belongs_to(self, generation: Any) -> bool:
+        """Whether this face came from the Part that owns `generation`.
+
+        Every wrapper of one CATIA Part shares one `ModelGeneration` object
+        (`docs/api-design.md` 5.1), so identity of that object is identity of the Part.
+        A handle built directly, without one, cannot say and is let through, the same
+        policy as an unknown owner body.
+        """
+        return self._model_generation is None or self._model_generation is generation
+
     @property
     def com_object(self) -> Any:
         """Returns the raw underlying `Reference` COM object.

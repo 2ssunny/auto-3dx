@@ -87,6 +87,7 @@ from auto_3dx.errors import (
     PartialCreationError,
     ParameterTypeError,
     UnsupportedSupportError,
+    ValidationError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
 from auto_3dx.geometry.edges import Edge, EdgeSnapshot, take_edge_snapshot
@@ -115,18 +116,41 @@ LENGTH_TOLERANCE: float = 1e-9
 CIRCULAR_PATTERN_KIND: str = "CircPattern"
 """`type(item).__name__` of a circular pattern in `Body.Shapes` (probe 44)."""
 
-CIRCULAR_PATTERN_AXIS_Z: str = "Z"
-"""The one verified rotation axis for a circular pattern.
+CIRCULAR_PATTERN_AXIS_X: str = "X"
+"""The global X axis through the origin: `OriginElements.PlaneYZ` as centre and axis.
 
-Live (probe 44): passing `OriginElements.PlaneXY` as both the rotation centre and the
-rotation axis patterned a pocket around the Z axis, and the six instances removed exactly
-five extra holes' worth of material. The other two origin planes produced a rotation about
-some other axis whose exact mapping the test geometry could not pin down, so only Z is
-offered (`docs/conventions.md` section 1.12).
+Live (probe 46t): a cube centred at (25, 0, 5) patterned four times at 90 degrees about
+PlaneYZ put the centre of gravity at (25, 0, 0) -- on the X axis.
 """
 
-SUPPORTED_CIRCULAR_PATTERN_AXES: "frozenset[str]" = frozenset({CIRCULAR_PATTERN_AXIS_Z})
-"""The rotation axes `create_circular_pattern` accepts."""
+CIRCULAR_PATTERN_AXIS_Y: str = "Y"
+"""The global Y axis through the origin: `OriginElements.PlaneZX` (probe 46t, COG (0,0,0))."""
+
+CIRCULAR_PATTERN_AXIS_Z: str = "Z"
+"""The global Z axis through the origin: `OriginElements.PlaneXY`.
+
+Live (probe 44): six instances of a pocket removed exactly five extra holes' worth of
+material; probe 46t confirmed Z by centre of gravity. In every case the origin plane
+passed as both rotation centre and rotation axis turns the pattern about its normal.
+"""
+
+SUPPORTED_CIRCULAR_PATTERN_AXES: "frozenset[str]" = frozenset(
+    {CIRCULAR_PATTERN_AXIS_X, CIRCULAR_PATTERN_AXIS_Y, CIRCULAR_PATTERN_AXIS_Z}
+)
+"""The named rotation axes `create_circular_pattern` accepts.
+
+A cylindrical `Face` (its axis, probe 46u) or a linear `Edge` (probe 46v) is accepted too.
+"""
+
+_CIRCULAR_AXIS_PLANES: "dict[str, str]" = {
+    CIRCULAR_PATTERN_AXIS_X: "PlaneYZ",
+    CIRCULAR_PATTERN_AXIS_Y: "PlaneZX",
+    CIRCULAR_PATTERN_AXIS_Z: "PlaneXY",
+}
+"""The origin plane whose normal is each named axis (probe 46t)."""
+
+_CYLINDRICAL_SURFACE = "cylindrical"
+_LINE_CURVE = "line"
 
 _CIRCULAR_RADIAL_INSTANCES: int = 1
 """One radial row: the verified call patterns around the axis only."""
@@ -138,7 +162,8 @@ _CIRCULAR_ROTATION_ANGLE: float = 0.0
 """`iRotationAngle`, verified at 0.0."""
 
 _CIRCULAR_AXIS_REVERSED: bool = False
-"""`iIsReversedRotationAxis`, verified at False."""
+"""`iIsReversedRotationAxis` by default. Live (probe 46x), about Z: `False` turned the
+copies clockwise seen from +Z, `True` counter-clockwise."""
 
 _CIRCULAR_RADIUS_ALIGNED: bool = True
 """`iIsRadiusAligned`, verified at True."""
@@ -287,6 +312,40 @@ THICKNESS_KIND: str = "Thickness"
 
 HOLE_KIND: str = "Hole"
 """The `type(com_object).__name__` value for a CATIA Hole feature."""
+
+HOLE_LIMIT_BLIND: str = "blind"
+"""A hole that stops at its depth: `BottomLimit.LimitMode = catOffsetLimit (0)`."""
+
+HOLE_LIMIT_THROUGH_ALL: str = "through_all"
+"""A hole through the whole solid: `BottomLimit.LimitMode = catUpToLastLimit (2)`.
+
+Live (probe 46n): a 12 mm hole through a 20 mm block removed exactly pi * 36 * 20 mm3.
+CATIA then rewrites the depth dimension to the computed length (8 became 20), so going
+back to `HOLE_LIMIT_BLIND` needs an explicit depth.
+"""
+
+SUPPORTED_HOLE_LIMITS: "frozenset[str]" = frozenset({HOLE_LIMIT_BLIND, HOLE_LIMIT_THROUGH_ALL})
+
+HOLE_BOTTOM_FLAT: str = "flat"
+"""A flat-bottomed hole: `BottomType = catFlatHoleBottom (0)` (probe 46o, exact volume)."""
+
+HOLE_BOTTOM_V: str = "v"
+"""A drill-point bottom: `BottomType = catVHoleBottom (1)`, 120 degrees (probes 46m, 46r)."""
+
+SUPPORTED_HOLE_BOTTOMS: "frozenset[str]" = frozenset({HOLE_BOTTOM_FLAT, HOLE_BOTTOM_V})
+
+HOLE_ORIGIN_TOLERANCE_MM: float = 1e-3
+"""How far off a face's plane a hole origin may lie and still count as on it."""
+
+_LIMIT_MODE_BY_NAME: "dict[str, int]" = {HOLE_LIMIT_BLIND: 0, HOLE_LIMIT_THROUGH_ALL: 2}
+_LIMIT_NAME_BY_MODE: "dict[int, str]" = {mode: name for name, mode in _LIMIT_MODE_BY_NAME.items()}
+_BOTTOM_TYPE_BY_NAME: "dict[str, int]" = {HOLE_BOTTOM_FLAT: 0, HOLE_BOTTOM_V: 1}
+_BOTTOM_NAME_BY_TYPE: "dict[int, str]" = {code: name for name, code in _BOTTOM_TYPE_BY_NAME.items()}
+_HOLE_OTHER: str = "other"
+_HOLE_NOMINAL_DEPTH: float = 1.0
+"""The depth handed to the factory for a through-all hole; CATIA replaces it (probe 46n)."""
+_POINT3_SEED_LENGTH: int = 3
+_PLANAR_SURFACE: str = "planar"
 
 RECTANGULAR_PATTERN_KIND: str = "RectPattern"
 """The `type(com_object).__name__` value for a CATIA rectangular pattern."""
@@ -755,6 +814,11 @@ class SketchFeature(_FeatureActivity):
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    @depth.setter
+    def depth(self, value: float) -> None:
+        """Assigning is `set_depth(value)`: same validation, no rebuild."""
+        self.set_depth(value)
+
     def set_depth(self, depth: float, unit: str = MILLIMETRE) -> None:
         """Sets the feature's extrusion/removal magnitude.
 
@@ -902,6 +966,11 @@ class Pad(SketchFeature):
         """
         return self.depth
 
+    @height.setter
+    def height(self, value: float) -> None:
+        """Assigning is `set_height(value)`: same validation, no rebuild."""
+        self.set_height(value)
+
     def set_height(self, height: float, unit: str = MILLIMETRE) -> None:
         """Sets the pad's extrusion height.
 
@@ -915,6 +984,19 @@ class Pad(SketchFeature):
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         self.set_depth(height, unit)
+
+    @property
+    def length(self) -> float:
+        """float: The pad's extrusion length in millimetres; the same value as `height`.
+
+        Assigning is `set_height(value)`: same validation, the generation advances, and
+        nothing is rebuilt until `part.update()`.
+        """
+        return self.depth
+
+    @length.setter
+    def length(self, value: float) -> None:
+        self.set_height(value)
 
 
 class Pocket(SketchFeature):
@@ -997,6 +1079,11 @@ class RevolvedFeature(_FeatureActivity):
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    @first_angle.setter
+    def first_angle(self, value: float) -> None:
+        """Assigning is `set_first_angle(value)`: same validation, no rebuild."""
+        self.set_first_angle(value)
+
     @property
     def second_angle(self) -> float:
         """Returns the feature's second revolve angle.
@@ -1012,6 +1099,11 @@ class RevolvedFeature(_FeatureActivity):
             return self._com_object.SecondAngle.Value
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    @second_angle.setter
+    def second_angle(self, value: float) -> None:
+        """Assigning is `set_second_angle(value)`: same validation, no rebuild."""
+        self.set_second_angle(value)
 
     def set_first_angle(self, angle: float, unit: str = DEGREE) -> None:
         """Sets the feature's first revolve angle.
@@ -1433,6 +1525,11 @@ class ConstRadEdgeFillet(_NamedFeature):
         """
         return self._read_dimension(("Radius",))
 
+    @radius.setter
+    def radius(self, value: float) -> None:
+        """Assigning is `set_radius(value)`: same validation, no rebuild."""
+        self.set_radius(value)
+
     def set_radius(self, radius: float, unit: str = MILLIMETRE) -> None:
         """Sets the radius of this existing fillet.
 
@@ -1494,6 +1591,11 @@ class Chamfer(_NamedFeature):
         """
         return self._read_dimension(("Length1",))
 
+    @length1.setter
+    def length1(self, value: float) -> None:
+        """Assigning is `set_length1(value)`: same validation, no rebuild."""
+        self.set_length1(value)
+
     def set_length1(self, length: float, unit: str = MILLIMETRE) -> None:
         """Sets the chamfer's first length. Does not rebuild; call `part.update()`.
 
@@ -1518,6 +1620,11 @@ class Chamfer(_NamedFeature):
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         return self._read_dimension(("Angle",))
+
+    @angle.setter
+    def angle(self, value: float) -> None:
+        """Assigning is `set_angle(value)`: same validation, no rebuild."""
+        self.set_angle(value)
 
     def set_angle(self, angle: float, unit: str = DEGREE) -> None:
         """Sets the chamfer angle. Does not rebuild; call `part.update()`.
@@ -1557,6 +1664,11 @@ class Shell(_NamedFeature):
         """
         return self._read_dimension(("InternalThickness",))
 
+    @internal_thickness.setter
+    def internal_thickness(self, value: float) -> None:
+        """Assigning is `set_internal_thickness(value)`: same validation, no rebuild."""
+        self.set_internal_thickness(value)
+
     def set_internal_thickness(self, thickness: float, unit: str = MILLIMETRE) -> None:
         """Sets the inward wall thickness. Does not rebuild; call `part.update()`.
 
@@ -1581,6 +1693,11 @@ class Shell(_NamedFeature):
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         return self._read_dimension(("ExternalThickness",))
+
+    @external_thickness.setter
+    def external_thickness(self, value: float) -> None:
+        """Assigning is `set_external_thickness(value)`: same validation, no rebuild."""
+        self.set_external_thickness(value)
 
     def set_external_thickness(self, thickness: float, unit: str = MILLIMETRE) -> None:
         """Sets the outward wall thickness. Does not rebuild; call `part.update()`.
@@ -1621,6 +1738,11 @@ class Thickness(_NamedFeature):
         """
         return self._read_dimension(("Offset",))
 
+    @offset.setter
+    def offset(self, value: float) -> None:
+        """Assigning is `set_offset(value)`: same validation, no rebuild."""
+        self.set_offset(value)
+
     def set_offset(self, offset: float, unit: str = MILLIMETRE) -> None:
         """Sets the added material thickness. Does not rebuild; call `part.update()`.
 
@@ -1658,6 +1780,11 @@ class Hole(_NamedFeature):
         """
         return self._read_dimension(("Diameter",))
 
+    @diameter.setter
+    def diameter(self, value: float) -> None:
+        """Assigning is `set_diameter(value)`: same validation, no rebuild."""
+        self.set_diameter(value)
+
     def set_diameter(self, diameter: float, unit: str = MILLIMETRE) -> None:
         """Sets the hole diameter. Does not rebuild; call `part.update()`.
 
@@ -1685,6 +1812,11 @@ class Hole(_NamedFeature):
         """
         return self._read_dimension(("BottomLimit", "Dimension"))
 
+    @depth.setter
+    def depth(self, value: float) -> None:
+        """Assigning is `set_depth(value)`: same validation, no rebuild."""
+        self.set_depth(value)
+
     def set_depth(self, depth: float, unit: str = MILLIMETRE) -> None:
         """Sets the hole depth. Does not rebuild; call `part.update()`.
 
@@ -1698,6 +1830,152 @@ class Hole(_NamedFeature):
             Auto3dxError: If CATIA refuses the write.
         """
         self._write_length(("BottomLimit", "Dimension"), depth, unit)
+
+    def _read_point(self, method: str) -> "tuple[float, float, float]":
+        """Reads one of the hole's seed-array point getters (`GetOrigin`/`GetDirection`)."""
+        try:
+            values = getattr(self._com_object, method)([0.0] * _POINT3_SEED_LENGTH)
+            x, y, z = (float(value) for value in values)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except (AttributeError, TypeError, ValueError) as error:
+            raise AutomationError(f"Hole.{method} returned no usable point.") from error
+        return (x, y, z)
+
+    @property
+    def origin(self) -> "tuple[float, float, float]":
+        """tuple[float, float, float]: Where the hole starts on its face, in Part millimetres.
+
+        Read from `GetOrigin`. Live (probe 46m) a hole made at (10, 5, 20) read back
+        exactly that before and after the rebuild, and its bore centred on (10, 5).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_point("GetOrigin")
+
+    @property
+    def direction(self) -> "tuple[float, float, float]":
+        """tuple[float, float, float]: The drilling direction, a unit vector.
+
+        Read from `GetDirection`. Live (probe 46p) a hole on the +X face of a block read
+        (-1, 0, 0): into the material, which is CATIA's default and the only direction
+        this SDK creates.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_point("GetDirection")
+
+    @property
+    def limit(self) -> str:
+        """str: `HOLE_LIMIT_BLIND`, `HOLE_LIMIT_THROUGH_ALL`, or `"other"` for a mode
+        this SDK does not create (read from `BottomLimit.LimitMode`).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            mode = int(self._dimension(("BottomLimit",)).LimitMode)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return _LIMIT_NAME_BY_MODE.get(mode, _HOLE_OTHER)
+
+    def set_limit(
+        self, limit: str, depth: "float | None" = None, unit: str = MILLIMETRE
+    ) -> None:
+        """Makes the hole blind or through-all. Does not rebuild; call `part.update()`.
+
+        Going through-all makes CATIA rewrite the depth to the length it computes
+        (probe 46n), so going back to blind requires the depth to be given again.
+
+        Args:
+            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`.
+            depth: The depth for a blind hole; must be omitted for through-all.
+            unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            ParameterTypeError: If `limit` is unknown, a blind hole has no depth, or a
+                through-all hole was given one.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        mode = _validate_hole_limit(limit)
+        if limit == HOLE_LIMIT_THROUGH_ALL and depth is not None:
+            raise ParameterTypeError("A through-all hole takes no depth.")
+        if limit == HOLE_LIMIT_BLIND:
+            if depth is None:
+                raise ParameterTypeError(
+                    "A blind hole needs its depth: CATIA replaced the old one when the hole "
+                    "went through-all."
+                )
+            validate_length_unit(unit)
+            _validate_positive_length(depth, "depth")
+        bottom_limit = self._dimension(("BottomLimit",))
+        with self._generation.mutation():
+            try:
+                bottom_limit.LimitMode = mode
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        if depth is not None:
+            self.set_depth(depth, unit)
+
+    @property
+    def bottom(self) -> str:
+        """str: `HOLE_BOTTOM_FLAT`, `HOLE_BOTTOM_V`, or `"other"` (from `BottomType`).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            code = int(self._com_object.BottomType)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return _BOTTOM_NAME_BY_TYPE.get(code, _HOLE_OTHER)
+
+    def set_bottom(self, bottom: str) -> None:
+        """Makes the hole's bottom flat or a 120-degree drill point. Does not rebuild.
+
+        Args:
+            bottom: `HOLE_BOTTOM_FLAT` or `HOLE_BOTTOM_V`.
+
+        Raises:
+            ParameterTypeError: If `bottom` is unknown.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        code = _validate_hole_bottom(bottom)
+        with self._generation.mutation():
+            try:
+                self._com_object.BottomType = code
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+
+def _validate_hole_limit(limit: Any) -> int:
+    """Turns a public hole limit into `LimitMode`, before any COM call."""
+    if limit not in _LIMIT_MODE_BY_NAME:
+        raise ParameterTypeError(
+            f"limit must be one of {sorted(SUPPORTED_HOLE_LIMITS)}, not {limit!r}."
+        )
+    return _LIMIT_MODE_BY_NAME[limit]
+
+
+def _validate_hole_bottom(bottom: Any) -> int:
+    """Turns a public hole bottom into `BottomType`, before any COM call."""
+    if bottom not in _BOTTOM_TYPE_BY_NAME:
+        raise ParameterTypeError(
+            f"bottom must be one of {sorted(SUPPORTED_HOLE_BOTTOMS)}, not {bottom!r}."
+        )
+    return _BOTTOM_TYPE_BY_NAME[bottom]
+
+
+def _validate_point3(value: Any, label: str) -> "tuple[float, float, float]":
+    """Validates an `(x, y, z)` point in millimetres, before any COM call."""
+    if not isinstance(value, (tuple, list)) or len(value) != _POINT3_SEED_LENGTH:
+        raise ParameterTypeError(f"{label} must be three numbers (x, y, z), not {value!r}.")
+    coerced = tuple(validate_length_value(item) for item in value)
+    if not all(math.isfinite(item) for item in coerced):
+        raise ParameterTypeError(f"{label} must be finite, not {value!r}.")
+    return (coerced[0], coerced[1], coerced[2])
 
 
 class RectangularPattern:
@@ -1760,6 +2038,11 @@ class CircularPattern(_NamedFeature):
         """
         return int(self._read_dimension(("AngularRepartition", "InstancesCount")))
 
+    @angular_instances.setter
+    def angular_instances(self, value: int) -> None:
+        """Assigning is `set_angular_instances(value)`: same validation, no rebuild."""
+        self.set_angular_instances(value)
+
     def set_angular_instances(self, instances: int) -> None:
         """Sets the instance count. Does not rebuild; call `part.update()`.
 
@@ -1792,6 +2075,11 @@ class CircularPattern(_NamedFeature):
         """
         return self._read_dimension(("AngularRepartition", "AngularSpacing"))
 
+    @angular_spacing_deg.setter
+    def angular_spacing_deg(self, value: float) -> None:
+        """Assigning is `set_angular_spacing_deg(value)`: same validation, no rebuild."""
+        self.set_angular_spacing_deg(value)
+
     def set_angular_spacing_deg(self, spacing: float, unit: str = DEGREE) -> None:
         """Sets the angle between instances. Does not rebuild; call `part.update()`.
 
@@ -1805,6 +2093,24 @@ class CircularPattern(_NamedFeature):
             Auto3dxError: If CATIA refuses the write.
         """
         self._write_angle(("AngularRepartition", "AngularSpacing"), spacing, unit)
+
+    @property
+    def instances(self) -> int:
+        """int: `angular_instances` under its everyday name; assignable the same way."""
+        return self.angular_instances
+
+    @instances.setter
+    def instances(self, value: int) -> None:
+        self.set_angular_instances(value)
+
+    @property
+    def spacing_deg(self) -> float:
+        """float: `angular_spacing_deg` under a shorter name; assignable the same way."""
+        return self.angular_spacing_deg
+
+    @spacing_deg.setter
+    def spacing_deg(self, value: float) -> None:
+        self.set_angular_spacing_deg(value)
 
     @property
     def radial_instances(self) -> int:
@@ -1996,6 +2302,7 @@ class PartDesign:
                 before this `PartDesign` last changed the model.
         """
         self._generation.require_current(edge.generation, "edge", "part.topology.edges()")
+        self._require_same_part(edge, "edge")
         self._require_same_body(edge, "edge", noun, "part.topology.edges(body=...)")
 
     def _require_current_face(self, face: Face, noun: str) -> None:
@@ -2018,7 +2325,20 @@ class PartDesign:
                 before this `PartDesign` last changed the model.
         """
         self._generation.require_current(face.generation, "face", "part.topology.faces()")
+        self._require_same_part(face, "face")
         self._require_same_body(face, "face", noun, "part.topology.faces(body=...)")
+
+    def _require_same_part(self, reference: Any, kind: str) -> None:
+        """Refuses an edge or face that another Part's snapshot produced, before COM.
+
+        Raises:
+            ValidationError: If the handle belongs to a different Part.
+        """
+        if not reference._belongs_to(self._generation):
+            raise ValidationError(
+                f"This {kind} belongs to another Part. Nothing was changed: take it from "
+                f"this Part's part.topology.{kind}s()."
+            )
 
     def _require_same_body(
         self, reference: Any, kind: str, noun: str, remedy: str
@@ -4166,15 +4486,28 @@ class PartDesign:
         self,
         name: str,
         face: Face,
-        depth: float,
+        depth: "float | None" = None,
         unit: str = MILLIMETRE,
+        *,
+        origin: "tuple[float, float, float] | None" = None,
+        diameter: "float | None" = None,
+        limit: "str | None" = None,
+        bottom: "str | None" = None,
     ) -> Hole:
         """Creates a new simple hole into the solid from one face.
 
-        Verified (`docs/conventions.md` section 1.2.2.2, probe 37):
-        `AddNewHole(face_reference, depth)` both created the feature and
-        survived `Part.Update()`, on the first face tried, with
-        `depth = 5.0`. No other value has been tried against a live session.
+        Without `origin` this is exactly the verified `AddNewHole(face_reference, depth)`
+        of probe 37, which leaves the position to CATIA. With `origin` it is
+        `AddNewHoleFromPoint(x, y, z, face_reference, depth)`: live (probe 46m) the hole
+        started exactly at the point given and drilled into the material, on a top face
+        and on a side face (probe 46p).
+
+        `diameter`, `limit` and `bottom` are written right after creation, before any
+        rebuild (probe 46s: all three, then one update, removed exactly the expected
+        volume). **Only what is passed is written.** CATIA carries the previous hole's
+        settings over to the next one (probe 46q: a new hole inherited a flat bottom from
+        the hole before it), so pass every attribute whose value matters rather than
+        relying on a default.
 
         A successful call here does not mean the feature is valid
         (`docs/conventions.md` section 1.2.2.1): this method never calls
@@ -4190,19 +4523,29 @@ class PartDesign:
             name: The new hole's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
             face: The `Face` to drill from, from `part.topology.faces()`.
-            depth: The hole's depth. Must be finite and strictly positive --
-                only `5.0` is verified, and a zero or negative depth has no
-                justified meaning for a hole.
-            unit: The unit `depth` is expressed in. Defaults to
+            depth: The hole's depth, finite and strictly positive. Required unless
+                `limit` is `HOLE_LIMIT_THROUGH_ALL`, which must not be given one.
+            unit: The unit `depth` and `diameter` are expressed in. Defaults to
                 `MILLIMETRE`.
+            origin: Where the hole starts, `(x, y, z)` in Part millimetres. It must lie in
+                the plane of `face`, which must be planar; both are checked by measuring
+                the face before CATIA is called. `None` leaves the position to CATIA.
+            diameter: The hole diameter. `None` keeps CATIA's (carried-over) value.
+            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`. `None` writes nothing.
+            bottom: `HOLE_BOTTOM_FLAT` or `HOLE_BOTTOM_V`. `None` writes nothing.
 
         Returns:
             The newly created `Hole`, already renamed to `name`.
 
         Raises:
             ParameterNameError: If `name` is not usable as a name.
-            ParameterTypeError: If `face` is not a `Face`, or `depth` is not
-                finite and positive.
+            ParameterTypeError: If `face` is not a `Face`, `depth` or `diameter` is not
+                finite and positive, `depth` is missing or given where it must not be,
+                `limit`/`bottom` is unknown, or `origin` is not three finite numbers or
+                does not lie on the face's plane.
+            UnsupportedSupportError: If `origin` is given and `face` is not planar.
+            StaleSnapshotError: If `face` comes from an outdated snapshot.
+            CrossBodyReferenceError: If `face` belongs to another body.
             UnsupportedUnitError: If `unit` is not a supported unit.
             FeatureConflictError: If a hole named `name` already exists.
             AmbiguousNameError: If two or more holes named `name` already
@@ -4220,15 +4563,79 @@ class PartDesign:
             )
         self._require_current_face(face, "hole")
         validate_length_unit(unit)
-        coerced_depth = _validate_positive_length(depth, "depth")
+        limit_mode = None if limit is None else _validate_hole_limit(limit)
+        bottom_type = None if bottom is None else _validate_hole_bottom(bottom)
+        if limit == HOLE_LIMIT_THROUGH_ALL:
+            if depth is not None:
+                raise ParameterTypeError(
+                    "A through-all hole takes no depth; CATIA computes it from the solid."
+                )
+            coerced_depth = _HOLE_NOMINAL_DEPTH
+        else:
+            if depth is None:
+                raise ParameterTypeError("depth is required unless limit is 'through_all'.")
+            coerced_depth = _validate_positive_length(depth, "depth")
+        coerced_diameter = (
+            None if diameter is None else _validate_positive_length(diameter, "diameter")
+        )
+        if origin is None:
+            factory_method = "AddNewHole"
+            factory_args: "tuple[Any, ...]" = (face.com_object, coerced_depth)
+        else:
+            point = _validate_point3(origin, "origin")
+            self._require_point_on_planar_face(point, face)
+            factory_method = "AddNewHoleFromPoint"
+            factory_args = (*point, face.com_object, coerced_depth)
+
+        def configure(hole: Any) -> None:
+            # The order live probe 46s used: diameter, bottom, then limit.
+            if coerced_diameter is not None:
+                hole.Diameter.Value = coerced_diameter
+            if bottom_type is not None:
+                hole.BottomType = bottom_type
+            if limit_mode is not None:
+                hole.BottomLimit.LimitMode = limit_mode
+
+        needs_configure = not (coerced_diameter is None and bottom_type is None
+                               and limit_mode is None)
         return self._create_feature(
             name,
             HOLE_KIND,
-            "AddNewHole",
-            (face.com_object, coerced_depth),
+            factory_method,
+            factory_args,
             Hole,
             "hole",
+            configure if needs_configure else None,
         )
+
+    @staticmethod
+    def _require_point_on_planar_face(
+        point: "tuple[float, float, float]", face: Face
+    ) -> None:
+        """Refuses a hole origin off a planar face's plane, or a face that is not planar.
+
+        Only points on the face were placed live; what CATIA does with a point off it was
+        never tried, so it is refused before any COM call.
+
+        Raises:
+            UnsupportedSupportError: If the face is not planar.
+            ParameterTypeError: If the point is further than `HOLE_ORIGIN_TOLERANCE_MM`
+                from the face's plane.
+        """
+        facts = face.geometry
+        if facts.surface_type != _PLANAR_SURFACE or facts.normal is None:
+            raise UnsupportedSupportError(
+                f"A positioned hole needs a planar face; this face measures as "
+                f"{facts.surface_type!r}. Nothing was changed."
+            )
+        offset = sum(
+            (point[index] - facts.center_mm[index]) * facts.normal[index] for index in range(3)
+        )
+        if abs(offset) > HOLE_ORIGIN_TOLERANCE_MM:
+            raise ParameterTypeError(
+                f"origin {point} lies {abs(offset):.4f} mm off the face's plane. Nothing was "
+                "changed: give a point on the face."
+            )
 
     def remove_hole(self, name: str) -> None:
         """Removes a hole from the model.
@@ -4397,7 +4804,9 @@ class PartDesign:
         feature: Any,
         angular_instances: int,
         angular_spacing_deg: float,
-        axis: str = CIRCULAR_PATTERN_AXIS_Z,
+        axis: Any = CIRCULAR_PATTERN_AXIS_Z,
+        *,
+        reverse: bool = False,
     ) -> CircularPattern:
         """Creates a circular pattern of an existing feature around an origin axis.
 
@@ -4407,9 +4816,19 @@ class PartDesign:
         name in a fresh process.
 
         The verified call is `AddNewCircPattern(feature, 1, instances, 1.0, spacing, 1, 1,
-        PlaneXY, PlaneXY, False, 0.0, True)`: one radial row, the angular row the caller
-        asked for, and the XY plane as both rotation centre and rotation axis. Radial rows
-        and a non-zero rotation angle are not exposed, because neither was verified.
+        reference, reference, reverse, 0.0, True)`: one radial row, the angular row the
+        caller asked for, and one reference as both rotation centre and rotation axis. The
+        axis can be:
+
+        * `"X"`, `"Y"` or `"Z"`: the origin plane whose normal is that axis (probe 46t
+          identified all three by centre of gravity);
+        * a cylindrical `Face`: its axis, such as a boss or a bore (probe 46u);
+        * a linear `Edge` (probe 46v).
+
+        A face or edge gets the same checks as a fillet's edge -- current snapshot, this
+        Part, this body -- and is measured first to prove it is cylindrical or linear.
+        Radial rows, a non-zero rotation angle and complete-crown mode are not exposed:
+        crown mode was accepted by CATIA and ignored (probe 46w).
 
         It never calls `Part.Update()`. A pattern that CATIA cannot build leaves a broken
         feature behind, which `remove_circular_pattern` takes out again.
@@ -4421,7 +4840,10 @@ class PartDesign:
                 `part.part_design`. It must belong to the body being modelled in.
             angular_instances: How many instances in total, the original included.
             angular_spacing_deg: The angle between neighbouring instances, in degrees.
-            axis: The rotation axis. Only `CIRCULAR_PATTERN_AXIS_Z` is verified.
+            axis: `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge`.
+            reverse: Turn the other way (`iIsReversedRotationAxis`). About Z the default
+                turns clockwise seen from +Z and `True` counter-clockwise (probe 46x); for
+                the other axes the sense was not measured.
 
         Returns:
             The newly created `CircularPattern`, already renamed to `name`.
@@ -4430,8 +4852,11 @@ class PartDesign:
             ParameterNameError: If `name` is not usable as a name.
             ParameterTypeError: If `feature` is not a feature wrapper, the instance count
                 is not usable, or the spacing is not a number.
-            UnsupportedSupportError: If `axis` is not a verified axis.
-            CrossBodyReferenceError: If the feature belongs to a different body.
+            UnsupportedSupportError: If `axis` is not a verified axis, or is a face that is
+                not cylindrical or an edge that is not a line.
+            StaleSnapshotError: If `axis` is a face or edge from an outdated snapshot.
+            CrossBodyReferenceError: If the feature, or an axis face or edge, belongs to a
+                different body.
             FeatureConflictError: If a circular pattern named `name` already exists.
             AmbiguousNameError: If two or more already exist with that name.
             PartialCreationError: If it was created but the follow-up rename failed.
@@ -4443,18 +4868,12 @@ class PartDesign:
                 "A circular pattern copies a Part Design feature from part.part_design, "
                 f"not {type(feature).__name__}."
             )
-        if axis not in SUPPORTED_CIRCULAR_PATTERN_AXES:
-            raise UnsupportedSupportError(
-                f"axis must be one of {sorted(SUPPORTED_CIRCULAR_PATTERN_AXES)}; got "
-                f"{axis!r}. Only the Z axis has been verified live."
-            )
+        if not isinstance(reverse, bool):
+            raise ParameterTypeError(f"reverse must be a bool, not {type(reverse).__name__}.")
         instances = _validate_instance_count(angular_instances)
         spacing = validate_angle_value(angular_spacing_deg)
         self._require_feature_in_target_body(feature, "circular pattern")
-        try:
-            reference = self._part_com_object.OriginElements.PlaneXY
-        except pywintypes.com_error as error:
-            raise _wrap_com_error(error) from error
+        reference = self._circular_pattern_axis(axis)
         return self._create_feature(
             name,
             CIRCULAR_PATTERN_KIND,
@@ -4469,13 +4888,58 @@ class PartDesign:
                 _PATTERN_COPY_POSITION,
                 reference,
                 reference,
-                _CIRCULAR_AXIS_REVERSED,
+                reverse,
                 _CIRCULAR_ROTATION_ANGLE,
                 _CIRCULAR_RADIUS_ALIGNED,
             ),
             CircularPattern,
             "circular pattern",
         )
+
+    def _circular_pattern_axis(self, axis: Any) -> Any:
+        """Resolves a circular pattern's axis to the reference CATIA takes, before any change.
+
+        Args:
+            axis: `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge`.
+
+        Returns:
+            The raw origin plane or topology `Reference`.
+
+        Raises:
+            UnsupportedSupportError: If `axis` is none of those, or is a face or edge of
+                the wrong shape.
+            StaleSnapshotError: If a face or edge comes from an outdated snapshot.
+            CrossBodyReferenceError: If a face or edge belongs to another body.
+            ValidationError: If a face or edge belongs to another Part.
+            Auto3dxError: If the origin plane cannot be read or the face/edge measured.
+        """
+        if isinstance(axis, Face):
+            self._require_current_face(axis, "circular pattern")
+            surface = axis.geometry.surface_type
+            if surface != _CYLINDRICAL_SURFACE:
+                raise UnsupportedSupportError(
+                    f"A face used as a pattern axis must be cylindrical; this one measures as "
+                    f"{surface!r}. Nothing was changed."
+                )
+            return axis.com_object
+        if isinstance(axis, Edge):
+            self._require_current_edge(axis, "circular pattern")
+            curve = axis.geometry.curve_type
+            if curve != _LINE_CURVE:
+                raise UnsupportedSupportError(
+                    f"An edge used as a pattern axis must be a straight line; this one "
+                    f"measures as {curve!r}. Nothing was changed."
+                )
+            return axis.com_object
+        if not isinstance(axis, str) or axis not in _CIRCULAR_AXIS_PLANES:
+            raise UnsupportedSupportError(
+                f"axis must be one of {sorted(SUPPORTED_CIRCULAR_PATTERN_AXES)}, a cylindrical "
+                f"Face or a linear Edge; got {axis!r}."
+            )
+        try:
+            return getattr(self._part_com_object.OriginElements, _CIRCULAR_AXIS_PLANES[axis])
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
 
     @property
     def circular_patterns(self) -> "list[CircularPattern]":

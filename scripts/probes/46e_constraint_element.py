@@ -26,15 +26,21 @@ def main() -> None:
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         constraints = step("Sketch.Constraints", lambda: sketch.Constraints)
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        line = step("Factory2D.CreateLine(0, 0, 30, 0)",
-                    lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0))
-        constraint = step("Constraints.AddMonoEltCst(length, line)",
-                          lambda: constraints.AddMonoEltCst(CONSTRAINT_LENGTH, line))
+        line = step(
+            "Factory2D.CreateLine(0, 0, 30, 0)", lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0)
+        )
+        constraint = step(
+            "Constraints.AddMonoEltCst(length, line)",
+            lambda: constraints.AddMonoEltCst(CONSTRAINT_LENGTH, line),
+        )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
         step("Line2D.Name", lambda: line.Name, fatal=False)
-        element = step("Constraint.GetConstraintElement(1)",
-                       lambda: constraint.GetConstraintElement(1), fatal=False)
+        element = step(
+            "Constraint.GetConstraintElement(1)",
+            lambda: constraint.GetConstraintElement(1),
+            fatal=False,
+        )
         if element is not None:
             marker(f"[INFO] element type {type(element).__name__}")
             step("element.DisplayName", lambda: element.DisplayName, fatal=False)

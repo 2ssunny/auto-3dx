@@ -26,12 +26,16 @@ def main() -> None:
         sketch = step("Sketches.Add(PlaneXY)", lambda: sketches.Add(plane))
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        line = step("Factory2D.CreateLine(10, 5, 40, 25)",
-                    lambda: factory.CreateLine(10.0, 5.0, 40.0, 25.0))
+        line = step(
+            "Factory2D.CreateLine(10, 5, 40, 25)", lambda: factory.CreateLine(10.0, 5.0, 40.0, 25.0)
+        )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
-        step("Line2D.GetEndPoints([0.0] * 4)",
-             lambda: line.GetEndPoints([0.0, 0.0, 0.0, 0.0]), fatal=False)
+        step(
+            "Line2D.GetEndPoints([0.0] * 4)",
+            lambda: line.GetEndPoints([0.0, 0.0, 0.0, 0.0]),
+            fatal=False,
+        )
     finally:
         if sketch is not None:
             delete(catia, sketch, SKETCH_NAME)

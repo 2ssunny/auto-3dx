@@ -14,8 +14,15 @@ The selection was empty before the probe and is left empty.
 """
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step, sweep,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    sweep,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46Y"
@@ -27,23 +34,33 @@ def main() -> None:
     try:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
-        edges = step("[composite, verified] part.topology.edges(body=None)",
-                     lambda: part.topology.edges(body=None))
+        edges = step(
+            "[composite, verified] part.topology.edges(body=None)",
+            lambda: part.topology.edges(body=None),
+        )
         by_name = {edge.descriptor: edge for edge in edges}
         marker(f"[INFO] Part-wide edges: {len(edges)}")
         selection = step("Editor.Selection", lambda: catia.active_editor().Selection)
         step("Selection.Count (before)", lambda: int(selection.Count))
         step("Selection.Clear", selection.Clear)
         step("Selection.Add(top face Reference)", lambda: selection.Add(top.com_object))
-        step("Selection.Search('Topology.Edge,sel')",
-             lambda: selection.Search("Topology.Edge,sel"), fatal=False)
+        step(
+            "Selection.Search('Topology.Edge,sel')",
+            lambda: selection.Search("Topology.Edge,sel"),
+            fatal=False,
+        )
         count = step("Selection.Count", lambda: int(selection.Count), fatal=False) or 0
         names = []
         for index in range(1, count + 1):
-            reference = step(f"Selection.Item({index}).Reference",
-                             lambda index=index: selection.Item(index).Reference)
-            names.append(step("Reference.DisplayName", lambda reference=reference:
-                              str(reference.DisplayName)))
+            reference = step(
+                f"Selection.Item({index}).Reference",
+                lambda index=index: selection.Item(index).Reference,
+            )
+            names.append(
+                step(
+                    "Reference.DisplayName", lambda reference=reference: str(reference.DisplayName)
+                )
+            )
         step("Selection.Clear", selection.Clear)
         for name in names:
             edge = by_name.get(name)

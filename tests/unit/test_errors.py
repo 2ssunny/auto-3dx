@@ -30,6 +30,8 @@ CATEGORIES = {
         "StaleSnapshotError",
         "CrossBodyReferenceError",
         "SupportNotUpdatedError",
+        "UnsupportedOperationError",
+        "UnknownFactError",
     },
     "NotFoundError": {
         "ParameterNotFoundError",
@@ -56,6 +58,7 @@ CATEGORIES = {
         "BooleanOperationError",
         "TopologyQueryAmbiguousError",
         "ReferenceInUseError",
+        "FactUnavailableError",
     },
     "AutomationError": {
         "PartUpdateError",

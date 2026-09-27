@@ -26,7 +26,7 @@ silently redirects later modelling; target a body explicitly with `part.work_in(
 """
 
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pywintypes
 
@@ -50,6 +50,10 @@ from auto_3dx.geometry.deletion import (
     require_selection,
 )
 from auto_3dx.parameters.parameter import validate_parameter_name
+
+if TYPE_CHECKING:
+    from auto_3dx.geometry.sketch import SketchCollection
+    from auto_3dx.highlevel.features import BodyFeatures
 
 _FIRST_COM_INDEX = 1
 _SHOW_ATTR = 0
@@ -94,6 +98,7 @@ class Body:
         part_com_object: Any,
         selection: Any = None,
         generation: "ModelGeneration | None" = None,
+        owner: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -101,13 +106,16 @@ class Body:
             com_object: The raw CATIA `Body` COM object.
             part_com_object: The raw CATIA `Part` it belongs to.
             selection: The raw `Selection` of the editor editing that Part. Only
-                visibility needs it.
+                visibility and sketch removal need it.
             generation: The owning Part's model generation.
+            owner: The `Part` wrapper this body was obtained through. The intent methods on
+                `features` build through it; without one they refuse.
         """
         self._com_object = com_object
         self._part_com_object = part_com_object
         self._selection = selection
         self._generation = generation if generation is not None else ModelGeneration()
+        self._owner = owner
 
     @property
     def com_object(self) -> Any:
@@ -136,18 +144,40 @@ class Body:
         return _same(self._com_object, main_body)
 
     @property
-    def features(self) -> "tuple[Any, ...]":
-        """tuple[FeatureInfo, ...]: The body's solid features, in model-tree order.
+    def features(self) -> "BodyFeatures":
+        """BodyFeatures: The body's solid features, in model-tree order, plus builders.
 
-        The same `FeatureInfo` values `part.inspect.bodies()` reports.
+        It is the same tuple of `FeatureInfo` values `part.inspect.bodies()` reports -- a
+        `tuple` subclass, so equality, length, iteration and indexing are unchanged -- and
+        it also offers `pad`, `pocket`, `hole`, `fillet`, `chamfer` and `circular_pattern`,
+        each one Level 2 call inside `part.work_in(body)` (`auto_3dx.highlevel.features`).
+        The listing is read when this property is; the builders act on the live model.
 
         Raises:
             AutomationError: If the body's shapes cannot be read.
         """
-        # Imported here: `auto_3dx.inspect` imports the geometry package this module is in.
+        # Imported here: `auto_3dx.inspect` and `auto_3dx.highlevel` import this package.
+        from auto_3dx.highlevel.features import BodyFeatures
         from auto_3dx.inspect.summary import Inspector
 
-        return Inspector._features_of(self._com_object, f"body {self.name!r}")
+        listing = Inspector._features_of(self._com_object, f"body {self.name!r}")
+        return BodyFeatures(listing, self._owner, self)
+
+    @property
+    def sketches(self) -> "SketchCollection":
+        """SketchCollection: This body's sketches: list, get, create and remove in it.
+
+        The same collection as `part.sketches`, pinned to this body the way
+        `part.work_in(body)` pins it (probe 41: `Body.Sketches.Add` lands in that body), so
+        `body.sketches.create(name, support=...)` needs no `with` block. It shares the
+        Part's model generation.
+        """
+        from auto_3dx.geometry.sketch import SketchCollection
+
+        body = self._com_object
+        return SketchCollection(
+            self._part_com_object, self._selection, self._generation, body_target=lambda: body
+        )
 
     @property
     def sketch_names(self) -> "tuple[str, ...]":
@@ -318,6 +348,7 @@ class BodyCollection:
         part_com_object: Any,
         selection: Any = None,
         generation: "ModelGeneration | None" = None,
+        owner: Any = None,
     ) -> None:
         """Initializes the collection.
 
@@ -326,14 +357,16 @@ class BodyCollection:
             selection: The raw `Selection` of the editor editing that Part. Needed by
                 `remove` and by body visibility.
             generation: The owning Part's model generation.
+            owner: The `Part` wrapper, handed to every `Body` so `body.features` can build.
         """
         self._part_com_object = part_com_object
         self._selection = selection
         self._generation = generation if generation is not None else ModelGeneration()
+        self._owner = owner
 
     def _wrap(self, com_object: Any) -> Body:
         return Body(
-            com_object, self._part_com_object, self._selection, self._generation
+            com_object, self._part_com_object, self._selection, self._generation, self._owner
         )
 
     def _raw_bodies(self) -> "list[Any]":

@@ -12,8 +12,14 @@ written, one `Part.Update()`, and the volume: a flat hole removes pi * 36 * 8 = 
 import math
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46O"
@@ -28,8 +34,10 @@ def main() -> None:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-        hole = step("ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
-                    lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0))
+        hole = step(
+            "ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
+            lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0),
+        )
         step("Hole.Name = ...", lambda: setattr(hole, "Name", f"{PREFIX}_HOLE"))
         step("Hole.BottomType (default)", lambda: hole.BottomType, fatal=False)
         step("Hole.BottomAngle.Value (default)", lambda: hole.BottomAngle.Value, fatal=False)
@@ -38,11 +46,16 @@ def main() -> None:
         step("Hole.BottomType read back", lambda: hole.BottomType, fatal=False)
         step("Part.Update", raw.Update, fatal=False)
         step("Part.IsUpToDate", lambda: bool(raw.IsUpToDate(raw)), fatal=False)
-        volume = step("[composite, verified] measurement.measure().volume_mm3",
-                      lambda: part.measurement.measure().volume_mm3, fatal=False)
+        volume = step(
+            "[composite, verified] measurement.measure().volume_mm3",
+            lambda: part.measurement.measure().volume_mm3,
+            fatal=False,
+        )
         if volume is not None:
-            marker(f"[RESULT] removed {48000.0 - volume:.3f} mm3; flat 12 x 8 is "
-                   f"{math.pi * 36 * 8:.3f}")
+            marker(
+                f"[RESULT] removed {48000.0 - volume:.3f} mm3; flat 12 x 8 is "
+                f"{math.pi * 36 * 8:.3f}"
+            )
     finally:
         if hole is not None:
             delete(catia, hole, f"{PREFIX}_HOLE")

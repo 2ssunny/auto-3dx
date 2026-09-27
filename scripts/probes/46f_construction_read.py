@@ -23,10 +23,12 @@ def main() -> None:
         sketch = step("Sketches.Add(PlaneXY)", lambda: sketches.Add(plane))
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        real = step("Factory2D.CreateLine(0, 0, 30, 0)",
-                    lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0))
-        helper = step("Factory2D.CreateLine(0, 0, 0, 20)",
-                      lambda: factory.CreateLine(0.0, 0.0, 0.0, 20.0))
+        real = step(
+            "Factory2D.CreateLine(0, 0, 30, 0)", lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0)
+        )
+        helper = step(
+            "Factory2D.CreateLine(0, 0, 0, 20)", lambda: factory.CreateLine(0.0, 0.0, 0.0, 20.0)
+        )
         step("helper.Construction = True", lambda: setattr(helper, "Construction", True))
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")

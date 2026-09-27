@@ -25,10 +25,14 @@ def cube(part, name):
     step("Sketch.Name = ...", lambda: setattr(sketch, "Name", f"{name}_SK"))
     factory = step("Sketch.OpenEdition", sketch.OpenEdition)
     for a, b, c, d in ((20, -5, 30, -5), (30, -5, 30, 5), (30, 5, 20, 5), (20, 5, 20, -5)):
-        step(f"Factory2D.CreateLine({a}, {b}, {c}, {d})",
-             lambda a=a, b=b, c=c, d=d: factory.CreateLine(float(a), float(b), float(c), float(d)))
+        step(
+            f"Factory2D.CreateLine({a}, {b}, {c}, {d})",
+            lambda a=a, b=b, c=c, d=d: factory.CreateLine(float(a), float(b), float(c), float(d)),
+        )
     step("Sketch.CloseEdition", sketch.CloseEdition)
-    pad = step("ShapeFactory.AddNewPad(sketch, 10)", lambda: raw.ShapeFactory.AddNewPad(sketch, 10.0))
+    pad = step(
+        "ShapeFactory.AddNewPad(sketch, 10)", lambda: raw.ShapeFactory.AddNewPad(sketch, 10.0)
+    )
     step("Pad.Name = ...", lambda: setattr(pad, "Name", name))
     step("Part.Update", raw.Update)
     return pad
@@ -49,17 +53,27 @@ def main() -> None:
                 f"ShapeFactory.AddNewCircPattern(seed, 1, 4, 1, 90, 1, 1, {label}, {label}, "
                 "False, 0, True)",
                 lambda plane=plane: raw.ShapeFactory.AddNewCircPattern(
-                    seed, 1, 4, 1.0, 90.0, 1, 1, plane, plane, False, 0.0, True),
-                fatal=False)
+                    seed, 1, 4, 1.0, 90.0, 1, 1, plane, plane, False, 0.0, True
+                ),
+                fatal=False,
+            )
             if pattern is None:
                 continue
             name = f"{PREFIX}_PAT_{label}"
-            step("Pattern.Name = ...", lambda pattern=pattern, name=name: setattr(pattern, "Name", name))
-            if step("Part.Update", raw.Update, fatal=False) is None and not bool(raw.IsUpToDate(raw)):
+            step(
+                "Pattern.Name = ...",
+                lambda pattern=pattern, name=name: setattr(pattern, "Name", name),
+            )
+            if step("Part.Update", raw.Update, fatal=False) is None and not bool(
+                raw.IsUpToDate(raw)
+            ):
                 marker(f"[RESULT] {label}: update failed")
             else:
-                mass = step("[composite, verified] measurement.measure()",
-                            part.measurement.measure, fatal=False)
+                mass = step(
+                    "[composite, verified] measurement.measure()",
+                    part.measurement.measure,
+                    fatal=False,
+                )
                 if mass is not None:
                     cog = tuple(round(value, 3) for value in mass.cog_mm)
                     marker(f"[RESULT] {label}: volume {mass.volume_mm3:.3f} cog {cog}")

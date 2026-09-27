@@ -11,7 +11,13 @@ touch along it: volume 4000, COG (30, 5, 5).
 """
 
 from _micro import (
-    delete, marker, require_blank_target, step, sweep, update_if_needed, verify_blank,
+    delete,
+    marker,
+    require_blank_target,
+    step,
+    sweep,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46V"
@@ -28,35 +34,48 @@ def main() -> None:
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", f"{PREFIX}_SEED_SK"))
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
         for a, b, c, d in ((20, -5, 30, -5), (30, -5, 30, 5), (30, 5, 20, 5), (20, 5, 20, -5)):
-            step(f"Factory2D.CreateLine({a}, {b}, {c}, {d})",
-                 lambda a=a, b=b, c=c, d=d: factory.CreateLine(float(a), float(b), float(c),
-                                                               float(d)))
+            step(
+                f"Factory2D.CreateLine({a}, {b}, {c}, {d})",
+                lambda a=a, b=b, c=c, d=d: factory.CreateLine(
+                    float(a), float(b), float(c), float(d)
+                ),
+            )
         step("Sketch.CloseEdition", sketch.CloseEdition)
-        seed = step("ShapeFactory.AddNewPad(sketch, 10)",
-                    lambda: raw.ShapeFactory.AddNewPad(sketch, 10.0))
+        seed = step(
+            "ShapeFactory.AddNewPad(sketch, 10)", lambda: raw.ShapeFactory.AddNewPad(sketch, 10.0)
+        )
         step("Pad.Name = ...", lambda: setattr(seed, "Name", f"{PREFIX}_SEED"))
         step("Part.Update", raw.Update)
-        edge = step("[composite, verified] edges().query().lines().parallel(Z).nearest((30,5,5))"
-                    ".one()",
-                    lambda: part.topology.edges(body=None).query().lines().parallel((0, 0, 1))
-                    .nearest((30.0, 5.0, 5.0)).one())
+        edge = step(
+            "[composite, verified] edges().query().lines().parallel(Z).nearest((30,5,5)).one()",
+            lambda: part.topology.edges(body=None)
+            .query()
+            .lines()
+            .parallel((0, 0, 1))
+            .nearest((30.0, 5.0, 5.0))
+            .one(),
+        )
         marker(f"[INFO] edge {edge.geometry.start_mm} -> {edge.geometry.end_mm}")
         pattern = step(
             "ShapeFactory.AddNewCircPattern(seed, 1, 4, 1, 90, 1, 1, edge, edge, False, 0, True)",
             lambda: raw.ShapeFactory.AddNewCircPattern(
-                seed, 1, 4, 1.0, 90.0, 1, 1, edge.com_object, edge.com_object, False, 0.0,
-                True),
-            fatal=False)
+                seed, 1, 4, 1.0, 90.0, 1, 1, edge.com_object, edge.com_object, False, 0.0, True
+            ),
+            fatal=False,
+        )
         if pattern is not None:
             step("Pattern.Name = ...", lambda: setattr(pattern, "Name", f"{PREFIX}_PAT"))
             step("Part.Update", raw.Update, fatal=False)
             step("Part.IsUpToDate", lambda: bool(raw.IsUpToDate(raw)), fatal=False)
-            mass = step("[composite, verified] measurement.measure()",
-                        part.measurement.measure, fatal=False)
+            mass = step(
+                "[composite, verified] measurement.measure()", part.measurement.measure, fatal=False
+            )
             if mass is not None:
                 cog = tuple(round(value, 3) for value in mass.cog_mm)
-                marker(f"[RESULT] volume {mass.volume_mm3:.3f} cog {cog} "
-                       "(about the edge: 4000, (30, 5, 5))")
+                marker(
+                    f"[RESULT] volume {mass.volume_mm3:.3f} cog {cog} "
+                    "(about the edge: 4000, (30, 5, 5))"
+                )
     finally:
         if pattern is not None:
             delete(catia, pattern, f"{PREFIX}_PAT")

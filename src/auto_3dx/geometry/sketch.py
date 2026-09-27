@@ -33,7 +33,7 @@ still only accepts the three origin-plane strings.
 
 import contextlib
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import pywintypes
@@ -45,6 +45,7 @@ from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
     AutomationError,
+    CrossBodyReferenceError,
     ParameterTypeError,
     PartialCreationError,
     SketchAlreadyExistsError,
@@ -52,6 +53,7 @@ from auto_3dx.errors import (
     SketchNotFoundError,
     SketchSupportMismatchError,
     SupportNotUpdatedError,
+    UnsupportedOperationError,
     UnsupportedSupportError,
     ValidationError,
 )
@@ -70,6 +72,16 @@ from auto_3dx.geometry.constraint import (
     ConstraintCollection,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
+from auto_3dx.geometry.sketch_geometry import (
+    CircleGeometry,
+    ConstraintInfo,
+    ElementGeometry,
+    LineGeometry,
+    PointGeometry,
+    SketchElementInfo,
+    SketchFrame,
+    SketchGeometry,
+)
 from auto_3dx.parameters.parameter import (
     MILLIMETRE,
     validate_length_unit,
@@ -91,6 +103,23 @@ SUPPORTED_SKETCH_SUPPORTS: frozenset[str] = frozenset({SUPPORT_XY, SUPPORT_YZ, S
 
 AXIS_TOLERANCE: float = 1e-9
 """Absolute tolerance used to compare `GetAbsoluteAxisData` results with `math.isclose`."""
+
+_LINE_KIND = "Line2D"
+_CIRCLE_KIND = "Circle2D"
+_POINT_KIND = "Point2D"
+_READABLE_ELEMENT_KINDS: "frozenset[str]" = frozenset({_LINE_KIND, _CIRCLE_KIND, _POINT_KIND})
+"""Element kinds whose geometry reads are live-verified (probes 46a-46h, 46ab)."""
+
+
+def _end_points_seed() -> "list[float]":
+    """A fresh four-number seed for `GetEndPoints`, which returns the filled tuple."""
+    return [0.0] * 4
+
+
+def _point_seed() -> "list[float]":
+    """A fresh two-number seed for `GetCenter`/`GetCoordinates`."""
+    return [0.0] * 2
+
 
 _AXIS_DATA_SEED: list[float] = [0.0] * 9
 """Seed buffer passed to `GetAbsoluteAxisData`, which returns the filled 9-tuple."""
@@ -114,6 +143,7 @@ _AXIS_DATA_BY_SUPPORT: dict[str, tuple[float, ...]] = {
 # section 8). The private name stays because sibling modules import it from here.
 if TYPE_CHECKING:
     from auto_3dx.geometry.planes import Plane
+    from auto_3dx.highlevel.profiles import RectangleProfile
 
 
 _wrap_com_error = automation_error
@@ -183,15 +213,14 @@ def _axis_data_matches(actual: tuple[float, ...], expected: tuple[float, ...]) -
 class SketchElement:
     """Wraps one 2D element drawn in a sketch (a point, line, circle, or spline).
 
-    Holds only identity and kind -- deliberately no read accessors for
-    geometry properties such as radius, coordinates, or start/end points.
-    Some of those properties are live-verified and some are not (see the
-    per-method notes on `SketchEditor.circle`/`arc`/`spline` below); adding
-    any of them here would ship the unverified ones alongside the verified
-    ones with no way for a caller to tell which is which. A caller that
-    needs a property reads it directly off `com_object`, the SDK's one
-    escape hatch (`docs/api-design.md` section 9): for example
-    `circle.com_object.Radius`.
+    Holds identity and kind, and reads back the geometry of the three kinds whose reads
+    are live-verified: `geometry()` returns a `LineGeometry`, `CircleGeometry` or
+    `PointGeometry` in sketch-local millimetres (probes 46a-46h, 46ab), and
+    `is_construction` reads the construction flag (probe 46f). Every one of those reads
+    was verified with the sketch edition closed, so both refuse to run inside the
+    `Sketch.edit()` block that is drawing the element; read after the block. Other kinds
+    (splines, control points, the sketch axis) have no verified reads and `geometry()`
+    refuses them rather than guessing.
 
     Every consumer that used to take a raw 2D COM object
     (`SketchEditor.set_construction`, the constraint methods, and
@@ -199,7 +228,9 @@ class SketchElement:
     caller never has to unwrap one just to pass it back in.
     """
 
-    def __init__(self, com_object: Any, sketch: Any = None) -> None:
+    def __init__(
+        self, com_object: Any, sketch: Any = None, editing: "Callable[[], bool] | None" = None
+    ) -> None:
         """Initializes the wrapper.
 
         Args:
@@ -212,9 +243,15 @@ class SketchElement:
                 recorded (the element came from a `SketchEditor` built
                 without a sketch), which skips that check entirely --
                 the compatibility path for existing callers.
+            editing: Reports whether the owning sketch's edition is open right now.
+                `geometry()` and `is_construction` refuse to read while it is: every
+                read was verified with the edition closed, and the one run that read
+                during an open edition left CATIA unresponsive (probe 46). `None`
+                skips the check, for an element built directly from a raw object.
         """
         self._com_object = com_object
         self._sketch = sketch
+        self._editing = editing
 
     @property
     def com_object(self) -> Any:
@@ -286,6 +323,87 @@ class SketchElement:
             The raw `Sketch` COM object, or `None` if no owner is recorded.
         """
         return self._sketch
+
+    def _require_closed_edition(self, what: str) -> None:
+        """Refuses a read while the owning sketch's edition is open, before any COM call."""
+        if self._editing is not None and self._editing():
+            raise ValidationError(
+                f"Reading {what} of a sketch element is refused while its sketch is open "
+                "for editing: every read was verified with the edition closed, and reading "
+                "during an open edition left CATIA unresponsive once. Read it after the "
+                "`with sketch.edit()` block ends."
+            )
+
+    @property
+    def is_construction(self) -> bool:
+        """bool: Whether this element is construction geometry, kept out of profiles.
+
+        Read from `Construction` (probe 46f: `False` for a profile line, `True` after
+        `set_construction`). Refused while the sketch's edition is open.
+
+        Raises:
+            ValidationError: If the owning sketch is open for editing.
+            UnsupportedOperationError: If this kind of element has no construction flag.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        self._require_closed_edition("the construction flag")
+        try:
+            return bool(self._com_object.Construction)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except AttributeError as error:
+            raise UnsupportedOperationError(
+                f"A {self.kind} has no Construction flag in this release."
+            ) from error
+
+    def geometry(self) -> ElementGeometry:
+        """Reads this element's geometry as plain sketch-local values.
+
+        * `Line2D` -> `LineGeometry(start, end)` from `GetEndPoints` (probe 46a).
+        * `Circle2D` -> `CircleGeometry(center, radius_mm, start, end)` from `GetCenter`,
+          `Radius` and `GetEndPoints`; `is_closed` tells a full circle from an arc, whose
+          end points differ (probes 46b, 46c, 46ab).
+        * `Point2D` -> `PointGeometry(position)` from `GetCoordinates` (probe 46g).
+
+        Coordinates are in the sketch's own frame; `Sketch.frame().to_global` maps them to
+        the Part. Nothing is cached: every call reads the model.
+
+        Returns:
+            The element's geometry.
+
+        Raises:
+            ValidationError: If the owning sketch is open for editing.
+            UnsupportedOperationError: If the element is of a kind without verified reads.
+            Auto3dxError: If the underlying COM call fails, or returns values of the wrong
+                shape.
+        """
+        self._require_closed_edition("the geometry")
+        kind = self.kind
+        if kind not in _READABLE_ELEMENT_KINDS:
+            raise UnsupportedOperationError(
+                f"Geometry reads are verified only for {sorted(_READABLE_ELEMENT_KINDS)}; "
+                f"this element is a {kind}. Nothing was read."
+            )
+        raw = self._com_object
+        try:
+            if kind == _LINE_KIND:
+                x1, y1, x2, y2 = (float(value) for value in raw.GetEndPoints(_end_points_seed()))
+                return LineGeometry(start=(x1, y1), end=(x2, y2))
+            if kind == _CIRCLE_KIND:
+                cx, cy = (float(value) for value in raw.GetCenter(_point_seed()))
+                radius = float(raw.Radius)
+                x1, y1, x2, y2 = (float(value) for value in raw.GetEndPoints(_end_points_seed()))
+                return CircleGeometry(
+                    center=(cx, cy), radius_mm=radius, start=(x1, y1), end=(x2, y2)
+                )
+            x, y = (float(value) for value in raw.GetCoordinates(_point_seed()))
+            return PointGeometry(position=(x, y))
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except (TypeError, ValueError) as error:
+            raise AutomationError(
+                f"CATIA returned geometry of an unexpected shape for a {kind}."
+            ) from error
 
     def __repr__(self) -> str:
         """Returns a debugging representation.
@@ -419,6 +537,10 @@ class SketchEditor:
         """Marks this short-lived editor unusable before closing the edition."""
         self._active = False
 
+    def _is_active(self) -> bool:
+        """Reports whether this editor's edition is still open (elements refuse reads)."""
+        return self._active
+
     @property
     def com_object(self) -> Any:
         """Returns the raw underlying COM object.
@@ -457,7 +579,7 @@ class SketchEditor:
             raw = self._com_object.CreatePoint(x_value, y_value)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return SketchElement(raw, self._sketch)
+        return SketchElement(raw, self._sketch, self._is_active)
 
     def line(self, x1: float, y1: float, x2: float, y2: float) -> SketchElement:
         """Creates a 2D line segment in the sketch.
@@ -484,7 +606,7 @@ class SketchEditor:
             raw = self._com_object.CreateLine(x1_value, y1_value, x2_value, y2_value)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return SketchElement(raw, self._sketch)
+        return SketchElement(raw, self._sketch, self._is_active)
 
     def circle(self, center_x: float, center_y: float, radius: float) -> SketchElement:
         """Creates a closed 2D circle in the sketch.
@@ -523,7 +645,7 @@ class SketchEditor:
             )
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return SketchElement(raw, self._sketch)
+        return SketchElement(raw, self._sketch, self._is_active)
 
     def arc(
         self,
@@ -587,7 +709,7 @@ class SketchEditor:
             )
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return SketchElement(raw, self._sketch)
+        return SketchElement(raw, self._sketch, self._is_active)
 
     def spline(self, points: "list[tuple[float, float]]") -> SketchElement:
         """Creates a 2D spline through a sequence of control points.
@@ -646,7 +768,7 @@ class SketchEditor:
             raw = self._com_object.CreateSpline(poles)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return SketchElement(raw, self._sketch)
+        return SketchElement(raw, self._sketch, self._is_active)
 
     def set_construction(self, element: Any, construction: bool = True) -> None:
         """Marks (or unmarks) a 2D geometry element as construction geometry.
@@ -1069,6 +1191,7 @@ class Sketch:
         self._part_com_object = part_com_object
         self._editing = False
         self._constraints: ConstraintCollection | None = None
+        self._created_on_face = False
 
     @property
     def com_object(self) -> Any:
@@ -1176,6 +1299,143 @@ class Sketch:
                 "GetAbsoluteAxisData returned a non-iterable result; expected "
                 "9 floats."
             ) from error
+
+    def frame(self) -> SketchFrame:
+        """Reads where this sketch sits in the Part: local origin and axes.
+
+        Built from `GetAbsoluteAxisData`. For a sketch on a face this is the only way to
+        know where local (0, 0) is: live, it was a corner of the face rather than its
+        centre (probe 46j), and a circle drawn at local (10, 5) cut a bore exactly at
+        `frame.to_global((10, 5))` (probe 46k). Read-only; nothing is cached.
+
+        Returns:
+            The `SketchFrame`.
+
+        Raises:
+            Auto3dxError: If the axis data cannot be read or does not hold nine numbers.
+        """
+        axis_data = self.axis_data()
+        try:
+            return SketchFrame.from_axis_data(axis_data)
+        except (TypeError, ValueError) as error:
+            raise AutomationError(
+                "GetAbsoluteAxisData did not return nine numbers; the sketch frame "
+                "cannot be built."
+            ) from error
+
+    @property
+    def created_on_face(self) -> bool:
+        """bool: Whether this wrapper created the sketch on a planar face of a solid.
+
+        Such a sketch's normal points out of that face's material (probes 46i, 46j, 46aa),
+        which is what lets a direction such as `"into_material"` be answered for it. The
+        flag lives on this wrapper only: a sketch found again with `sketches.get()` reports
+        `False` even when it does sit on a face, because a sketch has no readable support
+        member (`support()` returns `None` for a face sketch).
+        """
+        return self._created_on_face
+
+    def geometry(self) -> SketchGeometry:
+        """Reads everything drawn in this sketch back as plain values.
+
+        Lines, circles (closed or arc) and points come with their sketch-local geometry
+        and construction flag; every constraint comes with its name, type, mode, status,
+        value and first constrained element; the sketch frame says where local
+        coordinates sit in the Part. Elements of kinds without verified reads, such as
+        the `AbsoluteAxis` every sketch holds or a spline, are listed by name and kind in
+        `other_elements` and never guessed at.
+
+        This only reads, never rebuilds and does not advance the model generation. It is
+        refused inside this sketch's own `edit()` block (see `SketchElement.geometry`).
+
+        Returns:
+            A `SketchGeometry`.
+
+        Raises:
+            ValidationError: If this sketch is open for editing.
+            Auto3dxError: If a read fails.
+        """
+        if self._editing:
+            raise ValidationError(
+                "Sketch.geometry() is refused inside this sketch's edit() block; every read "
+                "was verified with the edition closed. Call it after the block ends."
+            )
+        lines: list[SketchElementInfo] = []
+        circles: list[SketchElementInfo] = []
+        points: list[SketchElementInfo] = []
+        others: list[tuple[str, str]] = []
+        for element in self.elements():
+            name = element.name
+            kind = element.kind
+            if kind not in _READABLE_ELEMENT_KINDS:
+                others.append((name, kind))
+                continue
+            info = SketchElementInfo(
+                name=name,
+                kind=kind,
+                construction=element.is_construction,
+                geometry=element.geometry(),
+            )
+            {_LINE_KIND: lines, _CIRCLE_KIND: circles, _POINT_KIND: points}[kind].append(info)
+        constraints = tuple(
+            ConstraintInfo(
+                name=constraint.name,
+                type_code=int(constraint.type_code),
+                mode=constraint.mode,
+                status=int(constraint.status),
+                value=constraint.value,
+                first_element=_first_element_name(constraint),
+            )
+            for constraint in self.constraints.list()
+        )
+        return SketchGeometry(
+            name=self.name,
+            frame=self.frame(),
+            lines=tuple(lines),
+            circles=tuple(circles),
+            points=tuple(points),
+            constraints=constraints,
+            other_elements=tuple(others),
+        )
+
+    def rectangle(
+        self,
+        width: float,
+        height: float,
+        origin: "tuple[float, float]" = (0.0, 0.0),
+        constraints: str = "none",
+    ) -> "RectangleProfile":
+        """Draws a closed rectangle from its lower-left corner in one edit session.
+
+        `constraints` is `"none"` (four lines), `"orientation"` (+ horizontal/vertical)
+        or `"dimensioned"` (+ width and height lengths). None of them is a fully
+        constrained rectangle: the corners are not coincidence-constrained
+        (`auto_3dx.highlevel.profiles`). Does not rebuild.
+
+        Returns:
+            A `RectangleProfile` with the four lines and the constraints created.
+        """
+        from auto_3dx.highlevel.profiles import rectangle
+
+        return rectangle(self, width, height, origin, constraints)
+
+    def centered_rectangle(
+        self,
+        width: float,
+        height: float,
+        center: "tuple[float, float]" = (0.0, 0.0),
+        constraints: str = "none",
+    ) -> "RectangleProfile":
+        """Draws a closed rectangle around a centre point; see `rectangle`."""
+        from auto_3dx.highlevel.profiles import centered_rectangle
+
+        return centered_rectangle(self, width, height, center, constraints)
+
+    def circle(self, center: "tuple[float, float]", radius: float) -> SketchElement:
+        """Draws one closed, unconstrained circle in one edit session. Does not rebuild."""
+        from auto_3dx.highlevel.profiles import circle
+
+        return circle(self, center, radius)
 
     def support(self) -> "str | Plane | None":
         """Reports which plane this sketch is attached to.
@@ -1288,7 +1548,7 @@ class Sketch:
             items = [collection.Item(index) for index in range(1, count + 1)]
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
-        return [SketchElement(item, self._com_object) for item in items]
+        return [SketchElement(item, self._com_object, self._is_editing) for item in items]
 
     def get_element(self, name: str) -> SketchElement:
         """Finds one geometric element of this sketch by the name CATIA gave it.
@@ -1327,7 +1587,7 @@ class Sketch:
                 f"This sketch has no element named {name!r}. It holds "
                 f"{self.element_names()}."
             ) from error
-        return SketchElement(item, self._com_object)
+        return SketchElement(item, self._com_object, self._is_editing)
 
     def _is_editing(self) -> bool:
         """Reports whether this sketch is inside an `edit()` block right now.
@@ -1444,6 +1704,28 @@ class Sketch:
         return f"Sketch(name={name!r})"
 
 
+def _first_element_name(constraint: Constraint) -> "str | None":
+    """The name of the first element a constraint acts on, or `None` if CATIA cannot say.
+
+    Informational only: a constraint whose element cannot be named is still listed, with
+    everything else about it, rather than failing the whole `Sketch.geometry()` read.
+    """
+    try:
+        return constraint.element_name(1)
+    except AutomationError:
+        return None
+
+
+_PLANAR_SURFACE = "planar"
+
+
+def _is_face(support: Any) -> bool:
+    """Whether `support` is a topology `Face` (imported late: `geometry.faces` imports us)."""
+    from auto_3dx.geometry.faces import Face
+
+    return isinstance(support, Face)
+
+
 class SketchCollection:
     """Wraps the sketches living on a Part's `MainBody`.
 
@@ -1554,9 +1836,79 @@ class SketchCollection:
         """
         if isinstance(support, str):
             return self._plane(support)
+        if _is_face(support):
+            return self._planar_face(support)
         plane = self._user_plane(support)
         self._require_updated_support(plane)
         return plane
+
+    def _planar_face(self, face: Any) -> Any:
+        """Vets a `Face` as a sketch support and returns its raw `Reference`.
+
+        `Sketches.Add(<planar face Reference>)` is verified on the top, bottom and a side
+        face of a block and on a pocket floor (probes 46i, 46j, 46aa): the sketch sits on
+        the face, its normal points out of the material, and it follows the face when the
+        solid is rebuilt with other dimensions (probe 46l). Everything below is checked
+        before CATIA is called, so a refusal leaves the model untouched.
+
+        Args:
+            face: A `Face` from `part.topology.faces()`.
+
+        Returns:
+            The face's raw `Reference`, which `Sketches.Add` accepts.
+
+        Raises:
+            StaleSnapshotError: If the face comes from a snapshot older than the model.
+            ValidationError: If the face belongs to another Part.
+            CrossBodyReferenceError: If the face belongs to a different body from the one
+                the sketch would be added to.
+            UnsupportedSupportError: If the face is not planar. A sketch on a curved face
+                was never tried.
+            AutomationError: If the face cannot be measured.
+        """
+        self._generation.require_current(face.generation, "face", "part.topology.faces()")
+        if not face._belongs_to(self._generation):
+            raise ValidationError(
+                "This face belongs to another Part; a sketch can only be put on a face of "
+                "the Part it is created in. Take the face from this Part's "
+                "part.topology.faces()."
+            )
+        self._require_face_in_target_body(face)
+        surface = face.geometry.surface_type
+        if surface != _PLANAR_SURFACE:
+            raise UnsupportedSupportError(
+                f"A sketch needs a planar face; this face measures as {surface!r}. Nothing "
+                "was changed. A sketch on a curved face has no live evidence."
+            )
+        return face.com_object
+
+    def _require_face_in_target_body(self, face: Any) -> None:
+        """Refuses a face of another body, as `PartDesign` refuses its edges and faces.
+
+        An unknown owner is allowed through, exactly as for features: refusing on a
+        missing answer would break valid calls (`docs/api-design.md` section 7).
+
+        Raises:
+            CrossBodyReferenceError: If the face's body is not the target body.
+        """
+        owner = face.owner_body
+        if owner is None:
+            return
+        try:
+            target = self._body_target() if self._body_target is not None else None
+            if target is None:
+                target = self._part_com_object.MainBody
+            same = bool(owner == target)
+        except pywintypes.com_error:
+            return
+        if same:
+            return
+        raise CrossBodyReferenceError(
+            f"This face belongs to body {face.owner_body_name or 'another body'!r}, but the "
+            "sketch would be added to a different body. Nothing was changed: take the face "
+            "from the body you are sketching in, or open part.work_in(body) for the body "
+            "that owns it."
+        )
 
     def _user_plane(self, support: Any) -> Any:
         """Unwraps a plane wrapper into the raw plane `Sketches.Add` accepts.
@@ -1750,17 +2102,23 @@ class SketchCollection:
             name: The new sketch's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
             support: One of `SUPPORTED_SKETCH_SUPPORTS` (`"XY"`/`"YZ"`/
-                `"ZX"`), or a plane wrapper returned by
+                `"ZX"`), a plane wrapper returned by
                 `auto_3dx.geometry.planes.PlaneCollection`
-                (`OffsetPlane`/`AnglePlane`) -- see `_resolve_support`.
-                Defaults to `SUPPORT_XY`.
+                (`OffsetPlane`/`AnglePlane`) -- see `_resolve_support` -- or a planar
+                `Face` from a current `part.topology.faces()` snapshot of the body the
+                sketch goes into (probes 46i-46l, 46aa). Defaults to `SUPPORT_XY`.
 
         Returns:
-            The newly created `Sketch`, already renamed to `name`.
+            The newly created `Sketch`, already renamed to `name`. On a face,
+            `sketch.frame()` says where local (0, 0) is -- a corner of the face, not its
+            centre -- and `sketch.created_on_face` is `True`.
 
         Raises:
             ParameterNameError: If `name` is not usable as a name.
-            UnsupportedSupportError: If `support` is not a supported value.
+            UnsupportedSupportError: If `support` is not a supported value, or is a face
+                that is not planar.
+            StaleSnapshotError: If `support` is a face from an outdated snapshot.
+            CrossBodyReferenceError: If `support` is a face of another body.
             SketchAlreadyExistsError: If a sketch named `name` already exists.
             PartialCreationError: If the sketch was created but the follow-up
                 rename failed.
@@ -1779,6 +2137,7 @@ class SketchCollection:
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
             sketch = Sketch(com_object, self._generation, self._part_com_object)
+            sketch._created_on_face = _is_face(support)
             # The rename is applied directly (not via `sketch.rename()`) so
             # this stays a single mutation instead of a nested one.
             try:

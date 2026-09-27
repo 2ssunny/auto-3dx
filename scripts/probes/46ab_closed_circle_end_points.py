@@ -23,12 +23,17 @@ def main() -> None:
         sketch = step("Sketches.Add(PlaneXY)", lambda: sketches.Add(plane))
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        circle = step("Factory2D.CreateClosedCircle(20, 15, 4)",
-                      lambda: factory.CreateClosedCircle(20.0, 15.0, 4.0))
+        circle = step(
+            "Factory2D.CreateClosedCircle(20, 15, 4)",
+            lambda: factory.CreateClosedCircle(20.0, 15.0, 4.0),
+        )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
-        step("Circle2D.GetEndPoints([0.0] * 4) (closed)",
-             lambda: circle.GetEndPoints([0.0] * 4), fatal=False)
+        step(
+            "Circle2D.GetEndPoints([0.0] * 4) (closed)",
+            lambda: circle.GetEndPoints([0.0] * 4),
+            fatal=False,
+        )
     finally:
         if sketch is not None:
             delete(catia, sketch, SKETCH_NAME)

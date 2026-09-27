@@ -17,8 +17,15 @@ outside the face -> 10 if bounded, 0 if the plane is used. Read-only.
 import win32com.client
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step, sweep,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    sweep,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46Z"
@@ -32,12 +39,18 @@ def main() -> None:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         editor = step("Catia.active_editor", catia.active_editor)
-        service = step("Editor.GetService('MeasurableService')",
-                       lambda: editor.GetService("MeasurableService"))
-        item = step("MeasurableService.GetMeasurable(top, 7)",
-                    lambda: service.GetMeasurable(top.com_object, MEASURABLE_PLANE))
-        between = step("CastTo(item, 'MeasurableBetween')",
-                       lambda: win32com.client.CastTo(item, "MeasurableBetween"), fatal=False)
+        service = step(
+            "Editor.GetService('MeasurableService')", lambda: editor.GetService("MeasurableService")
+        )
+        item = step(
+            "MeasurableService.GetMeasurable(top, 7)",
+            lambda: service.GetMeasurable(top.com_object, MEASURABLE_PLANE),
+        )
+        between = step(
+            "CastTo(item, 'MeasurableBetween')",
+            lambda: win32com.client.CastTo(item, "MeasurableBetween"),
+            fatal=False,
+        )
         if between is None:
             return
         for label, point, expected in (
@@ -45,8 +58,11 @@ def main() -> None:
             ("5 mm above", (0.0, 0.0, 25.0), "5"),
             ("in plane, 10 mm outside", (40.0, 0.0, 20.0), "10 if bounded, 0 if plane"),
         ):
-            result = step(f"DistanceMinToPoint{point}",
-                          lambda point=point: between.DistanceMinToPoint(*point), fatal=False)
+            result = step(
+                f"DistanceMinToPoint{point}",
+                lambda point=point: between.DistanceMinToPoint(*point),
+                fatal=False,
+            )
             marker(f"[RESULT] {label}: {result!r} (expected {expected})")
     finally:
         if pad is not None:

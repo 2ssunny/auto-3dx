@@ -10,8 +10,14 @@ and on the +X side face (outward is +X), and only the frames are read. Nothing i
 """
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46J"
@@ -37,20 +43,30 @@ def main() -> None:
         for label, _, _, outward in cases:
             face = faces[label]
             marker(f"[INFO] {label} centre {face.geometry.center_mm} outward {outward}")
-            sketch = step(f"Sketches.Add({label} face Reference)",
-                          lambda face=face: sketches.Add(face.com_object), fatal=False)
+            sketch = step(
+                f"Sketches.Add({label} face Reference)",
+                lambda face=face: sketches.Add(face.com_object),
+                fatal=False,
+            )
             if sketch is None:
                 continue
             name = f"{PREFIX}_{label}_SK"
             created.append((sketch, name))
-            step("Sketch.Name = ...", lambda sketch=sketch, name=name: setattr(sketch, "Name", name))
-            frame = step("Sketch.GetAbsoluteAxisData([0.0] * 9)",
-                         lambda sketch=sketch: sketch.GetAbsoluteAxisData([0.0] * 9), fatal=False)
+            step(
+                "Sketch.Name = ...", lambda sketch=sketch, name=name: setattr(sketch, "Name", name)
+            )
+            frame = step(
+                "Sketch.GetAbsoluteAxisData([0.0] * 9)",
+                lambda sketch=sketch: sketch.GetAbsoluteAxisData([0.0] * 9),
+                fatal=False,
+            )
             if frame is not None:
                 normal = cross(frame[3:6], frame[6:9])
                 dot = sum(a * b for a, b in zip(normal, outward))
-                marker(f"[RESULT] {label}: normal {tuple(round(n, 6) for n in normal)}, "
-                       f"dot with outward {dot:+.6f}")
+                marker(
+                    f"[RESULT] {label}: normal {tuple(round(n, 6) for n in normal)}, "
+                    f"dot with outward {dot:+.6f}"
+                )
         step("Part.Update", raw.Update, fatal=False)
     finally:
         for sketch, name in reversed(created):

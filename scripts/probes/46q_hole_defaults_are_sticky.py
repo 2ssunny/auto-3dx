@@ -12,7 +12,12 @@ with the hole.
 """
 
 from _micro import (
-    block_fixture, delete, planar_face, require_blank_target, step, update_if_needed,
+    block_fixture,
+    delete,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
     verify_blank,
 )
 
@@ -27,8 +32,10 @@ def main() -> None:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-        hole = step("ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
-                    lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0))
+        hole = step(
+            "ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
+            lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0),
+        )
         step("Hole.Name = ...", lambda: setattr(hole, "Name", f"{PREFIX}_HOLE"))
         step("Hole.BottomType", lambda: hole.BottomType, fatal=False)
         step("Hole.BottomAngle.Value", lambda: hole.BottomAngle.Value, fatal=False)

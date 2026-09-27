@@ -35,12 +35,18 @@ def main() -> None:
         top = step("CreateLine top", lambda: factory.CreateLine(x1, y1, x0, y1))
         left = step("CreateLine left", lambda: factory.CreateLine(x0, y1, x0, y0))
         made = []
-        for label, kind, line in (("horizontal(bottom)", HORIZONTAL, bottom),
-                                  ("horizontal(top)", HORIZONTAL, top),
-                                  ("vertical(right)", VERTICAL, right),
-                                  ("vertical(left)", VERTICAL, left)):
-            made.append(step(f"Constraints.AddMonoEltCst({label})",
-                             lambda kind=kind, line=line: constraints.AddMonoEltCst(kind, line)))
+        for label, kind, line in (
+            ("horizontal(bottom)", HORIZONTAL, bottom),
+            ("horizontal(top)", HORIZONTAL, top),
+            ("vertical(right)", VERTICAL, right),
+            ("vertical(left)", VERTICAL, left),
+        ):
+            made.append(
+                step(
+                    f"Constraints.AddMonoEltCst({label})",
+                    lambda kind=kind, line=line: constraints.AddMonoEltCst(kind, line),
+                )
+            )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed")
         step("Part.Update", raw.Update, fatal=False)
@@ -50,8 +56,11 @@ def main() -> None:
             step("Constraint.Name", lambda constraint=constraint: constraint.Name, fatal=False)
             step("Constraint.Type", lambda constraint=constraint: constraint.Type, fatal=False)
             step("Constraint.Status", lambda constraint=constraint: constraint.Status, fatal=False)
-        step("bottom.GetEndPoints (after update)", lambda: bottom.GetEndPoints([0.0] * 4),
-             fatal=False)
+        step(
+            "bottom.GetEndPoints (after update)",
+            lambda: bottom.GetEndPoints([0.0] * 4),
+            fatal=False,
+        )
     finally:
         if sketch is not None:
             delete(catia, sketch, SKETCH_NAME)

@@ -38,6 +38,7 @@ from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
 from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.geometry.topology import Topology
+from auto_3dx.highlevel.finders import PartGeometry
 from auto_3dx.inspect import Inspector
 from auto_3dx.measurement.inertia import SolidMeasurement
 from auto_3dx.parameters.collection import ParameterCollection
@@ -308,8 +309,20 @@ class Part:
         body created by another process is found by name.
         """
         if self._bodies is None:
-            self._bodies = BodyCollection(self._com_object, self._selection, self._generation)
+            self._bodies = BodyCollection(
+                self._com_object, self._selection, self._generation, owner=self
+            )
         return self._bodies
+
+    @property
+    def geometry(self) -> PartGeometry:
+        """PartGeometry: Semantic face and edge finders (`part.geometry.top_face()`).
+
+        Each finder takes one fresh snapshot through `part.topology` and composes
+        `snapshot.query()`, returning `one()` -- never an index, a descriptor or the first
+        match (`auto_3dx.highlevel.finders`). Built on each access; it holds no state.
+        """
+        return PartGeometry(self)
 
     @contextmanager
     def work_in(self, body: "Body | str") -> Iterator[Body]:

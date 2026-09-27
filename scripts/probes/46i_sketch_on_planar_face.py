@@ -13,8 +13,14 @@ the tree. No geometry is drawn and no feature is built on the sketch.
 """
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46I"
@@ -29,13 +35,17 @@ def main() -> None:
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         marker(f"[INFO] top face centre {top.geometry.center_mm} normal {top.geometry.normal}")
         sketches = step("MainBody.Sketches", lambda: raw.MainBody.Sketches)
-        face_sketch = step("Sketches.Add(top face Reference)",
-                           lambda: sketches.Add(top.com_object), fatal=False)
+        face_sketch = step(
+            "Sketches.Add(top face Reference)", lambda: sketches.Add(top.com_object), fatal=False
+        )
         if face_sketch is None:
             return
         step("Sketch.Name = ...", lambda: setattr(face_sketch, "Name", f"{PREFIX}_TOP_SK"))
-        step("Sketch.GetAbsoluteAxisData([0.0] * 9)",
-             lambda: face_sketch.GetAbsoluteAxisData([0.0] * 9), fatal=False)
+        step(
+            "Sketch.GetAbsoluteAxisData([0.0] * 9)",
+            lambda: face_sketch.GetAbsoluteAxisData([0.0] * 9),
+            fatal=False,
+        )
         step("Part.Update", raw.Update, fatal=False)
         step("Part.IsUpToDate", lambda: bool(raw.IsUpToDate(raw)), fatal=False)
     finally:

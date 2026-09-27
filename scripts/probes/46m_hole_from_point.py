@@ -13,8 +13,14 @@ query. Uncertain calls, each marked: `ShapeFactory.AddNewHoleFromPoint(10, 5, 20
 import math
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46M"
@@ -28,25 +34,40 @@ def main() -> None:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-        hole = step("ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
-                    lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0))
+        hole = step(
+            "ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
+            lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0),
+        )
         step("Hole.Name = ...", lambda: setattr(hole, "Name", f"{PREFIX}_HOLE"))
         diameter = step("Hole.Diameter.Value", lambda: hole.Diameter.Value, fatal=False)
         step("Hole.BottomLimit.LimitMode", lambda: hole.BottomLimit.LimitMode, fatal=False)
-        step("Hole.BottomLimit.Dimension.Value",
-             lambda: hole.BottomLimit.Dimension.Value, fatal=False)
-        step("Hole.GetOrigin([0.0] * 3) before update",
-             lambda: hole.GetOrigin([0.0] * 3), fatal=False)
+        step(
+            "Hole.BottomLimit.Dimension.Value",
+            lambda: hole.BottomLimit.Dimension.Value,
+            fatal=False,
+        )
+        step(
+            "Hole.GetOrigin([0.0] * 3) before update",
+            lambda: hole.GetOrigin([0.0] * 3),
+            fatal=False,
+        )
         step("Part.Update", raw.Update)
-        step("Hole.GetOrigin([0.0] * 3) after update",
-             lambda: hole.GetOrigin([0.0] * 3), fatal=False)
-        volume = step("[composite, verified] measurement.measure().volume_mm3",
-                      lambda: part.measurement.measure().volume_mm3)
+        step(
+            "Hole.GetOrigin([0.0] * 3) after update", lambda: hole.GetOrigin([0.0] * 3), fatal=False
+        )
+        volume = step(
+            "[composite, verified] measurement.measure().volume_mm3",
+            lambda: part.measurement.measure().volume_mm3,
+        )
         if diameter is not None:
-            marker(f"[RESULT] removed {48000.0 - volume:.3f} mm3; a flat {diameter} x 8 "
-                   f"cylinder is {math.pi * (diameter / 2) ** 2 * 8:.3f}")
-        bore = step("[composite, verified] faces().query().cylindrical().one()",
-                    lambda: part.topology.faces(body=None).query().cylindrical().one())
+            marker(
+                f"[RESULT] removed {48000.0 - volume:.3f} mm3; a flat {diameter} x 8 "
+                f"cylinder is {math.pi * (diameter / 2) ** 2 * 8:.3f}"
+            )
+        bore = step(
+            "[composite, verified] faces().query().cylindrical().one()",
+            lambda: part.topology.faces(body=None).query().cylindrical().one(),
+        )
         marker(f"[RESULT] bore centre {bore.geometry.center_mm} radius {bore.geometry.radius_mm}")
     finally:
         if hole is not None:

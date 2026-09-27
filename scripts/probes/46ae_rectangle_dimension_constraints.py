@@ -38,19 +38,30 @@ def main() -> None:
         top = step("CreateLine top", lambda: factory.CreateLine(x1, y1, x0, y1))
         left = step("CreateLine left", lambda: factory.CreateLine(x0, y1, x0, y0))
         made = []
-        for label, kind, line in (("horizontal(bottom)", HORIZONTAL, bottom),
-                                  ("horizontal(top)", HORIZONTAL, top),
-                                  ("vertical(right)", VERTICAL, right),
-                                  ("vertical(left)", VERTICAL, left)):
-            made.append(step(f"Constraints.AddMonoEltCst({label})",
-                             lambda kind=kind, line=line: constraints.AddMonoEltCst(kind, line)))
+        for label, kind, line in (
+            ("horizontal(bottom)", HORIZONTAL, bottom),
+            ("horizontal(top)", HORIZONTAL, top),
+            ("vertical(right)", VERTICAL, right),
+            ("vertical(left)", VERTICAL, left),
+        ):
+            made.append(
+                step(
+                    f"Constraints.AddMonoEltCst({label})",
+                    lambda kind=kind, line=line: constraints.AddMonoEltCst(kind, line),
+                )
+            )
         for label, line, value in (("bottom", bottom, 12.0), ("left", left, 8.0)):
-            constraint = step(f"Constraints.AddMonoEltCst(length({label}))",
-                              lambda line=line: constraints.AddMonoEltCst(LENGTH, line))
-            dimension = step("Constraint.Dimension", lambda constraint=constraint:
-                             constraint.Dimension)
-            step(f"Dimension.Value = {value}", lambda dimension=dimension, value=value:
-                 setattr(dimension, "Value", value))
+            constraint = step(
+                f"Constraints.AddMonoEltCst(length({label}))",
+                lambda line=line: constraints.AddMonoEltCst(LENGTH, line),
+            )
+            dimension = step(
+                "Constraint.Dimension", lambda constraint=constraint: constraint.Dimension
+            )
+            step(
+                f"Dimension.Value = {value}",
+                lambda dimension=dimension, value=value: setattr(dimension, "Value", value),
+            )
             made.append(constraint)
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed")
@@ -61,8 +72,11 @@ def main() -> None:
             step("Constraint.Name", lambda constraint=constraint: constraint.Name, fatal=False)
             step("Constraint.Type", lambda constraint=constraint: constraint.Type, fatal=False)
             step("Constraint.Status", lambda constraint=constraint: constraint.Status, fatal=False)
-        step("bottom.GetEndPoints (after update)", lambda: bottom.GetEndPoints([0.0] * 4),
-             fatal=False)
+        step(
+            "bottom.GetEndPoints (after update)",
+            lambda: bottom.GetEndPoints([0.0] * 4),
+            fatal=False,
+        )
     finally:
         if sketch is not None:
             delete(catia, sketch, SKETCH_NAME)

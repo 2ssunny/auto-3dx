@@ -28,8 +28,10 @@ def main() -> None:
         sketch = step("Sketches.Add(PlaneXY)", lambda: sketches.Add(plane))
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        arc = step("Factory2D.CreateCircle(-20, -10, 6, 0, pi/2)",
-                   lambda: factory.CreateCircle(-20.0, -10.0, 6.0, 0.0, math.pi / 2))
+        arc = step(
+            "Factory2D.CreateCircle(-20, -10, 6, 0, pi/2)",
+            lambda: factory.CreateCircle(-20.0, -10.0, 6.0, 0.0, math.pi / 2),
+        )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
         step("arc GetCenter([0.0] * 2)", lambda: arc.GetCenter([0.0, 0.0]), fatal=False)

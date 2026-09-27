@@ -11,8 +11,14 @@ pi*36*6 + pi*36*3.4641/3 = 808.186 mm3; pointing out of the block it removes not
 """
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46P"
@@ -27,22 +33,35 @@ def main() -> None:
         side = planar_face(part, (1, 0, 0), (1, 0, 0))
         marker(f"[INFO] side face centre {side.geometry.center_mm}")
         shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-        hole = step("ShapeFactory.AddNewHoleFromPoint(30, 0, 10, side, 6)",
-                    lambda: shape_factory.AddNewHoleFromPoint(30.0, 0.0, 10.0, side.com_object, 6.0))
+        hole = step(
+            "ShapeFactory.AddNewHoleFromPoint(30, 0, 10, side, 6)",
+            lambda: shape_factory.AddNewHoleFromPoint(30.0, 0.0, 10.0, side.com_object, 6.0),
+        )
         step("Hole.Name = ...", lambda: setattr(hole, "Name", f"{PREFIX}_HOLE"))
-        step("Hole.GetDirection([0.0] * 3) before update",
-             lambda: hole.GetDirection([0.0] * 3), fatal=False)
+        step(
+            "Hole.GetDirection([0.0] * 3) before update",
+            lambda: hole.GetDirection([0.0] * 3),
+            fatal=False,
+        )
         step("Part.Update", raw.Update, fatal=False)
-        step("Hole.GetDirection([0.0] * 3) after update",
-             lambda: hole.GetDirection([0.0] * 3), fatal=False)
+        step(
+            "Hole.GetDirection([0.0] * 3) after update",
+            lambda: hole.GetDirection([0.0] * 3),
+            fatal=False,
+        )
         step("Hole.GetOrigin([0.0] * 3)", lambda: hole.GetOrigin([0.0] * 3), fatal=False)
-        volume = step("[composite, verified] measurement.measure().volume_mm3",
-                      lambda: part.measurement.measure().volume_mm3, fatal=False)
+        volume = step(
+            "[composite, verified] measurement.measure().volume_mm3",
+            lambda: part.measurement.measure().volume_mm3,
+            fatal=False,
+        )
         if volume is not None:
             marker(f"[RESULT] removed {48000.0 - volume:.3f} mm3 (into the material: 808.186)")
-        bore = step("[composite, verified] faces().query().cylindrical().one()",
-                    lambda: part.topology.faces(body=None).query().cylindrical().one(),
-                    fatal=False)
+        bore = step(
+            "[composite, verified] faces().query().cylindrical().one()",
+            lambda: part.topology.faces(body=None).query().cylindrical().one(),
+            fatal=False,
+        )
         if bore is not None:
             marker(f"[RESULT] bore centre {bore.geometry.center_mm}")
     finally:

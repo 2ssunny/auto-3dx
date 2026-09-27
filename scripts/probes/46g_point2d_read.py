@@ -25,8 +25,11 @@ def main() -> None:
         point = step("Factory2D.CreatePoint(-5, 7.5)", lambda: factory.CreatePoint(-5.0, 7.5))
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
-        step("Point2D.GetCoordinates([0.0] * 2)",
-             lambda: point.GetCoordinates([0.0, 0.0]), fatal=False)
+        step(
+            "Point2D.GetCoordinates([0.0] * 2)",
+            lambda: point.GetCoordinates([0.0, 0.0]),
+            fatal=False,
+        )
     finally:
         if sketch is not None:
             delete(catia, sketch, SKETCH_NAME)

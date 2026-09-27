@@ -12,8 +12,14 @@ it was before probe 46o.
 """
 
 from _micro import (
-    block_fixture, delete, marker, planar_face, require_blank_target, step,
-    update_if_needed, verify_blank,
+    block_fixture,
+    delete,
+    marker,
+    planar_face,
+    require_blank_target,
+    step,
+    update_if_needed,
+    verify_blank,
 )
 
 PREFIX = "AUTO3DX_P46R"
@@ -28,16 +34,21 @@ def main() -> None:
         pad, _ = block_fixture(part, f"{PREFIX}_BLOCK")
         top = planar_face(part, (0, 0, 1), (0, 0, 1))
         shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-        hole = step("ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
-                    lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0))
+        hole = step(
+            "ShapeFactory.AddNewHoleFromPoint(10, 5, 20, top, 8)",
+            lambda: shape_factory.AddNewHoleFromPoint(10.0, 5.0, 20.0, top.com_object, 8.0),
+        )
         step("Hole.Name = ...", lambda: setattr(hole, "Name", f"{PREFIX}_HOLE"))
         step("Hole.BottomType (inherited)", lambda: hole.BottomType, fatal=False)
         step("Hole.BottomType = 1", lambda: setattr(hole, "BottomType", CAT_V_BOTTOM))
         step("Hole.BottomType read back", lambda: hole.BottomType, fatal=False)
         step("Hole.BottomAngle.Value", lambda: hole.BottomAngle.Value, fatal=False)
         step("Part.Update", raw.Update, fatal=False)
-        volume = step("[composite, verified] measurement.measure().volume_mm3",
-                      lambda: part.measurement.measure().volume_mm3, fatal=False)
+        volume = step(
+            "[composite, verified] measurement.measure().volume_mm3",
+            lambda: part.measurement.measure().volume_mm3,
+            fatal=False,
+        )
         if volume is not None:
             marker(f"[RESULT] removed {48000.0 - volume:.3f} mm3 (46m default V: 1035.372)")
     finally:

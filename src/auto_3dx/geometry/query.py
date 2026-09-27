@@ -41,6 +41,7 @@ from typing import Any, TypeVar
 
 from auto_3dx.errors import (
     ParameterTypeError,
+    UnsupportedOperationError,
     TopologyQueryAmbiguousError,
     TopologyQueryNoMatchError,
 )
@@ -454,6 +455,51 @@ class EdgeQuery(_Query):
             lambda edge: (low is None or edge.geometry.length_mm >= low)
             and (high is None or edge.geometry.length_mm <= high),
             f"length_between({low}, {high})",
+        )
+
+    def on_plane_of(
+        self, face: Any, tolerance_mm: float = DEFAULT_LENGTH_TOLERANCE_MM
+    ) -> "EdgeQuery":
+        """Keeps edges lying in the plane of a planar face.
+
+        An edge is kept when its measured start, middle and end points are all within
+        `tolerance_mm` of the face's plane. This is a geometric fact about the plane, NOT
+        face adjacency: it does not claim the edge bounds that face, and an edge of another
+        coplanar face qualifies too. No verified adjacency route exists in this release (a
+        face-scoped selection search returned nothing, probe 46y), so this is the honest
+        tool for "the rim of the hole in the top face": combine it with `circular()` and
+        `radius_near()`.
+
+        Args:
+            face: A planar `Face`, from a snapshot of the current model.
+            tolerance_mm: How far off the plane a point may lie.
+
+        Returns:
+            A narrowed query.
+
+        Raises:
+            UnsupportedOperationError: If `face` does not measure as planar.
+            StaleSnapshotError: If `face` comes from an outdated snapshot.
+        """
+        tolerance = _tolerance(tolerance_mm, "tolerance_mm")
+        facts = face.geometry
+        if facts.surface_type != SURFACE_PLANAR or facts.normal is None:
+            raise UnsupportedOperationError(
+                f"on_plane_of() needs a planar face; this face measures as "
+                f"{facts.surface_type!r}."
+            )
+        center, normal = facts.center_mm, facts.normal
+
+        def off_plane(point: Point) -> float:
+            return abs(_dot((point[0] - center[0], point[1] - center[1],
+                             point[2] - center[2]), normal))
+
+        return self._where(
+            lambda edge: all(
+                off_plane(point) <= tolerance
+                for point in (edge.geometry.start_mm, edge.geometry.mid_mm, edge.geometry.end_mm)
+            ),
+            f"on_plane_of(face at {center}, +- {tolerance} mm)",
         )
 
     def longest(self, tolerance_mm: float = DEFAULT_LENGTH_TOLERANCE_MM) -> "EdgeQuery":

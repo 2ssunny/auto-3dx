@@ -367,6 +367,11 @@ class OffsetPlane(Plane):
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    @offset.setter
+    def offset(self, value: float) -> None:
+        """Assigning is `set_offset(value)`: same validation, no rebuild."""
+        self.set_offset(value)
+
     def set_offset(self, offset: float) -> None:
         """Moves the plane to a new offset from its base plane, in millimetres.
 
@@ -415,6 +420,11 @@ class AnglePlane(Plane):
             return self._com_object.Angle.Value
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    @angle.setter
+    def angle(self, value: float) -> None:
+        """Assigning is `set_angle(value)`: same validation, no rebuild."""
+        self.set_angle(value)
 
     def set_angle(self, angle: float) -> None:
         """Turns the plane to a new angle about its axis, in degrees.

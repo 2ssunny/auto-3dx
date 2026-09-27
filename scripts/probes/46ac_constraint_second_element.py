@@ -27,23 +27,32 @@ def main() -> None:
         step("Sketch.Name = ...", lambda: setattr(sketch, "Name", SKETCH_NAME))
         constraints = step("Sketch.Constraints", lambda: sketch.Constraints)
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        first = step("Factory2D.CreateLine(0, 0, 30, 0)",
-                     lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0))
-        second = step("Factory2D.CreateLine(0, 0, 0, 20)",
-                      lambda: factory.CreateLine(0.0, 0.0, 0.0, 20.0))
-        constraint = step("Constraints.AddBiEltCst(perpendicular, first, second)",
-                          lambda: constraints.AddBiEltCst(CONSTRAINT_PERPENDICULAR, first, second))
+        first = step(
+            "Factory2D.CreateLine(0, 0, 30, 0)", lambda: factory.CreateLine(0.0, 0.0, 30.0, 0.0)
+        )
+        second = step(
+            "Factory2D.CreateLine(0, 0, 0, 20)", lambda: factory.CreateLine(0.0, 0.0, 0.0, 20.0)
+        )
+        constraint = step(
+            "Constraints.AddBiEltCst(perpendicular, first, second)",
+            lambda: constraints.AddBiEltCst(CONSTRAINT_PERPENDICULAR, first, second),
+        )
         step("Sketch.CloseEdition", sketch.CloseEdition)
         marker("[EDITION] closed; reading back")
         step("first.Name", lambda: first.Name, fatal=False)
         step("second.Name", lambda: second.Name, fatal=False)
         for number in (1, 2):
-            element = step(f"Constraint.GetConstraintElement({number})",
-                           lambda number=number: constraint.GetConstraintElement(number),
-                           fatal=False)
+            element = step(
+                f"Constraint.GetConstraintElement({number})",
+                lambda number=number: constraint.GetConstraintElement(number),
+                fatal=False,
+            )
             if element is not None:
-                step(f"element {number}.DisplayName", lambda element=element: element.DisplayName,
-                     fatal=False)
+                step(
+                    f"element {number}.DisplayName",
+                    lambda element=element: element.DisplayName,
+                    fatal=False,
+                )
     finally:
         if sketch is not None:
             delete(catia, sketch, SKETCH_NAME)

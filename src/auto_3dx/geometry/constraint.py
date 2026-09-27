@@ -40,6 +40,7 @@ from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
+    AutomationError,
     ConstraintNotFoundError,
     ParameterTypeError,
 )
@@ -105,6 +106,17 @@ Verified (`scripts/probes/27_sketch_geometry.py`) with two distinct closed
 # COM failures translate in one place (`auto_3dx._com`, `docs/api-design.md`
 # section 8). The private name stays because sibling modules import it from here.
 _wrap_com_error = automation_error
+
+CONSTRAINT_MODE_DRIVING: str = "driving"
+"""`CatConstraintMode.catCstModeDrivingDimension` (0): the constraint drives the geometry."""
+
+CONSTRAINT_MODE_DRIVEN: str = "driven"
+"""`CatConstraintMode.catCstModeDrivenDimension` (1): the constraint only measures."""
+
+_MODE_NAMES: "dict[int, str]" = {0: CONSTRAINT_MODE_DRIVING, 1: CONSTRAINT_MODE_DRIVEN}
+
+_ELEMENT_POSITIONS: "frozenset[int]" = frozenset({1, 2})
+"""The `GetConstraintElement` positions with live evidence (probes 46e, 46ac)."""
 
 
 class Constraint:
@@ -189,6 +201,53 @@ class Constraint:
         """
         try:
             return self._com_object.Status
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    @property
+    def mode(self) -> str:
+        """str: `"driving"` when the constraint drives geometry, `"driven"` when it measures.
+
+        Read from `Mode` (`CatConstraintMode`: 0 driving, 1 driven). Live (probe 46d), a
+        length constraint created by `SketchEditor.length` read 0.
+
+        Raises:
+            AutomationError: If CATIA reports a mode this SDK does not know, or the read
+                fails.
+        """
+        try:
+            mode = int(self._com_object.Mode)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if mode not in _MODE_NAMES:
+            raise AutomationError(f"Constraint.Mode reported {mode}, which is not a known mode.")
+        return _MODE_NAMES[mode]
+
+    def element_name(self, position: int = 1) -> str:
+        """Returns the name of an element this constraint acts on.
+
+        `GetConstraintElement(position)` returns a `Reference` whose `DisplayName` is the
+        element's own name. Live: position 1 of a length constraint named its line
+        (probe 46e), and positions 1 and 2 of a perpendicularity named both lines
+        (probe 46ac). Position 2 of a one-element constraint has never been read, so ask
+        for it only on a constraint between two elements.
+
+        Args:
+            position: 1 for the first element, 2 for the second.
+
+        Returns:
+            The element's name, such as `"Line.1"`, usable with `sketch.get_element`.
+
+        Raises:
+            ParameterTypeError: If `position` is not 1 or 2.
+            Auto3dxError: If the underlying COM call fails.
+        """
+        if isinstance(position, bool) or position not in _ELEMENT_POSITIONS:
+            raise ParameterTypeError(
+                f"position must be one of {sorted(_ELEMENT_POSITIONS)}, not {position!r}."
+            )
+        try:
+            return str(self._com_object.GetConstraintElement(position).DisplayName)
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 

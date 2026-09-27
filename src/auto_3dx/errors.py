@@ -192,6 +192,25 @@ class SupportNotUpdatedError(ValidationError):
     """
 
 
+class UnsupportedOperationError(ValidationError):
+    """Raised when a request is well formed but the SDK cannot carry it out safely.
+
+    The request names something this release has no live evidence for: a geometry read on
+    a sketch element kind whose reads were never verified, a direction that cannot be
+    determined for this sketch (`"into_material"` on a sketch not created on a face), a
+    fillet over several edges at once, or a circular-pattern axis kind that was never
+    driven end to end. Nothing was changed. Use the Level 2 call the message names, or a
+    request the evidence covers (`docs/phase5-api-design.md` section 3).
+    """
+
+
+class UnknownFactError(ValidationError):
+    """Raised when `part.inspect.facts()` is asked for a fact it does not know.
+
+    The message lists the supported fact names. Nothing was read.
+    """
+
+
 class StaleSnapshotError(ValidationError):
     """Raised when an `Edge` or `Face` from a snapshot of an older model is used.
 
@@ -366,6 +385,15 @@ class TargetNotUpToDateError(ConflictError):
     surfacing a COM failure. Nothing was changed and nothing was rebuilt: measurement
     is read-only. Call `part.update()`, or `body.update()` for one body, and measure
     again.
+    """
+
+
+class FactUnavailableError(ConflictError):
+    """Raised when a requested fact exists but cannot be read in the model's current state.
+
+    `part.inspect.facts()` records such a fact in `PartFacts.unavailable` with the reason,
+    for example a main body that has no solid yet or that has not been rebuilt; reading it
+    through `facts[name]` raises this error with that reason. Nothing was changed.
     """
 
 

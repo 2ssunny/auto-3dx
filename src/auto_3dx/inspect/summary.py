@@ -63,6 +63,7 @@ from auto_3dx.parameters.parameter import ParameterInfo
 
 if TYPE_CHECKING:
     from auto_3dx.core.part import Part
+    from auto_3dx.highlevel.facts import PartFacts
 
 _T = TypeVar("_T")
 _FIRST_COM_INDEX = 1
@@ -582,6 +583,28 @@ class Inspector:
                 )
             )
         return tuple(features)
+
+    def facts(self, *names: str) -> "PartFacts":
+        """Reads only the named facts: no topology search, no full summary.
+
+        `part.inspect.facts("volume", "up_to_date")` costs one `IsUpToDate` and one inertia
+        measurement. The mass facts share one measurement. See
+        `auto_3dx.highlevel.facts.SUPPORTED_FACTS` for the names and their units.
+
+        Args:
+            *names: Fact names, such as `"volume"`, `"up_to_date"`, `"feature_count"`.
+
+        Returns:
+            A `PartFacts`: `values` for what was read, `unavailable` for what the model's
+            state does not allow (with the reason).
+
+        Raises:
+            UnknownFactError: If a name is not supported. Nothing was read.
+            Auto3dxError: If a read fails for another reason.
+        """
+        from auto_3dx.highlevel.facts import read_facts
+
+        return read_facts(self._part, names)
 
     def update_issues(self) -> "tuple[UpdateIssue, ...]":
         """Lists the features CATIA reports as not up to date or suppressed.

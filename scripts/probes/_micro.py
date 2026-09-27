@@ -54,8 +54,10 @@ def step(label: str, call: Any, *, fatal: bool = True) -> Any:
         result = call()
     except BaseException as error:
         elapsed = time.perf_counter() - started
-        marker(f"[STEP {number} FAILED] {label} after {elapsed:.3f}s: "
-               f"{type(error).__name__}: {str(error)[:200]}")
+        marker(
+            f"[STEP {number} FAILED] {label} after {elapsed:.3f}s: "
+            f"{type(error).__name__}: {str(error)[:200]}"
+        )
         if fatal:
             raise
         return None
@@ -148,8 +150,9 @@ __all__ = [
 ]
 
 
-def block_fixture(part: Any, name: str, length: float = 60.0, width: float = 40.0,
-                  height: float = 20.0) -> "tuple[Any, Any]":
+def block_fixture(
+    part: Any, name: str, length: float = 60.0, width: float = 40.0, height: float = 20.0
+) -> "tuple[Any, Any]":
     """Builds the smallest solid a face question needs: one centred block, rebuilt.
 
     Every Automation call is marked. The route (sketch on XY, four lines, pad, update) is
@@ -166,12 +169,15 @@ def block_fixture(part: Any, name: str, length: float = 60.0, width: float = 40.
     factory = step("Sketch.OpenEdition", sketch.OpenEdition)
     x0, y0, x1, y1 = -length / 2, -width / 2, length / 2, width / 2
     for a, b, c, d in ((x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0)):
-        step(f"Factory2D.CreateLine({a}, {b}, {c}, {d})",
-             lambda a=a, b=b, c=c, d=d: factory.CreateLine(a, b, c, d))
+        step(
+            f"Factory2D.CreateLine({a}, {b}, {c}, {d})",
+            lambda a=a, b=b, c=c, d=d: factory.CreateLine(a, b, c, d),
+        )
     step("Sketch.CloseEdition", sketch.CloseEdition)
     shape_factory = step("Part.ShapeFactory", lambda: raw.ShapeFactory)
-    pad = step(f"ShapeFactory.AddNewPad(sketch, {height})",
-               lambda: shape_factory.AddNewPad(sketch, height))
+    pad = step(
+        f"ShapeFactory.AddNewPad(sketch, {height})", lambda: shape_factory.AddNewPad(sketch, height)
+    )
     step("Pad.Name = ...", lambda: setattr(pad, "Name", name))
     step("Part.Update", raw.Update)
     return pad, sketch
@@ -184,8 +190,9 @@ def update_if_needed(part: Any) -> None:
         step("Part.Update", raw.Update)
 
 
-def planar_face(part: Any, axis: "tuple[float, float, float]",
-                direction: "tuple[float, float, float]") -> Any:
+def planar_face(
+    part: Any, axis: "tuple[float, float, float]", direction: "tuple[float, float, float]"
+) -> Any:
     """Finds one planar face with the verified Phase 4 query, marked as one composite step.
 
     `part.topology.faces()` and `query()` are live-verified SDK paths (probe 45). They make
@@ -194,8 +201,12 @@ def planar_face(part: Any, axis: "tuple[float, float, float]",
     return step(
         f"[composite, verified] topology.faces().query().planar().normal_parallel({axis})"
         f".extreme({direction}).one()",
-        lambda: part.topology.faces(body=None).query().planar().normal_parallel(axis)
-        .extreme(direction).one(),
+        lambda: part.topology.faces(body=None)
+        .query()
+        .planar()
+        .normal_parallel(axis)
+        .extreme(direction)
+        .one(),
     )
 
 
@@ -207,13 +218,16 @@ def sweep(catia: Any, part: Any, prefix: str) -> None:
     """
     raw = part.com_object
     for collection in ("Shapes", "Sketches"):
-        items = step(f"MainBody.{collection}", lambda collection=collection:
-                     getattr(raw.MainBody, collection))
+        items = step(
+            f"MainBody.{collection}",
+            lambda collection=collection: getattr(raw.MainBody, collection),
+        )
         count = step(f"{collection}.Count", lambda items=items: int(items.Count))
         leftovers = []
         for index in range(count, 0, -1):
-            item = step(f"{collection}.Item({index})", lambda index=index, items=items:
-                        items.Item(index))
+            item = step(
+                f"{collection}.Item({index})", lambda index=index, items=items: items.Item(index)
+            )
             name = step("Item.Name", lambda item=item: str(item.Name))
             if name.startswith(prefix):
                 leftovers.append((item, name))

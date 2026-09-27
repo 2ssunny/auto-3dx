@@ -399,11 +399,14 @@ def test_an_unusable_spacing_is_refused_before_catia() -> None:
     assert raw.ShapeFactory.calls == []
 
 
-def test_an_unverified_axis_is_refused() -> None:
+@pytest.mark.parametrize("axis", ["W", "-Z", "z", None, (0, 0, 1)])
+def test_an_unverified_axis_is_refused(axis: object) -> None:
+    # X and Y joined Z in Phase 5 (probe 46t); a signed, lower-case or vector axis never
+    # ran live and is still refused before CATIA is called.
     part, raw, _ = _part()
 
     with pytest.raises(UnsupportedSupportError, match="Z"):
-        part.part_design.create_circular_pattern(PATTERN, _seed(part, raw), 6, 60.0, axis="X")
+        part.part_design.create_circular_pattern(PATTERN, _seed(part, raw), 6, 60.0, axis=axis)
     assert raw.ShapeFactory.calls == []
 
 
