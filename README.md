@@ -624,11 +624,15 @@ snapshot = part.topology.edges()                # Part 전체
 snapshot = part.topology.edges(body="LEDTray")  # 그 body만
 # with part.work_in(tray): 안에서는 인자 없이도 tray가 기본 범위입니다.
 
-fillet = design.create_edge_fillet("F1", snapshot[0], radius=3, unit="mm")
+# 순서(index)가 아니라 측정 사실로 고릅니다 (아래 "기하 사실과 의미 기반 선택").
+edge = snapshot.query().lines().parallel((0, 0, 1)).nearest((30, 20, 10)).one()
+fillet = design.create_edge_fillet("F1", edge, radius=3, unit="mm")
 part.update()
 
+# 모델이 바뀌었으므로 새 snapshot에서 다시 찾습니다.
+edge = part.topology.edges().query().lines().parallel((0, 0, 1)).nearest((-30, -20, 10)).one()
 chamfer = design.create_chamfer(
-    "C1", snapshot[1],
+    "C1", edge,
     length1=1.5, length2_or_angle=45,
     propagation=0, orientation=0,
 )
@@ -641,21 +645,24 @@ COM 호출 전에 막습니다.
 
 ```python
 tray_edges = part.topology.edges(body="LEDTray")
-tray_edges[0].owner_body_name      # 'LEDTray'
-tray_edges[0].owner_feature_name   # 'TRAY_PAD' 또는 그 body가 소비한 스케치 이름
+edge = tray_edges.query().lines().parallel((0, 0, 1)).first()
+edge.owner_body_name      # 'LEDTray'
+edge.owner_feature_name   # 'TRAY_PAD' 또는 그 body가 소비한 스케치 이름
 
 # body의 모서리에는 그 body가 소비한 스케치의 wire 모서리도 섞여 있습니다.
 # 필렛은 솔리드 모서리만 받으므로 owner_feature_name으로 가를 수 있습니다.
 # (소유 feature는 지금의 것입니다. 필렛 뒤에는 전부 필렛을 가리키므로, 특정 모서리는
 #  아래 "기하 사실과 의미 기반 선택"의 쿼리로 고르세요.)
-solid = [edge for edge in tray_edges if edge.owner_feature_name == "TRAY_PAD"]
+# 여기서는 소유 검사를 보여주는 것이 목적이라 어느 솔리드 모서리든 됩니다. first()는
+# "처음 것을 받아들인다"는 명시적 선택이고, 특정 모서리가 필요하면 one()으로 좁히세요.
+solid = tray_edges.query().owned_by("TRAY_PAD").lines().first()
+
+design.create_edge_fillet("F2", solid, radius=3)
+# CrossBodyReferenceError: 이 모서리는 'LEDTray'의 것인데 필렛은 'PartBody'에 만들어집니다.
+# 모델은 그대로이므로(generation도 그대로) 같은 모서리를 이어서 쓸 수 있습니다.
 
 with part.work_in(tray):
-    design.create_edge_fillet("F1", solid[0], radius=3)   # OK
-
-design.create_edge_fillet("F2", solid[0], radius=3)
-# CrossBodyReferenceError: 이 모서리는 'LEDTray'의 것인데 필렛은 'PartBody'에 만들어집니다.
-# 모델은 그대로입니다.
+    design.create_edge_fillet("F1", solid, radius=3)   # OK
 ```
 
 소유 정보는 snapshot을 뜰 때마다 모델에서 다시 읽습니다. 새 프로세스에서도 그대로
@@ -664,11 +671,13 @@ SDK는 막지 않습니다 — 알 수 없는 답을 근거로 정상 호출을 
 
 반드시 알아야 할 제약이 세 가지 있습니다.
 
-- **모서리를 재빌드 너머로 지목하는 방법이 없습니다.** `Edge.descriptor`가 주는
-  BRep 이름 문자열을 저장했다가 나중에 같은 모서리로 되돌리는 경로,
-  재빌드 후 이름·순서를 보존하는 경로, 측정으로 모서리를 고르는 경로, 검색
-  범위를 한 feature로 좁히는 경로, 이 네 가지를 모두 시도했고 전부 막혔습니다.
-  `Edge.index`는 그 snapshot을 만든 순간의 모델에서만 의미가 있습니다.
+- **모서리를 재빌드 너머로 저장해 두는 identity는 없습니다.** `Edge.descriptor`가 주는
+  BRep 이름 문자열을 저장했다가 나중에 같은 모서리로 되돌리는 경로, 재빌드 후
+  이름·순서를 보존하는 경로, 검색 범위를 한 feature로 좁히는 경로는 모두 막혔습니다.
+  `Edge.index`는 그 snapshot을 만든 순간의 모델에서만 의미가 있습니다. 대신 Phase 4부터는
+  측정 사실(`edge.geometry`)로 고르는 `snapshot.query()`가 있고, Phase 5의
+  `part.geometry.find_edge(...)`가 그것을 감쌉니다. 모델이 바뀌면 새 snapshot에 같은 쿼리를
+  다시 돌려 찾습니다. (Phase 2 당시에는 측정으로 고르는 경로도 막혀 있었습니다.)
 - **모델이 바뀌면 이전 snapshot은 거부됩니다.** 같은 snapshot으로 필렛을 두 번
   만들면 성공할 때도 실패할 때도 있고, 호출자는 미리 알 수 없습니다. 그래서
   `Part`는 하나의 model generation 카운터를 갖고, 이 Part로부터 얻은 모든
@@ -686,9 +695,9 @@ SDK는 막지 않습니다 — 알 수 없는 답을 근거로 정상 호출을 
   from auto_3dx.errors import StaleSnapshotError
 
   try:
-      design.create_edge_fillet("F2", snapshot[1], radius=2, unit="mm")
+      design.create_edge_fillet("F2", edge, radius=2, unit="mm")  # 변경 전 snapshot의 edge
   except StaleSnapshotError:
-      snapshot = part.topology.edges()  # 새로 떠야 한다
+      snapshot = part.topology.edges()  # 새로 떠서 같은 쿼리로 다시 찾는다
   ```
 
   **3DEXPERIENCE UI나 다른 스크립트로 만든 변경은 이 카운터에 보이지 않습니다.**
@@ -711,20 +720,21 @@ SDK는 막지 않습니다 — 알 수 없는 답을 근거로 정상 호출을 
 
 ### Shell, Thickness, Hole (면 참조)
 
-모서리와 같은 참조 경로가 면에도 통합니다. `part.topology.faces()`가 돌려주는
-`FaceSnapshot`에서 `Face`를 얻어 `create_shell`/`create_thickness`/`create_hole`에
-넘깁니다.
+모서리와 같은 참조 경로가 면에도 통합니다. 현재 모델의 면을 기하 조건으로 하나
+선택해 `create_shell`/`create_thickness`/`create_hole`에 넘깁니다. 모델을 바꾼 뒤에는
+새 snapshot에서 다시 찾습니다.
 
 ```python
-faces = part.topology.faces()
-
-shell = design.create_shell("S1", faces[0], internal_thickness=2.0, external_thickness=0.0)
+top = part.geometry.top_face()
+shell = design.create_shell("S1", top, internal_thickness=2.0, external_thickness=0.0)
 part.update()
 
-thickness = design.create_thickness("T1", faces[1], offset=3.0)
+top = part.geometry.top_face()
+thickness = design.create_thickness("T1", top, offset=3.0)
 part.update()
 
-hole = design.create_hole("H1", faces[2], depth=5.0)
+top = part.geometry.top_face()
+hole = design.create_hole("H1", top, depth=5.0)
 part.update()
 ```
 

@@ -30,7 +30,7 @@
 [auto-3dx]  attach -> 파라미터 생성/수정
                    -> body 생성 / work_in(body)으로 작업 body 선택
                    -> 스케치 생성 -> 직선·곡선 프로파일 그리기
-                      (원점 평면 또는 offset/각도 평면 위)
+                      (원점 평면, offset/각도 평면 또는 검증된 평면 Face 위)
                    -> 패드 / 포켓 / 회전 / Rib·Slot / 사각 패턴 생성
                    -> 모서리 필렛 / 챔퍼, Shell / Thickness / Hole 생성
                    -> formula로 치수 연동
@@ -285,8 +285,9 @@ part.update()
 **요청한 타입과 결과 타입이 다를 수 있다.** `horizontal`은 `Parallelism`(Type 8)이 된다.
 따라서 요청 코드로 제약을 되찾으면 안 된다.
 
-미구현: 제약 삭제(`Constraints.Remove` 미검증). `concentric`은 서로 다른 원 두 개로 생성과
-`Part.Update()`까지 확인했다.
+제약 삭제는 이 절을 쓸 당시 미구현이었고, Phase 3에서 `sketch.constraints.remove()`로
+구현했다(api-design 18절). `concentric`은 서로 다른 원 두 개로 생성과 `Part.Update()`까지
+확인했다.
 
 ### 3.4.2 모서리 필렛과 챔퍼
 
@@ -295,11 +296,14 @@ part.update()
 
 ```python
 snapshot = part.topology.edges()   # 솔리드 전체 모서리, EdgeSnapshot
-fillet = part.part_design.create_edge_fillet("F1", snapshot[0], radius=3)
+edge = snapshot.query().lines().parallel((0, 0, 1)).nearest((30, 20, 10)).one()
+fillet = part.part_design.create_edge_fillet("F1", edge, radius=3)
 part.update()
 
+# 모델이 바뀌었으므로 새 snapshot에서 같은 방식으로 다시 찾는다 (index를 쓰지 않는다).
+edge = part.geometry.find_edge(kind="line", parallel="Z", nearest=(-30, -20, 10))
 chamfer = part.part_design.create_chamfer(
-    "C1", snapshot[1], length1=1.5, length2_or_angle=45,
+    "C1", edge, length1=1.5, length2_or_angle=45,
     propagation=0, orientation=0,
 )
 part.update()
@@ -309,7 +313,8 @@ part.update()
 
 - **`part.topology.edges()`는 솔리드 전체를 검색한다.** 한 feature의 모서리만 골라 검색
   범위를 좁히는 방법이 없다(네 가지 경로를 시험했고 전부 막혔다). 필요한 모서리는
-  호출자가 `EdgeSnapshot`을 순회하며 스스로 걸러야 한다.
+  Phase 4의 `snapshot.query()`(측정 사실 기반) 또는 Phase 5의 `part.geometry.find_edge()`로
+  고른다. (이 절을 쓸 당시에는 호출자가 `EdgeSnapshot`을 직접 순회해야 했다.)
 - **모서리를 안정적으로 다시 지목할 방법이 없다.** `Edge.descriptor`는 BRep 이름 문자열을
   주지만 저장했다가 나중에 다시 그 모서리로 되돌리는 경로가 전부 막혔고, 재빌드가 일어나면
   모서리 개수와 순서(그리고 `Edge.index`)가 전부 바뀐다. 그래서 `part.topology.edges()`를 다시
@@ -340,22 +345,23 @@ part.update()
 
 ### 3.4.3 Shell, Thickness, Hole (면 참조)
 
-모서리와 같은 참조 경로가 면에도 통한다. `part.topology.faces()`가 돌려주는
-`FaceSnapshot`에서 `Face`를 얻어 `create_shell`/`create_thickness`/`create_hole`에
-넘긴다.
+모서리와 같은 참조 경로가 면에도 통한다. 현재 모델의 면을 기하 조건으로 하나
+선택해 `create_shell`/`create_thickness`/`create_hole`에 넘긴다. 모델을 바꾼 뒤에는
+새 snapshot에서 다시 찾는다.
 
 ```python
-faces = part.topology.faces()   # 솔리드 전체 면, FaceSnapshot
-
+top = part.geometry.top_face()
 shell = part.part_design.create_shell(
-    "S1", faces[0], internal_thickness=2.0, external_thickness=0.0
+    "S1", top, internal_thickness=2.0, external_thickness=0.0
 )
 part.update()
 
-thickness = part.part_design.create_thickness("T1", faces[1], offset=3.0)
+top = part.geometry.top_face()
+thickness = part.part_design.create_thickness("T1", top, offset=3.0)
 part.update()
 
-hole = part.part_design.create_hole("H1", faces[2], depth=5.0)
+top = part.geometry.top_face()
+hole = part.part_design.create_hole("H1", top, depth=5.0)
 part.update()
 ```
 
@@ -446,7 +452,6 @@ part.update()          # 이제 패드 높이가 THICKNESS를 따라간다
 | 파라미터 의존성 조회/보호 | 동작 (formula 한정) | `part.parameters.dependents(name)`, `remove()`가 `ParameterInUseError`로 거부. rule/check/law/program/design table은 미탐지 |
 | 모서리·면 소유 body | 동작 | `edge.owner_body_name`/`owner_feature_name`. 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError`. Parent 체인이 body에 닿지 않으면 body 소속으로 찾는다. `owner_feature_name`은 **현재 소유 feature**(필렛 뒤엔 전부 필렛)이지 provenance가 아니다 |
 | body 삭제 | 동작 (가드) | `part.bodies.remove(name, delete_contents=False)`. main body는 거부, 내용이 있으면 `delete_contents=True`가 있어야 지운다. 활성 Part만 |
-| boolean 연산 (Add/Remove/Intersect/Assemble) | 미지원 | 미검증 |
 | body 이름 변경·순서, body 안의 기하 세트 | 미지원 | |
 
 live 근거: probe 41, `test_multi_body_live.py`, `scripts/acceptance/multi_body_lifecycle.py`(A→B),
@@ -967,7 +972,7 @@ lock으로 직렬화되어 있어 중복 로딩은 일어나지 않는다.
 
 ---
 
-## 7. 확장 순서 제안
+## 7. 이후 검증 과제
 
 완료: 모서리·면 선택 레이어(`part.topology.edges()`/`faces()`, `EdgeSnapshot`/
 `FaceSnapshot`), Chamfer 인자 확정(mode=1 고정), Shell/Thickness/Hole(면 참조),
@@ -977,15 +982,15 @@ selection 기반 동작의 활성 Part 가드), body 단위 topology 범위와 �
 generation, 예외 다섯 범주, 작은 패키지 루트, 측정 기본 대상(main body), topology 검색 전후의
 사용자 selection 복원(`SelectionNotRestoredWarning`), 같은 CATIA Part의 wrapper끼리 공유하는
 generation, `part.inspect.summary()`의 body·기하 세트·모서리와 면 개수,
-`part.planes`의 `list`/`names`/`get`과 프로세스를 넘는 정리. 이제 남은
-순서는 다음과 같다.
+`part.planes`의 `list`/`names`/`get`과 프로세스를 넘는 정리. 이후 Phase 3에서 원형 패턴,
+Phase 4에서 측정 기반 의미 쿼리, Phase 5에서 평면 Face 위 스케치·Hole 위치/관통·원형 패턴
+축 확장·의도 기반 상위 API를 검증·구현했다. 아직 확인되지 않은 경계는 다음과 같다.
 
-1. **Stiffener / CircPattern 등** — 생성 성공 뒤 update가 실패한 기능은 다시 probe로
-   검증해야 한다. 지금 기준으로는 미검증이며 구현하지 않는다.
-2. **모서리·면 재선택 selector** — 지금은 재빌드마다 `part.topology.edges()`/`faces()`를
-   새로 불러야 한다. BRep 이름 재해석, 재빌드 후 이름/순서 보존, 측정 기반 선택,
-   feature 단위 검색 범위 한정 네 가지 경로를 모두 시험했고 전부 막혔다
-   (`geometry.edges`). 새로운 돌파구가 없으면 이 항목은 열린 채로 남는다.
+1. **Stiffener** — 생성 뒤 update가 실패해 여전히 미검증이다.
+2. **지속적인 topology 참조와 진짜 면·모서리 인접 관계** — 재빌드 뒤에도 통하는
+   BRep 이름이나 순서를 가정하지 않는다. 현재는 매번 새 snapshot을 만들고
+   `snapshot.query()` 또는 `part.geometry.find_*()`로 측정 사실에 따라 다시 찾는다.
+   `on_plane_of(face)`는 평면 위라는 뜻이며 인접 관계는 아니다.
 
 각 항목은 probe로 실제 동작을 확인한 뒤 라이브러리에 올린다. 기존 probe가 그 절차의
 예시다.

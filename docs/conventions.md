@@ -1,7 +1,9 @@
 # auto-3dx Module & API Conventions
 
 이 문서는 `auto-3dx` 라이브러리 코드를 작성할 때 따르는 규칙과, 첫 번째 수직 기능
-("실행 중인 Part의 기존 Length Parameter 수정 + update")의 확정된 공개 API contract를 정의한다.
+("실행 중인 Part의 기존 Length Parameter 수정 + update")부터 축적한 실측 기록을 정의한다.
+아래 첫 표는 초기 단계의 검증 범위이며 현재 지원 범위가 아니다. 이후 절의 추가 실측과
+현재 공개 API 상태는 `docs/capabilities.md` 및 `docs/api-design.md`를 따른다.
 
 여러 작업자가 병렬로 구현하더라도 이 문서의 signature를 그대로 구현하면 서로 맞물린다.
 
@@ -9,8 +11,9 @@
 
 ## 1. 검증된 사실 (Ground truth)
 
-추측 금지. 아래는 B428_Cloud 설치본에서 실제 COM 호출로 확인한 내용이다.
-이 목록에 없는 동작은 **미검증**이며, 구현 대상이 아니다.
+추측 금지. 아래는 B428_Cloud 설치본에서 초기 단계에 실제 COM 호출로 확인한 내용이다.
+이 초기 목록에 없는 동작은 해당 단계에서는 미검증이었다. 이후 절에서 검증한 동작은
+현재 공개 API에 포함될 수 있다.
 
 ### 환경
 
@@ -73,7 +76,7 @@ Value python type: float
 UI 대응          : Value == 150.0  <->  CATIA UI 표시 150mm
 ```
 
-### 검증된 동작
+### 초기 단계에서 검증된 동작 (역사적 기록)
 
 | 동작 | 상태 |
 |---|---|
@@ -84,9 +87,9 @@ UI 대응          : Value == 150.0  <->  CATIA UI 표시 150mm
 | `Length.Value` 읽기 / 쓰기 | 검증 완료 |
 | `Part.Update()` | 검증 완료 |
 | Length parameter 생성 / ensure / remove | 검증 완료 (아래 1.1) |
-| 그 외 Parameter 생성 (`CreateReal` 등) | **미검증 — 구현 금지** |
-| Formula / Relations | **미검증 — 구현 금지** |
-| Sketch / Pad / GSD | **미검증 — 구현 금지** |
+| 그 외 Parameter 생성 (`CreateReal` 등) | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
+| Formula / Relations | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
+| Sketch / Pad / GSD | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
 | 새 Part 생성 | **미검증 — 구현 금지** |
 | Save / PLM propagate | **미검증 — 호출 금지** |
 
@@ -468,11 +471,14 @@ OpenEdition()~CloseEdition() 사이        -> 동작
 건강 신호: `Status == 0`이 정상이고, `BrokenConstraintsCount` / `UnUpdatedConstraintsCount`로
 스케치 상태를 확인할 수 있다.
 
-**미검증:** `Constraints.Remove(i)`는 호출해 보지 않았다. 제약 삭제는 구현하지 않는다.
+**당시 미검증:** `Constraints.Remove(i)`는 이 단계에서 호출해 보지 않았다.
+이후 스케치 제약 삭제를 검증·구현했다(`docs/api-design.md` 18절).
 
 ### 1.2.7 사용자 정의 평면 (실측, probes 29·33·36)
 
-지금은 원점 평면 3개(XY/YZ/ZX)에만 스케치를 만들 수 있다. offset 평면까지는 길이 났다.
+이 실측 단계에서는 원점 평면 3개(XY/YZ/ZX)에만 스케치를 만들 수 있었다.
+이후 offset/각도 평면(이 절)과, Phase 5에서 평면 Face support(1.14, `docs/api-design.md`
+20절)를 검증·구현했다.
 
 ```text
 Part.HybridShapeFactory -> HybridShapeFactory   (선언 타입은 generic Factory, 런타임 캐스팅)
@@ -1408,7 +1414,8 @@ edit() 안에서 AddBiEltCst(재발견 요소) -> 'Parallelism.1' 생성, update
 
 즉 **이름이 스케치 요소의 지속 identity**이고, 인덱스는 아니다. 이 사실로
 `sketch.get_element(name)`/`sketch.elements()`와 `SketchElement.name`/`radius`를 만들었다.
-선 좌표는 이 릴리스의 `Line2D`가 아예 노출하지 않으므로 넣지 않았다. 같은 두 선에 같은
+선 좌표는 이 단계에서 `Line2D`가 노출하지 않는다고 보고 넣지 않았다. **Phase 5에서 정정:**
+`GetEndPoints(seed)`로 읽히며 `SketchElement.geometry()`로 공개했다(1.14). 같은 두 선에 같은
 parallelism을 다시 걸면 CATIA는 중복을 만들지 않고 기존 것을 둔다(프로세스 B에서 개수 1→1).
 
 **feature를 In-Work Object로 두면 그 뒤에 삽입된다.**
@@ -1483,9 +1490,10 @@ PlaneYZ / PlaneYZ  ->  766.234 제거. Z축이 아니다. 구멍들이 디스크
 PlaneZX / PlaneZX  -> 1130.973 제거. 역시 Z축이 아니다
 ```
 
-디스크 형상으로는 YZ/ZX가 정확히 어느 축인지 확정할 수 없었다. 그래서 공개 API는 **Z축만**
-받는다(`SUPPORTED_CIRCULAR_PATTERN_AXES`). 검증 못 한 매핑을 이름만 그럴듯하게 여는 것보다
-없는 편이 안전하다.
+디스크 형상으로는 YZ/ZX가 정확히 어느 축인지 확정할 수 없었다. 그래서 Phase 3의 공개 API는
+**Z축만** 받았다. 검증 못 한 매핑을 이름만 그럴듯하게 여는 것보다 없는 편이 안전하다.
+**Phase 5에서 정정:** 무게중심으로 YZ -> X, ZX -> Y를 확정했고, 원통면·직선 모서리 축도
+검증해 공개했다(1.14).
 
 **패턴 파라미터.**
 

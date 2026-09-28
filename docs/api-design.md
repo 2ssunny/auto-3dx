@@ -700,9 +700,10 @@ part.bodies.remove("OuterHousing", delete_contents=True)
   with it. If the In-Work Object was inside the removed body it becomes the main body;
   otherwise it is kept. A hidden or empty body cannot be measured (CATIA E_FAIL).
 
-Not supported: boolean operations (Add, Remove, Intersect, Assemble), renaming or reordering
-bodies, geometrical sets inside a body, a public In-Work Object setter outside `work_in`,
-Products and assemblies, and any Selection-based operation on a non-active Part.
+Boolean operations (Add, Remove, Intersect, Assemble) were added after this section;
+see section 18. Still not supported: renaming or reordering bodies, geometrical sets
+inside a body, a public In-Work Object setter outside `work_in`, Products and assemblies,
+and any Selection-based operation on a non-active Part.
 
 ---
 
@@ -1108,10 +1109,10 @@ library is not evidence; see the ledger in `docs/phase5-api-design.md` section 3
 | `PartUpdateError` recovery: roll the edit back before deleting | 6 | Done (documentation and guidance) |
 | Topology ownership across processes | 7 | Re-read per snapshot; nothing persists, by design |
 | Feature dimension editing (fillet, chamfer, hole, shell, thickness) | 17 | Done; per-dimension evidence in conventions 1.11 |
-| `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`radius` | 17 | Done; line coordinates unavailable in this release |
+| `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`radius` | 17 | Done; line coordinates were thought unavailable, then exposed in Phase 5 (row below) |
 | `part.work_at(feature)` | 17 | Done; CATIA inserts after the In-Work feature |
 | `part.parameters.dependents()` and the removal guard | 17 | Done for formulas; rules/checks/laws not covered |
-| Circular pattern (`create_circular_pattern`, editable angular row) | 18 | Done; Z axis only |
+| Circular pattern (`create_circular_pattern`, editable angular row) | 18 | Done (Phase 3: Z only; Phase 5 added X/Y, face and edge axes) |
 | Multi-body booleans: remove, add, intersect, assemble | 18 | Done; tool body is consumed |
 | `remove_boolean(..., delete_consumed_body=True)` | 18 | Done; deletion destroys the consumed body |
 | `sketch.constraints.remove()` | 18 | Done; runs inside a sketch edition |

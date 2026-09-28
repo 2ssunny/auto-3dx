@@ -30,7 +30,11 @@ LEVEL 1  internal          geometry/*.py private helpers, _com.py, _generation.p
 A Level 3 call always resolves to Level 2 calls a user could have written by hand. When the
 intent layer cannot express something, the Level 2 call it would have made is the fallback.
 
-## 2. Audit of the current public API (read from the code, not the older docs)
+## 2. Audit of the pre-Phase-5 public API (baseline `6a74d07`, read from the code)
+
+This section is the audit as it stood before any Phase 5 code; limits it lists (Z-only
+patterns, no hole position, no line coordinates) are historical. The current state is in
+sections 4-9 and `docs/api-design.md` section 20.
 
 ### 2.1 Level 2 as it exists
 

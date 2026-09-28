@@ -247,7 +247,7 @@ AddNewChamfer(edge)      -> Chamfer 반환. 이후 Part.Update() 실패
 
 객체는 트리에 생겼는데 모델이 재계산에 실패한다. **생성 호출의 성공은 검증이 아니다.**
 
-패턴 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을 만드는지는
+사각 패턴의 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을 만드는지는
 probe 30에서 측정으로 확정했다(conventions 1.2.5). 이에 따라 public API
 `create_rectangular_pattern()`과 signed-axis 사전 검사가 구현됐고 unit 테스트가 있다.
 생성 뒤 update가 실패하면 반환된 wrapper를
@@ -380,7 +380,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 14 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
 | 15 | Multi-sections Solid (Loft) | 완료 (모서리 없는 섹션) | `create_multi_section_solid`/`get_`/`remove_`/`multi_section_solids`/`section_names()`. live: 원 두 개와 닫힌 spline NACA 2415/2412 날개가 공개 API만으로 만들어졌고, 새 프로세스에서 재발견·섹션 읽기·삭제·기준 복원까지 통과했다. 사각형과 선으로 닫은 에어포일처럼 모서리가 있는 섹션은 닫힘점 없이 update에 실패하며, `remove_multi_section_solid`로 복구된다. guide·spine·닫힘점·coupling은 미지원 (conventions 1.8, live `test_multi_section_solid_live.py`) |
 | 16 | live 테스트 대상 Part 지정 | 완료 | `AUTO3DX_LIVE_PART`가 활성 Part와 일치해야 통합 테스트 세션이 시작된다. 이름을 지정하지 않은 Part에서 probe가 공유 기하 세트를 지운 사고에서 나온 규칙이다 (conventions 1.8) |
-| 17 | Multi-Body | 완료 | `part.bodies`(`list`/`names`/`get`/`main`/`create`/`remove`), `part.work_in(body)`, `Body.features`/`sketch_names`/`is_visible`/`hide()`/`show()`. 스케치와 Part Design feature가 선택한 body에 만들어지고 조회되며, 블록을 어떻게 나가든 In-Work Object가 복원된다. live: 새 wrapper·새 프로세스 재발견(A→B acceptance), 숨김 read-back, 다섯 body enclosure에서 바깥 하우징만 숨김, 기준 복원. boolean 연산·이름 변경·body 안의 기하 세트는 미지원 (conventions 1.9, `test_multi_body.py`, live `test_multi_body_live.py`) |
+| 17 | Multi-Body | 완료 | `part.bodies`(`list`/`names`/`get`/`main`/`create`/`remove`), `part.work_in(body)`, `Body.features`/`sketch_names`/`is_visible`/`hide()`/`show()`. 스케치와 Part Design feature가 선택한 body에 만들어지고 조회되며, 블록을 어떻게 나가든 In-Work Object가 복원된다. live: 새 wrapper·새 프로세스 재발견(A→B acceptance), 숨김 read-back, 다섯 body enclosure에서 바깥 하우징만 숨김, 기준 복원. boolean 연산은 후속 단계에서 구현됐고, body 이름 변경·body 안의 기하 세트는 미지원 (conventions 1.9, `test_multi_body.py`, live `test_multi_body_live.py`) |
 | 18 | selection 기반 동작의 활성 Part 가드 | 완료 (임시 안전장치) | 비활성 Part의 `Selection.Search`가 활성 Part를 검색했다. topology 검색·`remove_*`·body 숨김/삭제가 활성 Part가 아니면 `InactivePartError`로 거부하고, 검사의 topology 개수는 `None`이다. 비활성 Part용 검증된 경로가 생기면 풀 수 있다 (conventions 1.9, api-design 7절) |
 | 19 | body 단위 topology 범위와 소유권 | 완료 | body를 선택하고 `Topology.Edge,sel`로 검색하면 그 body만 나온다. `part.topology.edges(body=...)`/`faces(body=...)`, work_in 안에서는 자동. 모든 `Edge`/`Face`가 `Reference.Parent` 체인에서 읽은 소유 body를 들고 있고, 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError`. 소유 정보는 스냅샷마다 모델에서 다시 읽으므로 새 프로세스에서도 동작한다. CATIA가 소유를 알려주지 않으면 통과시킨다 (conventions 1.10) |
 | 20 | non-main body 재빌드·측정 안전 | 완료 | `body.update()`/`part.update(body)`(`Part.UpdateObject`), `body.is_up_to_date`. 재빌드 안 된 대상 측정은 `TargetNotUpToDateError`로 거부하고, 측정이 재빌드하지는 않는다 (conventions 1.10) |
