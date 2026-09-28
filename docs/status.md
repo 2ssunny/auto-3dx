@@ -13,15 +13,28 @@
 
 - 대상 설치본: B428_Cloud / 3DSpace `Andrew_Test`
 - 실행 환경: 표준 CPython 3.14.2 venv와 Conda `auto-3dx` env(Python 3.11.16), 둘 다 64-bit,
-  pywin32 312. Conda는 필요하지 않다. unit은 두 환경 모두 868 통과. live integration은 표준 CPython에서 40 통과(In-Work
-  Object 검사 추가 후), Conda에서 38 통과·1 skip(추가 전),
+  pywin32 312. Conda는 필요하지 않다. unit은 표준 CPython에서 896 통과. live integration은 표준 CPython에서 42 통과(스케치 support
+  판정 추가 후), Conda에서 38 통과·1 skip(그 전),
   실행 뒤 기준 모델 동일(2026-09-15). GitHub Actions Windows CPython 3.11–3.14에서 unit 통과(3.12는
   CI unit으로만 확인, live 미실행)
-- 테스트: **868 unit 통과**. integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
+- 테스트: **1266 unit 통과**. 2026-09-27 Phase 5(스케치 기하 읽기·평면 면 위 스케치·Hole 위치/관통·
+  원형 패턴 X/Y/원통면/모서리 축·의도 기반 상위 API) 뒤 빈 테스트 Part `3D Shape00422558`에서 integration
+  **73 통과, 6 skip**(새 Phase 5 스테이지 11개 포함), 예제 두 개 live 실행, 실행 뒤 기준 상태와 같음.
+  micro-probe 29개(`scripts/probes/46*`)가 근거다. 그 전 기록: **1156 unit 통과**. 2026-09-21 Phase 4(기하 사실 측정·의미 기반 쿼리·방향·평면 편집·update 진단) 뒤
+  빈 테스트 Part `3D Shape00422558`에서 integration **62 통과, 6 skip**, A→B
+  acceptance(`phase4_geometry.py`)와 Phase 1–3 acceptance 재실행 통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **1089 unit 통과**. 2026-09-19 Phase 3(원형 패턴·boolean·제약 삭제·feature 억제) 뒤
+  빈 테스트 Part `3D Shape00422558`에서 integration **56 통과, 6 skip**, A→B
+  acceptance(`phase3_operations.py`) 통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **1036 unit 통과**. 2026-09-18 Phase 2(기존 모델 편집) 뒤 빈 테스트 Part
+  `3D Shape00422558`에서 integration **49 통과, 6 skip**, A→B acceptance(`phase2_editing.py`)
+  통과, 실행 뒤 기준 상태와 같음. 그 전 기록: **991 unit 통과**. 2026-09-18 첫 안전 배치 뒤 빈 테스트 Part `3D Shape00422558`에서
+  integration **44 통과, 6 skip**, A→B acceptance(`batch1_safety.py`) 통과, 실행 뒤 기준 상태와 같음.
+  그 전 기록: **957 unit 통과**. 2026-09-17 Multi-Body 뒤 빈 테스트 Part `AUTO3DX_MULTIBODY_TEST`에서
+  integration **40 통과, 6 skip**(빈 main body·수동 파라미터가 필요한 테스트), 실행 뒤 기준 상태와 같음.
+  그 전 기록: integration은 이번 세션의 아키텍처 변경(같은 Part의 wrapper끼리
   모델 generation 공유, 예외 범주 재편, 루트 축소, 측정 기본값, SketchElement, selection 복원,
-  검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **40 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
+  검사 필드 확장) 이후 2026-09-15에 live로 재실행해 **42 통과**(수동 파라미터가 없는 Part에서는 1건 skip)이고, 실행 뒤 모델이 기준
   상태와 같았다
-- probe: `scripts/probes/`에 39개 존재
+- probe: `scripts/probes/`에 45개 + Phase 5 micro-probe 29개(`46*`, 공통 틀 `_micro.py`)
 - 브랜치: `develop` (push·PR 안 함)
 
 ---
@@ -33,6 +46,7 @@
    |
 [auto-3dx]  attach  (이름으로 Part 선택 가능)
             파라미터 생성 / 수정 / 삭제 (Length·Angle·Dimension·Real·Integer·String·Boolean)
+            body 생성 / 작업 body 지정 / 숨김·표시 / 가드 삭제
             평면 생성 -> 원점 3개 + offset + 각도
             스케치 생성 -> 점·선·원·호·사각형·스플라인 (+ 회전축)
             스케치 제약 9종 + 반지름·동심
@@ -233,7 +247,7 @@ AddNewChamfer(edge)      -> Chamfer 반환. 이후 Part.Update() 실패
 
 객체는 트리에 생겼는데 모델이 재계산에 실패한다. **생성 호출의 성공은 검증이 아니다.**
 
-패턴 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을 만드는지는
+사각 패턴의 방향은 원점 평면으로 만든 `Reference`여야 하고, 어느 평면이 어느 축을 만드는지는
 probe 30에서 측정으로 확정했다(conventions 1.2.5). 이에 따라 public API
 `create_rectangular_pattern()`과 signed-axis 사전 검사가 구현됐고 unit 테스트가 있다.
 생성 뒤 update가 실패하면 반환된 wrapper를
@@ -352,7 +366,7 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 |---|---|---|---|
 | 1 | 모서리 fillet·chamfer, Shell·Thickness·Hole API | 완료 | 다섯 feature 모두 구현·live 검증. stale snapshot은 COM 전에 거부한다 |
 | 2 | chamfer 인자 확정 | 완료 | `iMode=1`만 동작한다 (probe 35) |
-| 3 | 사용자 정의 평면 API | 완료 | offset·각도 평면 모두 pad까지 검증됐다 (probe 36, conventions 1.2.7) |
+| 3 | 사용자 정의 평면 API | 완료 | offset·각도 평면 모두 pad까지 검증됐다 (probe 36, conventions 1.2.7). `list`/`names`/`get`으로 모델에서 다시 찾고, 컬렉션이 기하 세트를 기억하지 않으므로 다른 프로세스가 만든 평면도 정리된다 (conventions 1.6, `test_plane_lookup.py`, live `test_user_planes_live.py`). 그 평면 위 스케치는 `sketch.support()`가 평면 자체를 돌려준다 (conventions 1.7, `test_sketch_support.py`) |
 | 4 | `IsUpToDate` 의미 확인 | 완료 | `Part.is_up_to_date()` 구현 및 live false→true 전이 검증 (2.6) |
 | 5 | 측정 기반 검증 | 완료 | `Part.measurement` 구현 및 live integration 완료 (2.6) |
 | 6 | API design contract (`docs/api-design.md`) | 완료 | 앞으로의 공개 API 판단 기준 문서. 감사 결과를 바탕으로 결정했다 |
@@ -364,6 +378,41 @@ Stiffener는 두 차례 시도에서 모두 update가 실패해 미검증으로 
 | 12 | topology 검색의 사용자 selection 복원 | 완료 | `part.topology.edges()`/`faces()`가 검색 전 selection을 캡처하고 뒤에 복원한 뒤 개수로 확인한다. CATIA가 복원 일부를 조용히 거부하면 스냅샷은 그대로 돌려주고 `SelectionNotRestoredWarning`을 낸다 (`test_topology_selection.py`, live `test_snapshots_restore_the_user_selection_and_stay_usable`) |
 | 13 | 스레드 안전성 | 중간 | 미검증 (2.7) |
 | 14 | Part 생성 재시도 | 외부 의존 | 라이선스 해결 필요 (2.1) |
+| 15 | Multi-sections Solid (Loft) | 완료 (모서리 없는 섹션) | `create_multi_section_solid`/`get_`/`remove_`/`multi_section_solids`/`section_names()`. live: 원 두 개와 닫힌 spline NACA 2415/2412 날개가 공개 API만으로 만들어졌고, 새 프로세스에서 재발견·섹션 읽기·삭제·기준 복원까지 통과했다. 사각형과 선으로 닫은 에어포일처럼 모서리가 있는 섹션은 닫힘점 없이 update에 실패하며, `remove_multi_section_solid`로 복구된다. guide·spine·닫힘점·coupling은 미지원 (conventions 1.8, live `test_multi_section_solid_live.py`) |
+| 16 | live 테스트 대상 Part 지정 | 완료 | `AUTO3DX_LIVE_PART`가 활성 Part와 일치해야 통합 테스트 세션이 시작된다. 이름을 지정하지 않은 Part에서 probe가 공유 기하 세트를 지운 사고에서 나온 규칙이다 (conventions 1.8) |
+| 17 | Multi-Body | 완료 | `part.bodies`(`list`/`names`/`get`/`main`/`create`/`remove`), `part.work_in(body)`, `Body.features`/`sketch_names`/`is_visible`/`hide()`/`show()`. 스케치와 Part Design feature가 선택한 body에 만들어지고 조회되며, 블록을 어떻게 나가든 In-Work Object가 복원된다. live: 새 wrapper·새 프로세스 재발견(A→B acceptance), 숨김 read-back, 다섯 body enclosure에서 바깥 하우징만 숨김, 기준 복원. boolean 연산은 후속 단계에서 구현됐고, body 이름 변경·body 안의 기하 세트는 미지원 (conventions 1.9, `test_multi_body.py`, live `test_multi_body_live.py`) |
+| 18 | selection 기반 동작의 활성 Part 가드 | 완료 (임시 안전장치) | 비활성 Part의 `Selection.Search`가 활성 Part를 검색했다. topology 검색·`remove_*`·body 숨김/삭제가 활성 Part가 아니면 `InactivePartError`로 거부하고, 검사의 topology 개수는 `None`이다. 비활성 Part용 검증된 경로가 생기면 풀 수 있다 (conventions 1.9, api-design 7절) |
+| 19 | body 단위 topology 범위와 소유권 | 완료 | body를 선택하고 `Topology.Edge,sel`로 검색하면 그 body만 나온다. `part.topology.edges(body=...)`/`faces(body=...)`, work_in 안에서는 자동. 모든 `Edge`/`Face`가 `Reference.Parent` 체인에서 읽은 소유 body를 들고 있고, 다른 body의 모서리로 feature를 만들면 COM 호출 전에 `CrossBodyReferenceError`. 소유 정보는 스냅샷마다 모델에서 다시 읽으므로 새 프로세스에서도 동작한다. CATIA가 소유를 알려주지 않으면 통과시킨다 (conventions 1.10) |
+| 20 | non-main body 재빌드·측정 안전 | 완료 | `body.update()`/`part.update(body)`(`Part.UpdateObject`), `body.is_up_to_date`. 재빌드 안 된 대상 측정은 `TargetNotUpToDateError`로 거부하고, 측정이 재빌드하지는 않는다 (conventions 1.10) |
+| 21 | EnumParam 읽기 | 완료 | `Value`가 없는 파라미터는 `ValueAsString()`으로 읽는다. 제약이 있는 Part에서 파라미터 열거가 깨지던 문제. 쓰기는 미검증이라 `set()`은 계속 거부 |
+| 22 | 평면 support 사전 조건 | 완료 | 재빌드 안 된 평면 위 스케치는 `SupportNotUpdatedError`로 거부한다. 전에는 opaque E_FAIL이었다 |
+| 23 | PartUpdateError 복구 정책 | 완료 (문서·안내) | 정상이던 값을 바꿔 실패한 경우는 값을 되돌리고 다시 update하는 것이 먼저다. 삭제는 애초에 만들어지지 않은 feature나 되돌릴 값이 없을 때만. live로 pad 30→1→30 복구 확인 (conventions 1.10) |
+| 24 | 기존 feature 치수 편집 | 완료 | fillet `radius`, chamfer `length1`/`angle`, hole `diameter`/`depth`, shell 두 두께, thickness `offset`. 읽기·쓰기·update·형상 변화·새 wrapper·새 프로세스까지 확인한 것만 공개했다. setter는 재빌드하지 않고, 실패한 update는 값을 되돌려 복구한다 (conventions 1.11) |
+| 25 | 스케치 요소 재발견 | 완료 | `sketch.get_element(name)`/`elements()`와 `SketchElement.name`/`radius`. CATIA 이름이 지속 identity이고, 새 프로세스에서 재발견한 선으로 새 제약을 만들고 update까지 성공했다. 선 좌표는 Phase 5에서 `geometry()`로 열렸다(46번) (conventions 1.11, 1.14) |
+| 26 | feature 단위 작업 위치 | 완료 | `part.work_at(feature)`. 라이브에서 `PAD, FILLET` 트리의 `PAD`에서 작업하니 새 pad가 `PAD, NEW, FILLET`로 **바로 뒤에 삽입**됐다. 트리 재정렬이 아니다. 이전 In-Work Object는 정상·예외 모두 복원된다 (conventions 1.11) |
+| 27 | 파라미터 의존성 보호 | 완료 (formula 한정) | `Formula.GetInParameter`로 각 formula의 입력을 읽어 `parameters.dependents(name)`을 만들고, 참조 중인 파라미터 삭제는 `ParameterInUseError`로 거부한다. 전에는 CATIA가 formula를 `deleted_*`로 고쳐 쓰고 Part가 not-up-to-date가 됐다. rule/check/law/program/design table은 미탐지 (conventions 1.11) |
+| 28 | 원형 패턴 | 완료 | `create_circular_pattern`과 `CircularPattern.angular_instances`/`angular_spacing_deg`. 디스크에서 6개 패턴이 구멍 5개 분량을 정확히 제거했고, 8개로 바꾸면 7개 분량이 됐다. Phase 5에서 X/Y축, 원통면·직선 모서리 축, `reverse`가 열렸다(49번) (conventions 1.12, 1.14) |
+| 29 | body boolean 네 가지 | 완료 | remove/add/intersect/assemble 모두 부피로 검증. 대상은 work_in 중인 body, tool body는 소비되어 `part.bodies`에서 사라진다. `tool_body_name`은 feature에서 읽는다. **삭제하면 소비된 body까지 사라지고 되살릴 방법이 없어** `delete_consumed_body=True`를 요구한다 (conventions 1.12) |
+| 30 | 스케치 제약 삭제 | 완료 | `sketch.constraints.remove()`. `Constraints.Remove`는 인덱스를 받고 제약끼리는 COM 동일성 비교가 안 돼서 이름으로 인덱스를 찾는다. edition 안에서 지우고, 이미 edit() 안이면 그 세션을 재사용한다 (conventions 1.12) |
+| 31 | feature 억제 | 완료 | `is_active`/`activate()`/`deactivate()`. Activity는 feature 멤버가 아니라 `Part.Parameters`의 BoolParam이라 Parent 체인으로 Part를 찾아 읽는다. 억제는 generation을 올려 옛 스냅샷을 무효화한다. 상류 feature를 억제하면 update가 실패하고, 되돌리면 복구된다 (conventions 1.12) |
+| 32 | 공개 세션 제목 | 완료 | `catia.active_window_title` 하나만 열어 acceptance 스크립트에서 raw COM을 없앴다. 창 조작은 하지 않는다 |
+| 33 | 검사 분류 수정 | 완료 | `inspect.summary()`가 CircPattern과 boolean 네 종류를 `supported=True`로 보고한다. 처리하는 kind 목록과 `SUPPORTED_FEATURE_KINDS`가 어긋나지 않게 단위 테스트로 묶었다 |
+| 34 | 면·모서리 측정 사실 | 완료 (평면·원통, 직선·원·호) | `MeasurableService`로 면적·중심·법선·반지름·길이·끝점을 읽는다. 면적만 m²라 변환한다. 분류는 typed getter의 응답으로 하고, 원뿔·구·스플라인은 unknown이다. 평면 법선 부호는 바깥 방향이 아니다 (conventions 1.13) |
+| 35 | 의미 기반 topology 쿼리 | 완료 | `snapshot.query()`. 인덱스·descriptor 없이 윗면, 구멍 벽, 구멍 테두리, 수직 모서리를 골랐고, 새 프로세스에서 같은 쿼리로 다시 찾았다. `one()`은 0개·여러 개를 거부한다 |
+| 36 | owner 의미 정정 | 완료 | `owner_feature_name`은 현재 소유 feature다. 필렛 뒤에는 모든 솔리드 모서리가 필렛을 가리킨다. `current_owner_feature_name` 별칭 추가. Parent 체인이 body에 닿지 않는 세션(재시작 뒤 AnyObject 체인)에서는 body 소속으로 찾는다 |
+| 37 | Pad/Pocket 방향 | 완료 | `direction=` 인자와 `set_direction`/`reverse_direction`. CATIA 기본 pocket 방향은 스케치 법선 반대라 XY 아래 블록에서 **0 mm³를 자르고도 update가 성공**했다 |
+| 38 | 평면 편집과 삭제 가드 | 완료 | `set_offset`/`set_angle` 후 update하면 스케치와 feature가 따라온다. 사용 중인 평면 삭제는 CATIA에서 성공하지만 다음 update가 실패하므로 `ReferenceInUseError`로 막고 `force=True`를 요구한다 |
+| 39 | update 진단 | 부분 | `inspect.update_issues()`와 `PartUpdateError.issues`. `IsUpToDate`/`IsInactive`로 증상을 나열할 뿐 원인은 알려주지 않는다(boss 높이 오류에서 boss가 아니라 하류 fillet·pocket이 표시됨) |
+| 40 | 사각형 구속 헬퍼 | 완료 (부분) | `Sketch.rectangle(constraints="none"|"orientation"|"dimensioned")`. 수평·수직 4개와 가로·세로 길이 2개까지 실측(46ad/46ae). 모서리 일치 구속은 근거가 없어 완전 구속 옵션은 없다. `SketchEditor.rectangle()`은 그대로 제약 0개 |
+| 41 | Phase 5 탐사 방식 | 완료 | 단일 probe 46이 열린 스케치 편집 중 읽기와 제약 여러 개를 섞다가 3DEXPERIENCE를 응답 없음으로 만들었다(호출 미특정, 사용자가 재시작). 이후 질문 하나당 micro-probe 하나, 모든 Automation 호출 앞뒤 flush 마커, 호출마다 정리·기준 재확인. 29개 모두 멈추지 않았다 (conventions 1.14) |
+| 42 | 스케치 기하 읽기 | 완료 | `SketchElement.geometry()`(선 끝점, 원/호 중심·반지름·닫힘, 점), `is_construction`, `Sketch.frame()`/`geometry()`, `Constraint.mode`/`element_name()`. 편집을 닫은 뒤만 읽고 열린 편집 중에는 COM 전에 거부 (46a-46h, 46ab, 46ac) |
+| 43 | 평면 면 위 스케치 | 완료 | `sketches.create(name, support=<평면 Face>)`, `body.sketches`. stale·다른 Part·다른 body·비평면 면은 COM 전에 거부. 면 스케치 법선은 윗면·아랫면·옆면·포켓 바닥 모두 재료 바깥, pocket 기본 방향이 재료 안쪽을 자르고, pad 높이가 바뀌면 스케치가 면을 따라간다 (46i-46l, 46aa) |
+| 44 | Hole 위치와 한계 | 완료 | `create_hole(origin=, diameter=, limit="blind"|"through_all", bottom="flat"|"v")`, `Hole.origin/direction/limit/set_limit/bottom/set_bottom`. 관통으로 가면 CATIA가 깊이를 다시 쓰므로 blind로 돌아갈 때 깊이를 요구한다. 방향 뒤집기·나사·카운터보어는 미검증 (46m-46s, 46p) |
+| 45 | Hole 설정의 세션 이월 | 완료 (대응) | 새 Hole은 직전 Hole의 바닥·limit·지름을 물려받는다. Phase 5 live 뒤 기존 Phase 2 테스트의 `create_hole(face, 5)`가 관통(깊이 30)이 되어 실패한 것으로 발견했다. `create_hole`이 limit을 항상 쓰도록 고쳤고, `46af` 스크립트와 live 모듈 종료 fixture가 세션 기본값을 (12, V, blind)로 되돌린다 (46q, conventions 1.14) |
+| 46 | 원형 패턴 축 | 완료 | `axis="X"|"Y"|"Z"`, 원통 `Face`, 직선 `Edge`, `reverse=`. 무게중심·부피로 확인. Hole 씨앗 패턴도 live로 확인. complete crown은 CATIA가 무시해서 제공하지 않는다 (46t-46x) |
+| 47 | 면·모서리 인접 | 미지원 | 면 범위 selection 검색은 0개, `DistanceMinToPoint`는 호출 형식이 맞지 않았다. 대신 `EdgeQuery.on_plane_of(face)`(평면 위에 놓인 모서리, 인접 주장 없음) (46y, 46z) |
+| 48 | 의도 기반 상위 API | 완료 | `auto_3dx.highlevel`: `body.features.pad/pocket/hole/fillet/chamfer/circular_pattern`, `sketch.rectangle/centered_rectangle/circle`, `part.geometry.top_face/find_*`, `part.inspect.facts(...)`, 속성 setter. 모두 Level 2 공개 API의 조합이고 AST 테스트가 COM 접근을 막는다. `body.features`는 여전히 `FeatureInfo` 튜플이다 (api-design 20절, `docs/phase5-api-design.md`) |
+| 49 | 선택적 검사 | 완료 | `inspect.facts("volume", "up_to_date", ...)` live 0.038 s (`summary()`는 1-3.5 s). topology 검색을 하지 않는다 |
 
 1번이 기능 개수로 압도적이다(약 80개). probe 17에서 막혔던 것이 probe 28에서 뚫렸고, 면은
 probe 37에서 같은 경로로 뚫렸으므로, 남은 것은 "어느 모서리·어느 면인가"를 안정적으로

@@ -56,10 +56,21 @@ single-generation staleness policy (`geometry.faces`, `_require_current_face`)
 as the edge features, and reduce to `com_object`/`name` for the same reason:
 there is no verified way to read a shell/thickness/hole's source face back,
 so there is no `ensure_shell`/`ensure_thickness`/`ensure_hole` either.
+
+`MultiSectionSolid` (probe 40, `docs/conventions.md` section 1.8) is the Part Design
+Multi-sections Solid -- CATIA's `Loft`. It is created differently from every other
+feature here: `ShapeFactory.AddNewLoft()` takes no arguments, and the sections are
+added to the new feature's `HybridShape` afterwards, one `AddSectionToLoft` call per
+section sketch. `_create_feature` gained an optional post-rename `configure` step for
+exactly that, so the duplicate-name check, the rename and the `PartialCreationError`
+reporting stay shared rather than copied. Its section sketches can be read back from
+the live feature by name (`MultiSectionSolid.section_names`), but guides, spine,
+coupling, closing points, tangency and relimitation are neither set nor read.
 """
 
 import warnings
 import math
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import pywintypes
@@ -68,11 +79,15 @@ from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
+    AutomationError,
+    BooleanOperationError,
+    CrossBodyReferenceError,
     FeatureConflictError,
     FeatureNotFoundError,
     PartialCreationError,
     ParameterTypeError,
     UnsupportedSupportError,
+    ValidationError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
 from auto_3dx.geometry.edges import Edge, EdgeSnapshot, take_edge_snapshot
@@ -98,6 +113,88 @@ from auto_3dx.parameters.parameter import (
 LENGTH_TOLERANCE: float = 1e-9
 """Absolute tolerance used to compare feature depths with `math.isclose`."""
 
+CIRCULAR_PATTERN_KIND: str = "CircPattern"
+"""`type(item).__name__` of a circular pattern in `Body.Shapes` (probe 44)."""
+
+CIRCULAR_PATTERN_AXIS_X: str = "X"
+"""The global X axis through the origin: `OriginElements.PlaneYZ` as centre and axis.
+
+Live (probe 46t): a cube centred at (25, 0, 5) patterned four times at 90 degrees about
+PlaneYZ put the centre of gravity at (25, 0, 0) -- on the X axis.
+"""
+
+CIRCULAR_PATTERN_AXIS_Y: str = "Y"
+"""The global Y axis through the origin: `OriginElements.PlaneZX` (probe 46t, COG (0,0,0))."""
+
+CIRCULAR_PATTERN_AXIS_Z: str = "Z"
+"""The global Z axis through the origin: `OriginElements.PlaneXY`.
+
+Live (probe 44): six instances of a pocket removed exactly five extra holes' worth of
+material; probe 46t confirmed Z by centre of gravity. In every case the origin plane
+passed as both rotation centre and rotation axis turns the pattern about its normal.
+"""
+
+SUPPORTED_CIRCULAR_PATTERN_AXES: "frozenset[str]" = frozenset(
+    {CIRCULAR_PATTERN_AXIS_X, CIRCULAR_PATTERN_AXIS_Y, CIRCULAR_PATTERN_AXIS_Z}
+)
+"""The named rotation axes `create_circular_pattern` accepts.
+
+A cylindrical `Face` (its axis, probe 46u) or a linear `Edge` (probe 46v) is accepted too.
+"""
+
+_CIRCULAR_AXIS_PLANES: "dict[str, str]" = {
+    CIRCULAR_PATTERN_AXIS_X: "PlaneYZ",
+    CIRCULAR_PATTERN_AXIS_Y: "PlaneZX",
+    CIRCULAR_PATTERN_AXIS_Z: "PlaneXY",
+}
+"""The origin plane whose normal is each named axis (probe 46t)."""
+
+_CYLINDRICAL_SURFACE = "cylindrical"
+_LINE_CURVE = "line"
+
+_CIRCULAR_RADIAL_INSTANCES: int = 1
+"""One radial row: the verified call patterns around the axis only."""
+
+_CIRCULAR_RADIAL_STEP: float = 1.0
+"""Radial spacing of that single row; unused with one instance, but required."""
+
+_CIRCULAR_ROTATION_ANGLE: float = 0.0
+"""`iRotationAngle`, verified at 0.0."""
+
+_CIRCULAR_AXIS_REVERSED: bool = False
+"""`iIsReversedRotationAxis` by default. Live (probe 46x), about Z: `False` turned the
+copies clockwise seen from +Z, `True` counter-clockwise."""
+
+_CIRCULAR_RADIUS_ALIGNED: bool = True
+"""`iIsRadiusAligned`, verified at True."""
+
+BOOLEAN_REMOVE_KIND: str = "Remove"
+"""`type(item).__name__` of a boolean remove feature."""
+
+BOOLEAN_ADD_KIND: str = "Add"
+"""`type(item).__name__` of a boolean add feature."""
+
+BOOLEAN_INTERSECT_KIND: str = "Intersect"
+"""`type(item).__name__` of a boolean intersect feature."""
+
+BOOLEAN_ASSEMBLE_KIND: str = "Assemble"
+"""`type(item).__name__` of a boolean assemble feature."""
+
+BOOLEAN_KINDS: "tuple[str, ...]" = (
+    BOOLEAN_REMOVE_KIND,
+    BOOLEAN_ADD_KIND,
+    BOOLEAN_INTERSECT_KIND,
+    BOOLEAN_ASSEMBLE_KIND,
+)
+"""Every boolean feature kind this SDK creates and finds, all verified live (probe 44)."""
+
+_ACTIVITY_PARAMETER: str = "Activity"
+"""The `BoolParam` that suppresses a feature, reached through `Part.Parameters`."""
+
+_MAX_OWNER_WALK: int = 6
+"""How far up a feature's `Parent` chain to look for its body and its Part."""
+
+
 PAD_KIND: str = "Pad"
 """The `type(com_object).__name__` value for a CATIA Pad feature."""
 
@@ -118,6 +215,33 @@ RIB_KIND: str = "Rib"
 
 SLOT_KIND: str = "Slot"
 """The `type(com_object).__name__` value for a CATIA Slot feature."""
+
+MULTI_SECTION_SOLID_KIND: str = "Loft"
+"""The `type(com_object).__name__` of a Part Design Multi-sections Solid (probe 40).
+
+CATIA's user interface calls the feature "Multi-sections Solid" and names new ones
+`Multi-sections Solid.N`, but the Automation wrapper type is `Loft`.
+"""
+
+MULTI_SECTION_ORIENTATION_VERIFIED: int = 1
+"""The `iOri` value passed to `AddSectionToLoft` for every section.
+
+The only value tried: it was accepted for both sections in probe 40 and read back as
+`1` by `GetSectionFromLoft`, and it is the value the raw NACA wing experiment used. The
+type library gives no enum meaning for it, so no other value is offered.
+"""
+
+MIN_MULTI_SECTION_SECTIONS: int = 2
+"""A Multi-sections Solid needs at least two sections to span between."""
+
+_FIRST_SECTION_RANK: int = 1
+"""`GetSectionFromLoft` ranks are 1-based: rank 0 failed and ranks 1 and 2 answered."""
+
+_MAX_SECTION_RANK: int = 1000
+"""Upper bound on section read-back, so a release that never fails cannot loop forever."""
+
+_E_FAIL: int = -2147467259
+"""`E_FAIL`, which `GetSectionFromLoft` reported for the rank past the last section."""
 
 EDGE_FILLET_KIND: str = "ConstRadEdgeFillet"
 """The `type(com_object).__name__` value for a CATIA constant-radius edge fillet."""
@@ -189,6 +313,40 @@ THICKNESS_KIND: str = "Thickness"
 HOLE_KIND: str = "Hole"
 """The `type(com_object).__name__` value for a CATIA Hole feature."""
 
+HOLE_LIMIT_BLIND: str = "blind"
+"""A hole that stops at its depth: `BottomLimit.LimitMode = catOffsetLimit (0)`."""
+
+HOLE_LIMIT_THROUGH_ALL: str = "through_all"
+"""A hole through the whole solid: `BottomLimit.LimitMode = catUpToLastLimit (2)`.
+
+Live (probe 46n): a 12 mm hole through a 20 mm block removed exactly pi * 36 * 20 mm3.
+CATIA then rewrites the depth dimension to the computed length (8 became 20), so going
+back to `HOLE_LIMIT_BLIND` needs an explicit depth.
+"""
+
+SUPPORTED_HOLE_LIMITS: "frozenset[str]" = frozenset({HOLE_LIMIT_BLIND, HOLE_LIMIT_THROUGH_ALL})
+
+HOLE_BOTTOM_FLAT: str = "flat"
+"""A flat-bottomed hole: `BottomType = catFlatHoleBottom (0)` (probe 46o, exact volume)."""
+
+HOLE_BOTTOM_V: str = "v"
+"""A drill-point bottom: `BottomType = catVHoleBottom (1)`, 120 degrees (probes 46m, 46r)."""
+
+SUPPORTED_HOLE_BOTTOMS: "frozenset[str]" = frozenset({HOLE_BOTTOM_FLAT, HOLE_BOTTOM_V})
+
+HOLE_ORIGIN_TOLERANCE_MM: float = 1e-3
+"""How far off a face's plane a hole origin may lie and still count as on it."""
+
+_LIMIT_MODE_BY_NAME: "dict[str, int]" = {HOLE_LIMIT_BLIND: 0, HOLE_LIMIT_THROUGH_ALL: 2}
+_LIMIT_NAME_BY_MODE: "dict[int, str]" = {mode: name for name, mode in _LIMIT_MODE_BY_NAME.items()}
+_BOTTOM_TYPE_BY_NAME: "dict[str, int]" = {HOLE_BOTTOM_FLAT: 0, HOLE_BOTTOM_V: 1}
+_BOTTOM_NAME_BY_TYPE: "dict[int, str]" = {code: name for name, code in _BOTTOM_TYPE_BY_NAME.items()}
+_HOLE_OTHER: str = "other"
+_HOLE_NOMINAL_DEPTH: float = 1.0
+"""The depth handed to the factory for a through-all hole; CATIA replaces it (probe 46n)."""
+_POINT3_SEED_LENGTH: int = 3
+_PLANAR_SURFACE: str = "planar"
+
 RECTANGULAR_PATTERN_KIND: str = "RectPattern"
 """The `type(com_object).__name__` value for a CATIA rectangular pattern."""
 
@@ -240,6 +398,60 @@ _PATTERN_ROTATION_ANGLE: float = 0.0
 
 FULL_REVOLUTION: float = 360.0
 """The verified default `FirstAngle.Value` (degrees) a new Shaft/Groove is created with."""
+
+
+def _validate_sections(sections: Any) -> "list[Sketch]":
+    """Checks the section sketches of a Multi-sections Solid before CATIA is called.
+
+    Args:
+        sections: The caller's sections argument.
+
+    Returns:
+        The sections as a list, in the order given.
+
+    Raises:
+        ParameterTypeError: If `sections` is not a sequence of `Sketch` objects, holds
+            fewer than `MIN_MULTI_SECTION_SECTIONS`, or names the same sketch twice.
+    """
+    if isinstance(sections, (str, bytes)) or not isinstance(sections, Iterable):
+        raise ParameterTypeError(
+            "sections must be a sequence of Sketch objects, not "
+            f"{type(sections).__name__}."
+        )
+    section_list = list(sections)
+    if len(section_list) < MIN_MULTI_SECTION_SECTIONS:
+        raise ParameterTypeError(
+            f"A multi-section solid needs at least {MIN_MULTI_SECTION_SECTIONS} sections, "
+            f"got {len(section_list)}."
+        )
+    for position, section in enumerate(section_list, start=1):
+        if not isinstance(section, Sketch):
+            raise ParameterTypeError(
+                f"Section {position} must be a Sketch, not {type(section).__name__}."
+            )
+    for index, first in enumerate(section_list):
+        for second in section_list[index + 1:]:
+            if bool(first.com_object == second.com_object):
+                raise ParameterTypeError(
+                    "The same sketch appears more than once in sections; each section "
+                    "must be a different sketch."
+                )
+    return section_list
+
+
+def _is_past_last_section(error: pywintypes.com_error) -> bool:
+    """Tells whether `GetSectionFromLoft` failed because the rank is past the end.
+
+    Args:
+        error: The COM error `GetSectionFromLoft` raised.
+
+    Returns:
+        `True` only for the `E_FAIL` CATIA reported for the rank after the last section
+        in probe 40. Any other failure is a real error, not the end of the list.
+    """
+    excepinfo = error.args[2] if len(error.args) > 2 else None
+    scode = excepinfo[5] if isinstance(excepinfo, tuple) and len(excepinfo) > 5 else None
+    return scode == _E_FAIL
 
 
 def _scan_shapes(shapes: Any, kind: str) -> "list[Any]":
@@ -331,7 +543,211 @@ def _validate_non_negative_length(value: float, label: str) -> float:
     return coerced
 
 
-class SketchFeature:
+_MINIMUM_PATTERN_INSTANCES: int = 2
+"""One instance is the seed itself; a pattern needs at least two."""
+
+
+def _validate_instance_count(instances: Any) -> int:
+    """Checks a pattern instance count before CATIA is called.
+
+    Args:
+        instances: The count the caller passed.
+
+    Returns:
+        The count as an `int`.
+
+    Raises:
+        ParameterTypeError: If it is not an integer of at least
+            `_MINIMUM_PATTERN_INSTANCES`.
+    """
+    if isinstance(instances, bool) or not isinstance(instances, int):
+        raise ParameterTypeError(
+            f"instances must be an int, not {type(instances).__name__}."
+        )
+    if instances < _MINIMUM_PATTERN_INSTANCES:
+        raise ParameterTypeError(
+            f"instances must be at least {_MINIMUM_PATTERN_INSTANCES}; got {instances}."
+        )
+    return instances
+
+
+class _FeatureActivity:
+    """Suppression and reactivation, shared by every Part Design feature wrapper.
+
+    CATIA exposes a feature's suppression as a `BoolParam` named `Activity` inside
+    `Part.Parameters`, not as a member of the feature itself: live (probe 44),
+    `feature.Activity` does not exist and `feature.GetItem("Activity")` fails, while
+    `Parameters.Item("<Part>\\<Body>\\<Feature>\\Activity")` returns the parameter. The
+    path is built by walking the feature's own `Parent` chain (`Shapes -> Body -> Bodies
+    -> Part`), so a wrapper needs nothing but the feature it holds.
+
+    Suppression is non-destructive: live, deactivating a fillet and rebuilding gave back
+    the unfilleted volume with the fillet still in the tree, and reactivating it restored
+    the filleted volume exactly.
+    """
+
+    _com_object: Any
+    _generation: ModelGeneration
+
+    def _activity_parameter(self) -> Any:
+        """Finds this feature's `Activity` parameter in the Part.
+
+        Returns:
+            The raw `BoolParam`.
+
+        Raises:
+            AutomationError: If the feature's Part cannot be reached, or the Part has no
+                `Activity` parameter for it.
+        """
+        body_name: str | None = None
+        node = self._com_object
+        part = None
+        for _ in range(_MAX_OWNER_WALK):
+            try:
+                node = node.Parent
+            except (pywintypes.com_error, AttributeError):
+                break
+            if node is None:
+                break
+            if type(node).__name__ == "Body" and body_name is None:
+                try:
+                    body_name = str(node.Name)
+                except (pywintypes.com_error, AttributeError):
+                    body_name = None
+            if hasattr(node, "Parameters"):
+                part = node
+                break
+        if part is None:
+            raise AutomationError(
+                "This feature's Part could not be reached, so its Activity parameter "
+                "cannot be read. Obtain the feature through part.part_design."
+            )
+        name = self.name
+        try:
+            parameters = part.Parameters
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if body_name is not None:
+            try:
+                return parameters.Item(
+                    f"{part.Name}\\{body_name}\\{name}\\{_ACTIVITY_PARAMETER}"
+                )
+            except pywintypes.com_error:
+                # A differently shaped path (a nested body, a renamed Part) still resolves
+                # through the scan below rather than failing here.
+                pass
+        suffix = f"\\{name}\\{_ACTIVITY_PARAMETER}"
+        try:
+            count = int(parameters.Count)
+            for index in range(1, count + 1):
+                candidate = parameters.Item(index)
+                if str(candidate.Name).endswith(suffix):
+                    return candidate
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        raise AutomationError(
+            f"CATIA reports no {_ACTIVITY_PARAMETER} parameter for {name!r}, so this "
+            "feature cannot be suppressed through this release."
+        )
+
+    @property
+    def is_active(self) -> bool:
+        """bool: Whether the feature currently contributes to the geometry.
+
+        `False` means it is suppressed: still in the tree, but with no effect until it is
+        activated again and the Part is rebuilt.
+
+        Raises:
+            AutomationError: If the feature's `Activity` cannot be read.
+        """
+        try:
+            return bool(self._activity_parameter().Value)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def deactivate(self) -> None:
+        """Suppresses the feature. Does not rebuild; call `part.update()`.
+
+        The feature stays in the model and keeps its dimensions; only its contribution to
+        the geometry stops. Suppressing a feature that later features depend on can make
+        the next `Part.Update()` fail (live: suppressing a pad under a fillet did), and
+        the repair is to activate it again and update -- not to delete anything
+        (`docs/api-design.md` section 6).
+
+        Raises:
+            AutomationError: If CATIA refuses the write.
+        """
+        self._set_activity(False)
+
+    def activate(self) -> None:
+        """Un-suppresses the feature. Does not rebuild; call `part.update()`.
+
+        Raises:
+            AutomationError: If CATIA refuses the write.
+        """
+        self._set_activity(True)
+
+    def _set_activity(self, active: bool) -> None:
+        """Writes the `Activity` parameter under one model mutation.
+
+        Suppression can change the whole solid, so this advances the model generation and
+        every outstanding topology snapshot goes stale (`docs/api-design.md` section 7).
+
+        Args:
+            active: The new state.
+
+        Raises:
+            AutomationError: If CATIA refuses the write.
+        """
+        parameter = self._activity_parameter()
+        with self._generation.mutation():
+            try:
+                parameter.Value = active
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+
+DIRECTION_ALONG_SKETCH_NORMAL: str = "along_sketch_normal"
+"""A pad or pocket that goes the way its sketch plane's normal points.
+
+`DirectionOrientation = catRegularOrientation (0)`. For a sketch on XY that is +Z: a pad
+went up and a pocket cut into material above XY (probe 45).
+"""
+
+DIRECTION_AGAINST_SKETCH_NORMAL: str = "against_sketch_normal"
+"""A pad or pocket that goes against its sketch plane's normal.
+
+`DirectionOrientation = catInverseOrientation (1)`. For a sketch on XY that is -Z.
+"""
+
+SUPPORTED_DIRECTIONS: "frozenset[str]" = frozenset(
+    {DIRECTION_ALONG_SKETCH_NORMAL, DIRECTION_AGAINST_SKETCH_NORMAL}
+)
+"""The directions `create_pad`/`create_pocket` and `set_direction` accept."""
+
+_ORIENTATION_BY_DIRECTION: "dict[str, int]" = {
+    DIRECTION_ALONG_SKETCH_NORMAL: 0,
+    DIRECTION_AGAINST_SKETCH_NORMAL: 1,
+}
+_DIRECTION_BY_ORIENTATION: "dict[int, str]" = {
+    orientation: direction for direction, orientation in _ORIENTATION_BY_DIRECTION.items()
+}
+
+
+def _validate_direction(direction: Any) -> int:
+    """Turns a public direction into CATIA's `DirectionOrientation`, before any COM call.
+
+    Raises:
+        ParameterTypeError: If `direction` is not one of `SUPPORTED_DIRECTIONS`.
+    """
+    if direction not in _ORIENTATION_BY_DIRECTION:
+        raise ParameterTypeError(
+            f"direction must be one of {sorted(SUPPORTED_DIRECTIONS)}, not {direction!r}."
+        )
+    return _ORIENTATION_BY_DIRECTION[direction]
+
+
+class SketchFeature(_FeatureActivity):
     """Common wrapper for a sketch-based Part Design feature (`Pad`/`Pocket`).
 
     Verified structurally identical for both kinds (`docs/conventions.md`
@@ -398,6 +814,11 @@ class SketchFeature:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    @depth.setter
+    def depth(self, value: float) -> None:
+        """Assigning is `set_depth(value)`: same validation, no rebuild."""
+        self.set_depth(value)
+
     def set_depth(self, depth: float, unit: str = MILLIMETRE) -> None:
         """Sets the feature's extrusion/removal magnitude.
 
@@ -417,6 +838,63 @@ class SketchFeature:
                 self._com_object.FirstLimit.Dimension.Value = coerced
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
+
+    @property
+    def direction(self) -> str:
+        """str: Which way the feature goes relative to its sketch plane's normal.
+
+        `DIRECTION_ALONG_SKETCH_NORMAL` or `DIRECTION_AGAINST_SKETCH_NORMAL`, read from
+        `DirectionOrientation` (0 or 1). The same mapping held live for a Pad and a Pocket
+        (probe 45). Note that CATIA creates a Pocket AGAINST the normal by default and a Pad
+        ALONG it.
+
+        Raises:
+            AutomationError: If CATIA reports an orientation this SDK does not know.
+        """
+        try:
+            orientation = int(self._com_object.DirectionOrientation)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        if orientation not in _DIRECTION_BY_ORIENTATION:
+            raise AutomationError(
+                f"DirectionOrientation reported {orientation}, which is not a known direction."
+            )
+        return _DIRECTION_BY_ORIENTATION[orientation]
+
+    def set_direction(self, direction: str) -> None:
+        """Sets which way the feature goes. Does not rebuild; call `part.update()`.
+
+        Live (probe 45): a pocket on XY created with CATIA's default removed nothing from a
+        block above XY; setting it `DIRECTION_ALONG_SKETCH_NORMAL` and updating removed
+        exactly the expected 502.655 mm3.
+
+        Args:
+            direction: `DIRECTION_ALONG_SKETCH_NORMAL` or
+                `DIRECTION_AGAINST_SKETCH_NORMAL`.
+
+        Raises:
+            ParameterTypeError: If `direction` is not one of those.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        orientation = _validate_direction(direction)
+        with self._generation.mutation():
+            try:
+                self._com_object.DirectionOrientation = orientation
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    def reverse_direction(self) -> None:
+        """Flips the feature to the other side of its sketch plane. Does not rebuild.
+
+        Raises:
+            Auto3dxError: If CATIA refuses the read or the write.
+        """
+        current = self.direction
+        self.set_direction(
+            DIRECTION_AGAINST_SKETCH_NORMAL
+            if current == DIRECTION_ALONG_SKETCH_NORMAL
+            else DIRECTION_ALONG_SKETCH_NORMAL
+        )
 
     def sketch(self) -> Sketch:
         """Returns the sketch this feature was built from.
@@ -488,6 +966,11 @@ class Pad(SketchFeature):
         """
         return self.depth
 
+    @height.setter
+    def height(self, value: float) -> None:
+        """Assigning is `set_height(value)`: same validation, no rebuild."""
+        self.set_height(value)
+
     def set_height(self, height: float, unit: str = MILLIMETRE) -> None:
         """Sets the pad's extrusion height.
 
@@ -502,6 +985,19 @@ class Pad(SketchFeature):
         """
         self.set_depth(height, unit)
 
+    @property
+    def length(self) -> float:
+        """float: The pad's extrusion length in millimetres; the same value as `height`.
+
+        Assigning is `set_height(value)`: same validation, the generation advances, and
+        nothing is rebuilt until `part.update()`.
+        """
+        return self.depth
+
+    @length.setter
+    def length(self, value: float) -> None:
+        self.set_height(value)
+
 
 class Pocket(SketchFeature):
     """Wraps a raw CATIA `Pocket` COM object.
@@ -512,7 +1008,7 @@ class Pocket(SketchFeature):
     """
 
 
-class RevolvedFeature:
+class RevolvedFeature(_FeatureActivity):
     """Common wrapper for a sketch-based revolve feature (`Shaft`/`Groove`).
 
     Verified structurally identical for both kinds (`docs/conventions.md`
@@ -583,6 +1079,11 @@ class RevolvedFeature:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    @first_angle.setter
+    def first_angle(self, value: float) -> None:
+        """Assigning is `set_first_angle(value)`: same validation, no rebuild."""
+        self.set_first_angle(value)
+
     @property
     def second_angle(self) -> float:
         """Returns the feature's second revolve angle.
@@ -598,6 +1099,11 @@ class RevolvedFeature:
             return self._com_object.SecondAngle.Value
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    @second_angle.setter
+    def second_angle(self, value: float) -> None:
+        """Assigning is `set_second_angle(value)`: same validation, no rebuild."""
+        self.set_second_angle(value)
 
     def set_first_angle(self, angle: float, unit: str = DEGREE) -> None:
         """Sets the feature's first revolve angle.
@@ -708,7 +1214,7 @@ class Groove(RevolvedFeature):
     """
 
 
-class _NamedFeature:
+class _NamedFeature(_FeatureActivity):
     """Shared `com_object`/`name`/`__repr__` handling for a plain feature wrapper.
 
     `Mirror`, `Rib`, and `Slot` carry no depth or angle magnitude the way
@@ -758,6 +1264,98 @@ class _NamedFeature:
             return self._com_object.Name
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    def _dimension(self, path: "tuple[str, ...]") -> Any:
+        """Walks to the CATIA parameter object holding one of this feature's dimensions.
+
+        Args:
+            path: The member names to follow from the feature, for example
+                `("Radius",)` or `("BottomLimit", "Dimension")`.
+
+        Returns:
+            The raw `Length`/`Angle` parameter object, which carries `.Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        node = self._com_object
+        try:
+            for member in path:
+                node = getattr(node, member)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except AttributeError as error:
+            raise AutomationError(
+                f"{type(self).__name__} exposes no {'.'.join(path)} in this release."
+            ) from error
+        return node
+
+    def _read_dimension(self, path: "tuple[str, ...]") -> float:
+        """Reads one of this feature's dimensions.
+
+        Args:
+            path: The member names to follow, as for `_dimension`.
+
+        Returns:
+            The parameter's current `Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return float(self._dimension(path).Value)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _write_length(
+        self, path: "tuple[str, ...]", value: float, unit: str
+    ) -> None:
+        """Writes a length dimension, validating exactly as the other setters do.
+
+        The write advances the model generation and does NOT rebuild: `part.update()`
+        stays the one place a rebuild happens (`docs/api-design.md` section 6), so a
+        caller can change several dimensions and rebuild once.
+
+        Args:
+            path: The member names to follow, as for `_dimension`.
+            value: The new value.
+            unit: The unit `value` is expressed in.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `value` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        validate_length_unit(unit)
+        coerced = validate_length_value(value)
+        dimension = self._dimension(path)
+        with self._generation.mutation():
+            try:
+                dimension.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    def _write_angle(self, path: "tuple[str, ...]", value: float, unit: str) -> None:
+        """Writes an angle dimension, validating exactly as `set_first_angle` does.
+
+        Args:
+            path: The member names to follow, as for `_dimension`.
+            value: The new angle.
+            unit: The unit `value` is expressed in.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `value` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        validate_angle_unit(unit)
+        coerced = validate_angle_value(value)
+        dimension = self._dimension(path)
+        with self._generation.mutation():
+            try:
+                dimension.Value = coerced
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
 
     def __repr__(self) -> str:
         """Returns a debugging representation.
@@ -841,6 +1439,65 @@ class Slot(_NamedFeature):
             raise _wrap_com_error(error) from error
 
 
+class MultiSectionSolid(_NamedFeature):
+    """Wraps a raw CATIA `Loft` COM object: a Part Design Multi-sections Solid.
+
+    Verified against a live session (probe 40, `docs/conventions.md` section 1.8):
+    `ShapeFactory.AddNewLoft()` creates the feature, its `HybridShape` is a
+    `HybridShapeLoft`, and `AddSectionToLoft(Reference, 1, None)` accepts a
+    `Part.CreateReferenceFromObject(sketch)` reference for each section. The feature is
+    found again by enumerating `MainBody.Shapes`, and its sections can be read back from
+    that rediscovered object, so nothing here depends on the wrapper that created it.
+
+    Only the sections are covered. Guides, spine, coupling, closing points, tangency and
+    relimitation are neither set by `create_multi_section_solid` nor exposed here.
+    """
+
+    def section_names(self) -> "list[str]":
+        """Reads the names of this feature's section sketches from the live model.
+
+        Each section is read with `HybridShape.GetSectionFromLoft(rank)`, which returns
+        `(Reference, orientation, closing point)`; the reference's `DisplayName` is the
+        section sketch's name (probe 40). There is no section-count member, so ranks are
+        read from 1 until CATIA reports `E_FAIL`, which is what the rank after the last
+        section returned live. Any other failure is raised, not taken as the end.
+
+        Names are returned rather than `Sketch` objects: a reference names a sketch, and
+        sketch names are not guaranteed unique, so resolving one is left to
+        `part.sketches.get(name)`, which refuses to guess.
+
+        Returns:
+            The section sketch names, in section order.
+
+        Raises:
+            AutomationError: If the sections cannot be read, a reference has no readable
+                name, or CATIA reports more than `_MAX_SECTION_RANK` sections.
+        """
+        try:
+            hybrid_loft = self._com_object.HybridShape
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        names: list[str] = []
+        for rank in range(_FIRST_SECTION_RANK, _MAX_SECTION_RANK + 1):
+            try:
+                section = hybrid_loft.GetSectionFromLoft(rank)
+            except pywintypes.com_error as error:
+                if rank > _FIRST_SECTION_RANK and _is_past_last_section(error):
+                    return names
+                raise _wrap_com_error(error) from error
+            reference = section[0] if isinstance(section, tuple) else section
+            try:
+                names.append(str(reference.DisplayName))
+            except (AttributeError, pywintypes.com_error) as error:
+                raise AutomationError(
+                    f"Section {rank} of this multi-section solid has no readable name."
+                ) from error
+        raise AutomationError(
+            f"CATIA reported more than {_MAX_SECTION_RANK} sections for one "
+            "multi-section solid; stopped reading rather than guess where they end."
+        )
+
+
 class ConstRadEdgeFillet(_NamedFeature):
     """Wraps a raw CATIA `ConstRadEdgeFillet` COM object.
 
@@ -856,6 +1513,56 @@ class ConstRadEdgeFillet(_NamedFeature):
     there is no `ensure_edge_fillet`.
     """
 
+    @property
+    def radius(self) -> float:
+        """float: The fillet radius, read from `Radius.Value`.
+
+        Live (probe 43): reading, writing, `Part.Update()`, the resulting volume change
+        and a fresh wrapper all agreed on the new value.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Radius",))
+
+    @radius.setter
+    def radius(self, value: float) -> None:
+        """Assigning is `set_radius(value)`: same validation, no rebuild."""
+        self.set_radius(value)
+
+    def set_radius(self, radius: float, unit: str = MILLIMETRE) -> None:
+        """Sets the radius of this existing fillet.
+
+        Editing beats deleting and recreating: the fillet keeps its identity, so the
+        edges it consumes are not re-resolved. This does not rebuild; call
+        `part.update()`. If that update fails, put the previous radius back and update
+        again rather than removing the fillet (`docs/api-design.md` section 6).
+
+        Args:
+            radius: The new radius. Must be finite and positive.
+            unit: The unit `radius` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `radius` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Radius",), radius, unit)
+
+    def radius_parameter(self) -> Parameter:
+        """Returns the `Length` parameter backing this fillet's radius.
+
+        This is what a `Formula` drives, the same idea as
+        `SketchFeature.depth_parameter()`.
+
+        Returns:
+            A `Parameter` wrapping `Radius`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return Parameter(self._dimension(("Radius",)), self._generation)
+
 
 class Chamfer(_NamedFeature):
     """Wraps a raw CATIA `Chamfer` COM object.
@@ -867,7 +1574,71 @@ class Chamfer(_NamedFeature):
     passes either. Reduces to `com_object`/`name` only, for the same reason
     as `ConstRadEdgeFillet`: there is no verified way to read the source edge
     back, so there is no `ensure_chamfer` either (`geometry.edges`).
+
+    `Length1` and `Angle` are editable on an existing chamfer (probe 43). `Length2` is
+    readable but CATIA refused every write to it on a chamfer created in the
+    length/angle mode this SDK uses, so no setter is exposed for it.
     """
+
+    @property
+    def length1(self) -> float:
+        """float: The chamfer's first length, read from `Length1.Value`.
+
+        Live (probe 43): read, written (2 -> 5), rebuilt and read back.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Length1",))
+
+    @length1.setter
+    def length1(self, value: float) -> None:
+        """Assigning is `set_length1(value)`: same validation, no rebuild."""
+        self.set_length1(value)
+
+    def set_length1(self, length: float, unit: str = MILLIMETRE) -> None:
+        """Sets the chamfer's first length. Does not rebuild; call `part.update()`.
+
+        Args:
+            length: The new length. Must be finite and positive.
+            unit: The unit `length` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `length` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Length1",), length, unit)
+
+    @property
+    def angle(self) -> float:
+        """float: The chamfer angle in degrees, read from `Angle.Value`.
+
+        Live (probe 43): read, written (45 -> 30), rebuilt and read back.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Angle",))
+
+    @angle.setter
+    def angle(self, value: float) -> None:
+        """Assigning is `set_angle(value)`: same validation, no rebuild."""
+        self.set_angle(value)
+
+    def set_angle(self, angle: float, unit: str = DEGREE) -> None:
+        """Sets the chamfer angle. Does not rebuild; call `part.update()`.
+
+        Args:
+            angle: The new angle.
+            unit: The unit `angle` is expressed in. Defaults to `DEGREE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `angle` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_angle(("Angle",), angle, unit)
 
 
 class Shell(_NamedFeature):
@@ -882,6 +1653,66 @@ class Shell(_NamedFeature):
     source face back, so there is no `ensure_shell` either (`geometry.faces`).
     """
 
+    @property
+    def internal_thickness(self) -> float:
+        """float: The inward wall thickness, read from `InternalThickness.Value`.
+
+        Live (probe 43): read, written (2 -> 4), rebuilt, read back, volume changed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("InternalThickness",))
+
+    @internal_thickness.setter
+    def internal_thickness(self, value: float) -> None:
+        """Assigning is `set_internal_thickness(value)`: same validation, no rebuild."""
+        self.set_internal_thickness(value)
+
+    def set_internal_thickness(self, thickness: float, unit: str = MILLIMETRE) -> None:
+        """Sets the inward wall thickness. Does not rebuild; call `part.update()`.
+
+        Args:
+            thickness: The new thickness. Must be finite and positive.
+            unit: The unit `thickness` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `thickness` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("InternalThickness",), thickness, unit)
+
+    @property
+    def external_thickness(self) -> float:
+        """float: The outward wall thickness, read from `ExternalThickness.Value`.
+
+        Live (probe 43): read, written (0 -> 1.5), rebuilt, read back, volume changed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("ExternalThickness",))
+
+    @external_thickness.setter
+    def external_thickness(self, value: float) -> None:
+        """Assigning is `set_external_thickness(value)`: same validation, no rebuild."""
+        self.set_external_thickness(value)
+
+    def set_external_thickness(self, thickness: float, unit: str = MILLIMETRE) -> None:
+        """Sets the outward wall thickness. Does not rebuild; call `part.update()`.
+
+        Args:
+            thickness: The new thickness. Must be finite and positive.
+            unit: The unit `thickness` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `thickness` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("ExternalThickness",), thickness, unit)
+
 
 class Thickness(_NamedFeature):
     """Wraps a raw CATIA `Thickness` COM object.
@@ -894,6 +1725,38 @@ class Thickness(_NamedFeature):
     `ensure_thickness` either (`geometry.faces`).
     """
 
+    @property
+    def offset(self) -> float:
+        """float: The added material thickness, read from `Offset.Value`.
+
+        CATIA calls this member `Offset`, not `Thickness` (probe 43). Live: read,
+        written (3 -> 6), rebuilt, read back, volume 52800 -> 57600 mm3, and a fresh
+        wrapper agreed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Offset",))
+
+    @offset.setter
+    def offset(self, value: float) -> None:
+        """Assigning is `set_offset(value)`: same validation, no rebuild."""
+        self.set_offset(value)
+
+    def set_offset(self, offset: float, unit: str = MILLIMETRE) -> None:
+        """Sets the added material thickness. Does not rebuild; call `part.update()`.
+
+        Args:
+            offset: The new thickness. Must be finite and positive.
+            unit: The unit `offset` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `offset` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Offset",), offset, unit)
+
 
 class Hole(_NamedFeature):
     """Wraps a raw CATIA `Hole` COM object.
@@ -905,6 +1768,214 @@ class Hole(_NamedFeature):
     there is no verified way to read the source face back, so there is no
     `ensure_hole` either (`geometry.faces`).
     """
+
+    @property
+    def diameter(self) -> float:
+        """float: The hole diameter, read from `Diameter.Value`.
+
+        Live (probe 43): read, written (10 -> 12), rebuilt, read back, volume changed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("Diameter",))
+
+    @diameter.setter
+    def diameter(self, value: float) -> None:
+        """Assigning is `set_diameter(value)`: same validation, no rebuild."""
+        self.set_diameter(value)
+
+    def set_diameter(self, diameter: float, unit: str = MILLIMETRE) -> None:
+        """Sets the hole diameter. Does not rebuild; call `part.update()`.
+
+        Args:
+            diameter: The new diameter. Must be finite and positive.
+            unit: The unit `diameter` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `diameter` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("Diameter",), diameter, unit)
+
+    @property
+    def depth(self) -> float:
+        """float: The hole depth, read from `BottomLimit.Dimension.Value`.
+
+        A `Hole` has no `Depth` member; the depth passed to `AddNewHole` lands in the
+        bottom limit's dimension (probe 43), which is where this reads and writes. Live:
+        read (5), written (12), rebuilt, read back, volume changed, fresh wrapper agreed.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("BottomLimit", "Dimension"))
+
+    @depth.setter
+    def depth(self, value: float) -> None:
+        """Assigning is `set_depth(value)`: same validation, no rebuild."""
+        self.set_depth(value)
+
+    def set_depth(self, depth: float, unit: str = MILLIMETRE) -> None:
+        """Sets the hole depth. Does not rebuild; call `part.update()`.
+
+        Args:
+            depth: The new depth. Must be finite and positive.
+            unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `depth` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_length(("BottomLimit", "Dimension"), depth, unit)
+
+    def _read_point(self, method: str) -> "tuple[float, float, float]":
+        """Reads one of the hole's seed-array point getters (`GetOrigin`/`GetDirection`)."""
+        try:
+            values = getattr(self._com_object, method)([0.0] * _POINT3_SEED_LENGTH)
+            x, y, z = (float(value) for value in values)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except (AttributeError, TypeError, ValueError) as error:
+            raise AutomationError(f"Hole.{method} returned no usable point.") from error
+        return (x, y, z)
+
+    @property
+    def origin(self) -> "tuple[float, float, float]":
+        """tuple[float, float, float]: Where the hole starts on its face, in Part millimetres.
+
+        Read from `GetOrigin`. Live (probe 46m) a hole made at (10, 5, 20) read back
+        exactly that before and after the rebuild, and its bore centred on (10, 5).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_point("GetOrigin")
+
+    @property
+    def direction(self) -> "tuple[float, float, float]":
+        """tuple[float, float, float]: The drilling direction, a unit vector.
+
+        Read from `GetDirection`. Live (probe 46p) a hole on the +X face of a block read
+        (-1, 0, 0): into the material, which is CATIA's default and the only direction
+        this SDK creates.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_point("GetDirection")
+
+    @property
+    def limit(self) -> str:
+        """str: `HOLE_LIMIT_BLIND`, `HOLE_LIMIT_THROUGH_ALL`, or `"other"` for a mode
+        this SDK does not create (read from `BottomLimit.LimitMode`).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            mode = int(self._dimension(("BottomLimit",)).LimitMode)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return _LIMIT_NAME_BY_MODE.get(mode, _HOLE_OTHER)
+
+    def set_limit(
+        self, limit: str, depth: "float | None" = None, unit: str = MILLIMETRE
+    ) -> None:
+        """Makes the hole blind or through-all. Does not rebuild; call `part.update()`.
+
+        Going through-all makes CATIA rewrite the depth to the length it computes
+        (probe 46n), so going back to blind requires the depth to be given again.
+
+        Args:
+            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`.
+            depth: The depth for a blind hole; must be omitted for through-all.
+            unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
+
+        Raises:
+            ParameterTypeError: If `limit` is unknown, a blind hole has no depth, or a
+                through-all hole was given one.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        mode = _validate_hole_limit(limit)
+        if limit == HOLE_LIMIT_THROUGH_ALL and depth is not None:
+            raise ParameterTypeError("A through-all hole takes no depth.")
+        if limit == HOLE_LIMIT_BLIND:
+            if depth is None:
+                raise ParameterTypeError(
+                    "A blind hole needs its depth: CATIA replaced the old one when the hole "
+                    "went through-all."
+                )
+            validate_length_unit(unit)
+            _validate_positive_length(depth, "depth")
+        bottom_limit = self._dimension(("BottomLimit",))
+        with self._generation.mutation():
+            try:
+                bottom_limit.LimitMode = mode
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        if depth is not None:
+            self.set_depth(depth, unit)
+
+    @property
+    def bottom(self) -> str:
+        """str: `HOLE_BOTTOM_FLAT`, `HOLE_BOTTOM_V`, or `"other"` (from `BottomType`).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            code = int(self._com_object.BottomType)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return _BOTTOM_NAME_BY_TYPE.get(code, _HOLE_OTHER)
+
+    def set_bottom(self, bottom: str) -> None:
+        """Makes the hole's bottom flat or a 120-degree drill point. Does not rebuild.
+
+        Args:
+            bottom: `HOLE_BOTTOM_FLAT` or `HOLE_BOTTOM_V`.
+
+        Raises:
+            ParameterTypeError: If `bottom` is unknown.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        code = _validate_hole_bottom(bottom)
+        with self._generation.mutation():
+            try:
+                self._com_object.BottomType = code
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+
+def _validate_hole_limit(limit: Any) -> int:
+    """Turns a public hole limit into `LimitMode`, before any COM call."""
+    if limit not in _LIMIT_MODE_BY_NAME:
+        raise ParameterTypeError(
+            f"limit must be one of {sorted(SUPPORTED_HOLE_LIMITS)}, not {limit!r}."
+        )
+    return _LIMIT_MODE_BY_NAME[limit]
+
+
+def _validate_hole_bottom(bottom: Any) -> int:
+    """Turns a public hole bottom into `BottomType`, before any COM call."""
+    if bottom not in _BOTTOM_TYPE_BY_NAME:
+        raise ParameterTypeError(
+            f"bottom must be one of {sorted(SUPPORTED_HOLE_BOTTOMS)}, not {bottom!r}."
+        )
+    return _BOTTOM_TYPE_BY_NAME[bottom]
+
+
+def _validate_point3(value: Any, label: str) -> "tuple[float, float, float]":
+    """Validates an `(x, y, z)` point in millimetres, before any COM call."""
+    if not isinstance(value, (tuple, list)) or len(value) != _POINT3_SEED_LENGTH:
+        raise ParameterTypeError(f"{label} must be three numbers (x, y, z), not {value!r}.")
+    coerced = tuple(validate_length_value(item) for item in value)
+    if not all(math.isfinite(item) for item in coerced):
+        raise ParameterTypeError(f"{label} must be finite, not {value!r}.")
+    return (coerced[0], coerced[1], coerced[2])
 
 
 class RectangularPattern:
@@ -942,6 +2013,182 @@ class RectangularPattern:
     def __repr__(self) -> str:
         """Returns a debugging representation without unverified COM reads."""
         return "RectangularPattern()"
+
+
+class CircularPattern(_NamedFeature):
+    """Wraps a raw CATIA `CircPattern`: copies of a feature around an axis.
+
+    Created by `AddNewCircPattern` (probe 44) with one radial row, so the pattern is the
+    angular one a bolt circle needs. The angular row is exposed because both of its
+    parameters were verified end to end: read, written, rebuilt, and the resulting volume
+    matched the new instance count.
+
+    Unlike `RectangularPattern`, this one is found again by name in `Body.Shapes`, because
+    CATIA reports it there under the `CircPattern` kind.
+    """
+
+    @property
+    def angular_instances(self) -> int:
+        """int: How many instances the pattern makes around the axis, the seed included.
+
+        Read from `AngularRepartition.InstancesCount.Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return int(self._read_dimension(("AngularRepartition", "InstancesCount")))
+
+    @angular_instances.setter
+    def angular_instances(self, value: int) -> None:
+        """Assigning is `set_angular_instances(value)`: same validation, no rebuild."""
+        self.set_angular_instances(value)
+
+    def set_angular_instances(self, instances: int) -> None:
+        """Sets the instance count. Does not rebuild; call `part.update()`.
+
+        Live (probe 44): six instances became eight, the update succeeded and the removed
+        volume grew by exactly two more holes.
+
+        Args:
+            instances: The new count, at least `_MINIMUM_PATTERN_INSTANCES`.
+
+        Raises:
+            ParameterTypeError: If `instances` is not a usable instance count.
+            Auto3dxError: If CATIA refuses the write.
+        """
+        count = _validate_instance_count(instances)
+        dimension = self._dimension(("AngularRepartition", "InstancesCount"))
+        with self._generation.mutation():
+            try:
+                dimension.Value = count
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    @property
+    def angular_spacing_deg(self) -> float:
+        """float: The angle between two neighbouring instances, in degrees.
+
+        Read from `AngularRepartition.AngularSpacing.Value`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._read_dimension(("AngularRepartition", "AngularSpacing"))
+
+    @angular_spacing_deg.setter
+    def angular_spacing_deg(self, value: float) -> None:
+        """Assigning is `set_angular_spacing_deg(value)`: same validation, no rebuild."""
+        self.set_angular_spacing_deg(value)
+
+    def set_angular_spacing_deg(self, spacing: float, unit: str = DEGREE) -> None:
+        """Sets the angle between instances. Does not rebuild; call `part.update()`.
+
+        Args:
+            spacing: The new angle.
+            unit: The unit `spacing` is expressed in. Defaults to `DEGREE`.
+
+        Raises:
+            UnsupportedUnitError: If `unit` is not a supported unit.
+            ParameterTypeError: If `spacing` is not an `int`/`float` (or is a `bool`).
+            Auto3dxError: If CATIA refuses the write.
+        """
+        self._write_angle(("AngularRepartition", "AngularSpacing"), spacing, unit)
+
+    @property
+    def instances(self) -> int:
+        """int: `angular_instances` under its everyday name; assignable the same way."""
+        return self.angular_instances
+
+    @instances.setter
+    def instances(self, value: int) -> None:
+        self.set_angular_instances(value)
+
+    @property
+    def spacing_deg(self) -> float:
+        """float: `angular_spacing_deg` under a shorter name; assignable the same way."""
+        return self.angular_spacing_deg
+
+    @spacing_deg.setter
+    def spacing_deg(self, value: float) -> None:
+        self.set_angular_spacing_deg(value)
+
+    @property
+    def radial_instances(self) -> int:
+        """int: The instance count of the radial row, which this SDK always creates as 1.
+
+        Read-only: no radial spacing has been verified, so a radial pattern is not offered
+        (`docs/conventions.md` section 1.12).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return int(self._read_dimension(("RadialRepartition", "InstancesCount")))
+
+
+class BooleanOperation(_NamedFeature):
+    """Wraps a raw CATIA boolean feature: `Remove`, `Add`, `Intersect` or `Assemble`.
+
+    A boolean takes one tool body and applies it to the body being modelled in. All four
+    were verified live (probe 44) with exact volumes on a disc and a cylinder:
+
+        Remove     111966.36 -> 104897.78   (the 7068.58 overlap taken away)
+        Add        111966.36 -> 133172.11   (the 21205.75 outside the disc added)
+        Intersect  111966.36 ->   7068.58   (only the overlap left)
+        Assemble   111966.36 -> 133172.11   (same as Add for these two solids)
+
+    **The tool body is consumed.** After the operation it reports `InBooleanOperation` and
+    no longer appears in `part.bodies`; it lives under the boolean feature instead. That is
+    why `tool_body_name` is read from the feature rather than from the body collection, and
+    why removal needs `delete_consumed_body=True` (`PartDesign.remove_boolean`).
+    """
+
+    @property
+    def operation(self) -> str:
+        """str: Which boolean this is: `"Remove"`, `"Add"`, `"Intersect"` or `"Assemble"`.
+
+        Taken from the COM wrapper's type name, the same way every other kind in this
+        module is identified.
+        """
+        return type(self._com_object).__name__
+
+    @property
+    def tool_body_name(self) -> str:
+        """str: The name of the body this operation consumed.
+
+        Read from the feature's own `Body` member (probe 44), so it survives into any
+        other process: the body itself is no longer listed in `part.bodies`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return str(self._com_object.Body.Name)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def __repr__(self) -> str:
+        """str: Debug representation naming the operation and its tool body."""
+        try:
+            name = self.name
+            tool: object = self.tool_body_name
+        except Auto3dxError:
+            name = "<unavailable>"
+            tool = "<unavailable>"
+        return f"{type(self).__name__}(name={name!r}, tool_body_name={tool!r})"
+
+
+WORK_AT_FEATURES: tuple = (
+    SketchFeature,
+    RevolvedFeature,
+    _NamedFeature,
+)
+"""The feature wrappers `Part.work_at` accepts as an In-Work Object target.
+
+Every Part Design feature this SDK creates is one of these three families, so this
+covers pads, pockets, shafts, grooves, mirrors, ribs, slots, multi-section solids,
+fillets, chamfers, shells, thicknesses and holes. A raw COM object is deliberately not
+accepted: a wrapper is what `Part` can check for ownership.
+"""
 
 
 class PartDesign:
@@ -996,6 +2243,8 @@ class PartDesign:
         part_com_object: Any,
         selection: Any = None,
         generation: ModelGeneration | None = None,
+        body_target: Any = None,
+        in_work_target: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -1011,9 +2260,20 @@ class PartDesign:
             generation: The owning Part's model generation. A standalone
                 instance gets its own, which no other wrapper shares; obtain
                 `PartDesign` from a `Part` instead.
+            body_target: A callable returning the raw `Body` of an enclosing
+                `part.work_in(body)`, or `None` outside one. Supplied by `Part`; without
+                it everything works on the main body exactly as before. It decides which
+                body features are listed and looked up in.
+            in_work_target: A callable returning the raw object the innermost
+                `part.work_in(body)`/`part.work_at(feature)` block targets, or `None`
+                outside one. It decides what the In-Work Object is set to before each
+                creation: a body appends to that body, a feature inserts right after that
+                feature (probe 43). Defaults to following `body_target`.
         """
         self._part_com_object = part_com_object
         self._selection = selection
+        self._body_target = body_target
+        self._in_work_target = in_work_target
         # Shared with the owning Part and everything else reachable from it
         # (`docs/api-design.md` section 5). Every mutation here advances it, and
         # every edge or face handle is checked against it before reaching CATIA.
@@ -1042,6 +2302,8 @@ class PartDesign:
                 before this `PartDesign` last changed the model.
         """
         self._generation.require_current(edge.generation, "edge", "part.topology.edges()")
+        self._require_same_part(edge, "edge")
+        self._require_same_body(edge, "edge", noun, "part.topology.edges(body=...)")
 
     def _require_current_face(self, face: Face, noun: str) -> None:
         """Refuses a `Face` whose snapshot predates the latest model change.
@@ -1063,6 +2325,110 @@ class PartDesign:
                 before this `PartDesign` last changed the model.
         """
         self._generation.require_current(face.generation, "face", "part.topology.faces()")
+        self._require_same_part(face, "face")
+        self._require_same_body(face, "face", noun, "part.topology.faces(body=...)")
+
+    def _require_same_part(self, reference: Any, kind: str) -> None:
+        """Refuses an edge or face that another Part's snapshot produced, before COM.
+
+        Raises:
+            ValidationError: If the handle belongs to a different Part.
+        """
+        if not reference._belongs_to(self._generation):
+            raise ValidationError(
+                f"This {kind} belongs to another Part. Nothing was changed: take it from "
+                f"this Part's part.topology.{kind}s()."
+            )
+
+    def _require_same_body(
+        self, reference: Any, kind: str, noun: str, remedy: str
+    ) -> None:
+        """Refuses topology that belongs to a different body from the target one.
+
+        A Part-wide search returns every body's edges and faces in one list
+        (`geometry.edges`), and CATIA accepts a feature built on the wrong body's
+        reference, only failing the next `Part.Update()`. The reference carries the body
+        it was found in, read from the model at snapshot time, so the mismatch is caught
+        before `ShapeFactory` is called and nothing is created.
+
+        An unknown owner is allowed through: CATIA did not say which body the reference
+        belongs to, and refusing on a missing answer would break valid calls. That is the
+        one gap in this guard, and `docs/api-design.md` section 7 records it.
+
+        Args:
+            reference: The `Edge` or `Face` the caller passed.
+            kind: `"edge"` or `"face"`, for the message.
+            noun: What is being created, for the message.
+            remedy: The call that would produce a correctly scoped snapshot.
+
+        Raises:
+            CrossBodyReferenceError: If the reference's body is not the body this
+                `PartDesign` builds in. Nothing was changed.
+        """
+        owner = reference.owner_body
+        if owner is None:
+            return
+        target = self._body()
+        try:
+            same = bool(owner == target)
+        except pywintypes.com_error:
+            # Identity could not be compared; the guard stays silent rather than
+            # refusing a call CATIA might well accept.
+            return
+        if same:
+            return
+        try:
+            target_name = str(target.Name)
+        except (pywintypes.com_error, AttributeError):
+            target_name = "the target body"
+        owner_name = reference.owner_body_name or "another body"
+        feature = reference.owner_feature_name
+        origin = f" (from {feature!r})" if feature else ""
+        raise CrossBodyReferenceError(
+            f"This {kind}{origin} belongs to body {owner_name!r}, but the {noun} would "
+            f"be created in {target_name!r}. CATIA would accept that and fail the next "
+            f"Part.Update(). Nothing was changed: take {remedy} for the body you are "
+            "building in, or open part.work_in(body) for the body that owns this "
+            f"{kind}."
+        )
+
+    def _body(self) -> Any:
+        """Returns the raw body features are listed in: the work body, or `MainBody`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        target = self._body_target() if self._body_target is not None else None
+        if target is not None:
+            return target
+        try:
+            return self._part_com_object.MainBody
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    def _target_in_work(self) -> None:
+        """Makes the current work target the In-Work Object before a feature is created.
+
+        Only inside `part.work_in(body)` or `part.work_at(feature)`. `ShapeFactory` builds
+        in the In-Work Object (probe 41), and creating a feature or a plane moves it, so it
+        is set again before every creation rather than once when the context opens. With a
+        body in work the feature is appended to that body; with a feature in work CATIA
+        inserts the new feature immediately after it (probe 43). Outside a context nothing
+        is touched, exactly as before.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        if self._in_work_target is not None:
+            target = self._in_work_target()
+        else:
+            target = self._body_target() if self._body_target is not None else None
+        if target is None:
+            return
+        try:
+            self._part_com_object.InWorkObject = target
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
 
     def _shapes(self) -> Any:
         """Returns the raw `MainBody.Shapes` collection.
@@ -1074,7 +2440,7 @@ class PartDesign:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
-            return self._part_com_object.MainBody.Shapes
+            return self._body().Shapes
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
@@ -1143,6 +2509,7 @@ class PartDesign:
         factory_method: str,
         wrapper_cls: type,
         noun: str,
+        direction: "str | None" = None,
     ) -> Any:
         """Creates a new sketch-based feature with a length magnitude (Pad/Pocket).
 
@@ -1181,8 +2548,21 @@ class PartDesign:
         validate_parameter_name(name)
         validate_length_unit(unit)
         coerced = validate_length_value(depth)
+        configure = None
+        if direction is not None:
+            orientation = _validate_direction(direction)
+
+            def configure(feature: Any) -> None:
+                feature.DirectionOrientation = orientation
+
         return self._create_feature(
-            name, kind, factory_method, (sketch.com_object, coerced), wrapper_cls, noun
+            name,
+            kind,
+            factory_method,
+            (sketch.com_object, coerced),
+            wrapper_cls,
+            noun,
+            configure,
         )
 
     def _create_feature(
@@ -1193,6 +2573,7 @@ class PartDesign:
         factory_args: "tuple[Any, ...]",
         wrapper_cls: type,
         noun: str,
+        configure: Any = None,
     ) -> Any:
         """Creates a new Part Design feature through `ShapeFactory`.
 
@@ -1213,6 +2594,11 @@ class PartDesign:
             factory_args: The positional arguments to pass to that method
                 (already validated/coerced raw COM values, never wrapper
                 objects).
+            configure: Optional step that finishes building the feature after it
+                is renamed, given its raw COM object. A Multi-sections Solid adds
+                its sections here, because `AddNewLoft` takes no arguments. A COM
+                failure inside it raises `PartialCreationError`: by then the
+                feature exists under `name` and can be removed by name.
             wrapper_cls: `Pad`, `Pocket`, `Shaft`, `Groove`, or `Mirror`.
             noun: `"pad"`, `"pocket"`, `"shaft"`, `"groove"`, or `"mirror"`,
                 used only in error messages.
@@ -1240,6 +2626,7 @@ class PartDesign:
         # raises: AddNew* can create the feature and then fail the rename, which
         # leaves it in the tree (`docs/api-design.md` section 5.3).
         with self._generation.mutation():
+            self._target_in_work()
             try:
                 factory = getattr(self._part_com_object.ShapeFactory, factory_method)
                 com_object = factory(*factory_args)
@@ -1262,6 +2649,15 @@ class PartDesign:
                     f"retry blindly: retrying would create another {noun} instead "
                     "of fixing this one."
                 ) from error
+            if configure is not None:
+                try:
+                    configure(feature.com_object)
+                except pywintypes.com_error as error:
+                    raise PartialCreationError(
+                        f"Created a {noun} named {name!r} but could not finish "
+                        "building it. It is in the model under that name; remove it "
+                        "before retrying."
+                    ) from error
         return feature
 
     def _ensure(
@@ -1438,7 +2834,9 @@ class PartDesign:
         """
         target = get_method(name)
         with self._generation.mutation():
-            delete_via_selection(self._selection, target.com_object, f"{noun} {name!r}")
+            delete_via_selection(
+                self._selection, target.com_object, f"{noun} {name!r}", self._part_com_object
+            )
 
     @property
     def pads(self) -> "list[Pad]":
@@ -1475,6 +2873,7 @@ class PartDesign:
         sketch: Sketch,
         height: float,
         unit: str = MILLIMETRE,
+        direction: "str | None" = None,
     ) -> Pad:
         """Creates a new pad extruding `sketch` by `height`.
 
@@ -1484,6 +2883,9 @@ class PartDesign:
             sketch: The `Sketch` to extrude.
             height: The extrusion height.
             unit: The unit `height` is expressed in. Defaults to `MILLIMETRE`.
+            direction: `DIRECTION_ALONG_SKETCH_NORMAL` or
+                `DIRECTION_AGAINST_SKETCH_NORMAL`, set right after creation. `None` (the
+                default) keeps CATIA's own default, which for a pad is along the normal.
 
         Returns:
             The newly created `Pad`, already renamed to `name`.
@@ -1498,7 +2900,9 @@ class PartDesign:
                 rename failed.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
-        return self._create(name, sketch, height, unit, PAD_KIND, "AddNewPad", Pad, "pad")
+        return self._create(
+            name, sketch, height, unit, PAD_KIND, "AddNewPad", Pad, "pad", direction
+        )
 
     def ensure_pad(
         self,
@@ -1581,6 +2985,7 @@ class PartDesign:
         sketch: Sketch,
         depth: float,
         unit: str = MILLIMETRE,
+        direction: "str | None" = None,
     ) -> Pocket:
         """Creates a new pocket removing material along `sketch` by `depth`.
 
@@ -1590,6 +2995,12 @@ class PartDesign:
             sketch: The `Sketch` to cut along.
             depth: The removal depth.
             unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
+            direction: `DIRECTION_ALONG_SKETCH_NORMAL` or
+                `DIRECTION_AGAINST_SKETCH_NORMAL`, set right after creation. `None` (the
+                default) keeps CATIA's own default, which for a pocket is AGAINST the
+                normal. **A pocket that cuts the wrong way still creates and updates,
+                removing nothing** (probe 45): measure the volume before and after to
+                confirm a cut.
 
         Returns:
             The newly created `Pocket`, already renamed to `name`.
@@ -1606,7 +3017,15 @@ class PartDesign:
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         return self._create(
-            name, sketch, depth, unit, POCKET_KIND, "AddNewPocket", Pocket, "pocket"
+            name,
+            sketch,
+            depth,
+            unit,
+            POCKET_KIND,
+            "AddNewPocket",
+            Pocket,
+            "pocket",
+            direction,
         )
 
     def ensure_pocket(
@@ -2340,6 +3759,128 @@ class PartDesign:
         """
         self._remove(name, self.get_slot, "slot")
 
+    @property
+    def multi_section_solids(self) -> "list[MultiSectionSolid]":
+        """Lists every Multi-sections Solid on the Part's `MainBody`.
+
+        Read from the live model each time: a feature created by another process is
+        listed just like one created through this wrapper.
+
+        Returns:
+            A `MultiSectionSolid` for each item in `MainBody.Shapes` whose wrapper type
+            is `MULTI_SECTION_SOLID_KIND`, in `Item(i)` order.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(MULTI_SECTION_SOLID_KIND, MultiSectionSolid)
+
+    def get_multi_section_solid(self, name: str) -> MultiSectionSolid:
+        """Looks up a Multi-sections Solid by name.
+
+        Args:
+            name: The feature's name.
+
+        Returns:
+            The matching `MultiSectionSolid`.
+
+        Raises:
+            FeatureNotFoundError: If no Multi-sections Solid named `name` exists.
+            AmbiguousNameError: If two or more exist.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(
+            MULTI_SECTION_SOLID_KIND, MultiSectionSolid, "multi-section solid", name
+        )
+
+    def create_multi_section_solid(
+        self, name: str, sections: "Sequence[Sketch]"
+    ) -> MultiSectionSolid:
+        """Creates a Multi-sections Solid (CATIA Loft) through two or more sketches.
+
+        Each section is passed to `AddSectionToLoft` as a reference created from the
+        sketch, with orientation `MULTI_SECTION_ORIENTATION_VERIFIED` and no closing
+        point -- the combination verified live (probe 40). The sections are used in the
+        order given. No guide, spine, coupling, tangency or relimitation is set.
+
+        This does not rebuild. Call `part.update()` afterwards, and if that raises
+        `PartUpdateError`, remove the feature with `remove_multi_section_solid`: a
+        feature whose update failed breaks every later update.
+
+        No closing points are set, so what builds depends on the sections' corners
+        (`docs/conventions.md` section 1.8). Live, corner-free sections built: two circles,
+        and a NACA profile drawn as one closed spline per section. Sections with corners
+        failed `Part.Update()`: two rectangles, and a NACA profile whose open trailing
+        edge was closed by a separate line. Prefer one smooth closed curve per section.
+
+        Creating the feature makes its loft the In-Work Object in CATIA (probe 40). The
+        SDK does not change that; `part.inspect.in_work_object()` reports it.
+
+        Args:
+            name: The new feature's name. Must be non-empty, without surrounding
+                whitespace, and must not contain `"\\"`.
+            sections: Two or more different `Sketch` objects, each a closed profile, in
+                the order the solid should pass through them.
+
+        Returns:
+            The new `MultiSectionSolid`, renamed to `name`, with every section added.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `sections` is not a sequence of at least two
+                different `Sketch` objects.
+            FeatureConflictError: If a Multi-sections Solid named `name` already exists.
+            AmbiguousNameError: If two or more already exist.
+            PartialCreationError: If the feature was created but could not be renamed or
+                could not receive every section.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        section_list = _validate_sections(sections)
+        references = []
+        for section in section_list:
+            try:
+                references.append(
+                    self._part_com_object.CreateReferenceFromObject(section.com_object)
+                )
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+        def add_sections(com_object: Any) -> None:
+            hybrid_loft = com_object.HybridShape
+            for reference in references:
+                hybrid_loft.AddSectionToLoft(
+                    reference, MULTI_SECTION_ORIENTATION_VERIFIED, None
+                )
+
+        return self._create_feature(
+            name,
+            MULTI_SECTION_SOLID_KIND,
+            "AddNewLoft",
+            (),
+            MultiSectionSolid,
+            "multi-section solid",
+            configure=add_sections,
+        )
+
+    def remove_multi_section_solid(self, name: str) -> None:
+        """Removes a Multi-sections Solid from the model.
+
+        The feature is found in the live model by name, so one created by another
+        process can be removed. Deleting it also deleted its section sketches in probe
+        40, the way deleting a pad deletes its sketch; a later `sketches.remove` for
+        them will legitimately raise `SketchNotFoundError`. Planes the sketches sat on
+        are not removed. This does not rebuild and never saves.
+
+        Args:
+            name: The feature's name.
+
+        Raises:
+            FeatureNotFoundError: If no Multi-sections Solid named `name` exists.
+            Auto3dxError: If no editor selection is available, or the deletion failed.
+        """
+        self._remove(name, self.get_multi_section_solid, "multi-section solid")
+
     def snapshot_edges(self) -> EdgeSnapshot:
         """Takes a fresh snapshot of every edge of the Part's solid.
 
@@ -2369,7 +3910,9 @@ class PartDesign:
             DeprecationWarning,
             stacklevel=2,
         )
-        return take_edge_snapshot(self._selection, self._generation.value)
+        return take_edge_snapshot(
+            self._selection, self._generation.value, self._part_com_object
+        )
 
     @property
     def edge_fillets(self) -> "list[ConstRadEdgeFillet]":
@@ -2422,10 +3965,14 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the fillet in the tree,
-        and every later `Part.Update()` fails too until it is removed** --
-        this is exactly what made an earlier probe look like a cascade of
-        unrelated failures. Remove it with `remove_edge_fillet` before
-        retrying; do not retry blindly.
+        and every later `Part.Update()` fails too until the model is valid
+        again** -- this is exactly what made an earlier probe look like a
+        cascade of unrelated failures. Repair before retrying, and prefer
+        rollback to deletion: if the failure followed an edit to something
+        that worked, undo that edit and update again (live, a 1 mm pad under
+        this fillet failed the update, and restoring the pad healed the Part
+        with the fillet intact). Remove the fillet with `remove_edge_fillet`
+        when it never built in the first place. Do not retry blindly.
 
         Args:
             name: The new fillet's name. Must be non-empty, without
@@ -2554,10 +4101,11 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the chamfer in the tree,
-        and every later `Part.Update()` fails too until it is removed** --
-        this is exactly what made an earlier probe look like a cascade of
-        unrelated failures. Remove it with `remove_chamfer` before retrying;
-        do not retry blindly.
+        and every later `Part.Update()` fails too until the model is valid
+        again** -- this is exactly what made an earlier probe look like a
+        cascade of unrelated failures. Undo the edit that broke it and update
+        again, or remove the chamfer with `remove_chamfer` when it never
+        built; do not retry blindly.
 
         Args:
             name: The new chamfer's name. Must be non-empty, without
@@ -2667,7 +4215,9 @@ class PartDesign:
             DeprecationWarning,
             stacklevel=2,
         )
-        return take_face_snapshot(self._selection, self._generation.value)
+        return take_face_snapshot(
+            self._selection, self._generation.value, self._part_com_object
+        )
 
     @property
     def shells(self) -> "list[Shell]":
@@ -2719,10 +4269,11 @@ class PartDesign:
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the shell in the tree,
-        and every later `Part.Update()` fails too until it is removed** --
-        exactly the edge-feature failure mode documented on
-        `create_edge_fillet`. Remove it with `remove_shell` before retrying;
-        do not retry blindly.
+        and every later `Part.Update()` fails too until the model is valid
+        again** -- exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Undo the edit that broke it and update again, or
+        remove the shell with `remove_shell` when it never built; do not retry
+        blindly.
 
         Args:
             name: The new shell's name. Must be non-empty, without
@@ -2935,42 +4486,68 @@ class PartDesign:
         self,
         name: str,
         face: Face,
-        depth: float,
+        depth: "float | None" = None,
         unit: str = MILLIMETRE,
+        *,
+        origin: "tuple[float, float, float] | None" = None,
+        diameter: "float | None" = None,
+        limit: "str | None" = None,
+        bottom: "str | None" = None,
     ) -> Hole:
         """Creates a new simple hole into the solid from one face.
 
-        Verified (`docs/conventions.md` section 1.2.2.2, probe 37):
-        `AddNewHole(face_reference, depth)` both created the feature and
-        survived `Part.Update()`, on the first face tried, with
-        `depth = 5.0`. No other value has been tried against a live session.
+        Without `origin` this is exactly the verified `AddNewHole(face_reference, depth)`
+        of probe 37, which leaves the position to CATIA. With `origin` it is
+        `AddNewHoleFromPoint(x, y, z, face_reference, depth)`: live (probe 46m) the hole
+        started exactly at the point given and drilled into the material, on a top face
+        and on a side face (probe 46p).
+
+        `diameter`, `limit` and `bottom` are written right after creation, before any
+        rebuild (probe 46s: all three, then one update, removed exactly the expected
+        volume). CATIA carries the previous hole's settings over to the next one (probe
+        46q: a new hole inherited a flat bottom from the hole before it; live, a hole made
+        with depth 5 after a through-all hole came out through-all). So the limit is
+        ALWAYS written -- blind when a depth is given, through-all when asked -- which keeps
+        `create_hole(name, face, depth)` meaning what it says. Diameter and bottom are
+        written only when passed: pass every attribute whose value matters.
 
         A successful call here does not mean the feature is valid
         (`docs/conventions.md` section 1.2.2.1): this method never calls
         `Part.Update()`. The caller must call it and handle
         `PartUpdateError`. **A failed update leaves the hole in the tree, and
-        every later `Part.Update()` fails too until it is removed** --
-        exactly the edge-feature failure mode documented on
-        `create_edge_fillet`. Remove it with `remove_hole` before retrying;
-        do not retry blindly.
+        every later `Part.Update()` fails too until the model is valid again**
+        -- exactly the edge-feature failure mode documented on
+        `create_edge_fillet`. Undo the edit that broke it and update again, or
+        remove the hole with `remove_hole` when it never built; do not retry
+        blindly.
 
         Args:
             name: The new hole's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
             face: The `Face` to drill from, from `part.topology.faces()`.
-            depth: The hole's depth. Must be finite and strictly positive --
-                only `5.0` is verified, and a zero or negative depth has no
-                justified meaning for a hole.
-            unit: The unit `depth` is expressed in. Defaults to
+            depth: The hole's depth, finite and strictly positive. Required unless
+                `limit` is `HOLE_LIMIT_THROUGH_ALL`, which must not be given one.
+            unit: The unit `depth` and `diameter` are expressed in. Defaults to
                 `MILLIMETRE`.
+            origin: Where the hole starts, `(x, y, z)` in Part millimetres. It must lie in
+                the plane of `face`, which must be planar; both are checked by measuring
+                the face before CATIA is called. `None` leaves the position to CATIA.
+            diameter: The hole diameter. `None` keeps CATIA's (carried-over) value.
+            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`. `None` means blind.
+            bottom: `HOLE_BOTTOM_FLAT` or `HOLE_BOTTOM_V`. `None` writes nothing.
 
         Returns:
             The newly created `Hole`, already renamed to `name`.
 
         Raises:
             ParameterNameError: If `name` is not usable as a name.
-            ParameterTypeError: If `face` is not a `Face`, or `depth` is not
-                finite and positive.
+            ParameterTypeError: If `face` is not a `Face`, `depth` or `diameter` is not
+                finite and positive, `depth` is missing or given where it must not be,
+                `limit`/`bottom` is unknown, or `origin` is not three finite numbers or
+                does not lie on the face's plane.
+            UnsupportedSupportError: If `origin` is given and `face` is not planar.
+            StaleSnapshotError: If `face` comes from an outdated snapshot.
+            CrossBodyReferenceError: If `face` belongs to another body.
             UnsupportedUnitError: If `unit` is not a supported unit.
             FeatureConflictError: If a hole named `name` already exists.
             AmbiguousNameError: If two or more holes named `name` already
@@ -2988,15 +4565,79 @@ class PartDesign:
             )
         self._require_current_face(face, "hole")
         validate_length_unit(unit)
-        coerced_depth = _validate_positive_length(depth, "depth")
+        # A depth always means a blind hole: the limit is written explicitly because CATIA
+        # carries the previous hole's limit over (live: after a through-all hole, a new
+        # hole made with depth 5 came out through-all, depth 30).
+        limit_mode = _validate_hole_limit(HOLE_LIMIT_BLIND if limit is None else limit)
+        bottom_type = None if bottom is None else _validate_hole_bottom(bottom)
+        if limit == HOLE_LIMIT_THROUGH_ALL:
+            if depth is not None:
+                raise ParameterTypeError(
+                    "A through-all hole takes no depth; CATIA computes it from the solid."
+                )
+            coerced_depth = _HOLE_NOMINAL_DEPTH
+        else:
+            if depth is None:
+                raise ParameterTypeError("depth is required unless limit is 'through_all'.")
+            coerced_depth = _validate_positive_length(depth, "depth")
+        coerced_diameter = (
+            None if diameter is None else _validate_positive_length(diameter, "diameter")
+        )
+        if origin is None:
+            factory_method = "AddNewHole"
+            factory_args: "tuple[Any, ...]" = (face.com_object, coerced_depth)
+        else:
+            point = _validate_point3(origin, "origin")
+            self._require_point_on_planar_face(point, face)
+            factory_method = "AddNewHoleFromPoint"
+            factory_args = (*point, face.com_object, coerced_depth)
+
+        def configure(hole: Any) -> None:
+            # The order live probe 46s used: diameter, bottom, then limit.
+            if coerced_diameter is not None:
+                hole.Diameter.Value = coerced_diameter
+            if bottom_type is not None:
+                hole.BottomType = bottom_type
+            hole.BottomLimit.LimitMode = limit_mode
+
         return self._create_feature(
             name,
             HOLE_KIND,
-            "AddNewHole",
-            (face.com_object, coerced_depth),
+            factory_method,
+            factory_args,
             Hole,
             "hole",
+            configure,
         )
+
+    @staticmethod
+    def _require_point_on_planar_face(
+        point: "tuple[float, float, float]", face: Face
+    ) -> None:
+        """Refuses a hole origin off a planar face's plane, or a face that is not planar.
+
+        Only points on the face were placed live; what CATIA does with a point off it was
+        never tried, so it is refused before any COM call.
+
+        Raises:
+            UnsupportedSupportError: If the face is not planar.
+            ParameterTypeError: If the point is further than `HOLE_ORIGIN_TOLERANCE_MM`
+                from the face's plane.
+        """
+        facts = face.geometry
+        if facts.surface_type != _PLANAR_SURFACE or facts.normal is None:
+            raise UnsupportedSupportError(
+                f"A positioned hole needs a planar face; this face measures as "
+                f"{facts.surface_type!r}. Nothing was changed."
+            )
+        offset = sum(
+            (point[index] - facts.center_mm[index]) * facts.normal[index] for index in range(3)
+        )
+        if abs(offset) > HOLE_ORIGIN_TOLERANCE_MM:
+            raise ParameterTypeError(
+                f"origin {point} lies {abs(offset):.4f} mm off the face's plane. Nothing was "
+                "changed: give a point on the face."
+            )
 
     def remove_hole(self, name: str) -> None:
         """Removes a hole from the model.
@@ -3080,6 +4721,7 @@ class PartDesign:
             direction_2, 2
         )
         with self._generation.mutation():
+            self._target_in_work()
             try:
                 com_object = self._part_com_object.ShapeFactory.AddNewRectPattern(
                     pad.com_object,
@@ -3098,6 +4740,528 @@ class PartDesign:
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
         return RectangularPattern(com_object, self._generation)
+
+    def _owning_body(self, feature: Any) -> "tuple[Any, str | None]":
+        """Walks a feature's `Parent` chain to the body that holds it.
+
+        Args:
+            feature: A raw feature COM object.
+
+        Returns:
+            `(body, body_name)`, both `None` when CATIA does not report a body.
+        """
+        node = feature
+        for _ in range(_MAX_OWNER_WALK):
+            try:
+                node = node.Parent
+            except (pywintypes.com_error, AttributeError):
+                return None, None
+            if node is None:
+                return None, None
+            if type(node).__name__ == "Body":
+                try:
+                    return node, str(node.Name)
+                except (pywintypes.com_error, AttributeError):
+                    return node, None
+        return None, None
+
+    def _require_feature_in_target_body(self, feature: Any, noun: str) -> None:
+        """Refuses a seed feature that lives in a different body from the target one.
+
+        Patterning a feature of one body into another is accepted by CATIA and fails at
+        the next update, the same trap Phase 1 closed for edges and faces.
+
+        Args:
+            feature: The seed feature wrapper.
+            noun: What is being created, for the message.
+
+        Raises:
+            CrossBodyReferenceError: If the seed belongs to another body. Nothing was
+                changed. An owner CATIA does not report is allowed through, exactly as it
+                is for topology references.
+        """
+        owner, owner_name = self._owning_body(feature.com_object)
+        if owner is None:
+            return
+        target = self._body()
+        try:
+            if bool(owner == target):
+                return
+        except pywintypes.com_error:
+            return
+        try:
+            target_name = str(target.Name)
+        except (pywintypes.com_error, AttributeError):
+            target_name = "the target body"
+        raise CrossBodyReferenceError(
+            f"{feature.name!r} belongs to body {owner_name or 'another body'!r}, but the "
+            f"{noun} would be created in {target_name!r}. CATIA would accept that and fail "
+            "the next Part.Update(). Nothing was changed: open part.work_in(body) for the "
+            "body that owns the feature."
+        )
+
+    def create_circular_pattern(
+        self,
+        name: str,
+        feature: Any,
+        angular_instances: int,
+        angular_spacing_deg: float,
+        axis: Any = CIRCULAR_PATTERN_AXIS_Z,
+        *,
+        reverse: bool = False,
+    ) -> CircularPattern:
+        """Creates a circular pattern of an existing feature around an origin axis.
+
+        This is the bolt-circle operation: one hole becomes six around the centre. Live
+        (probe 44), six instances of a pocket spaced 60 degrees apart removed exactly five
+        extra holes' worth of material, and the pattern rebuilt and was found again by
+        name in a fresh process.
+
+        The verified call is `AddNewCircPattern(feature, 1, instances, 1.0, spacing, 1, 1,
+        reference, reference, reverse, 0.0, True)`: one radial row, the angular row the
+        caller asked for, and one reference as both rotation centre and rotation axis. The
+        axis can be:
+
+        * `"X"`, `"Y"` or `"Z"`: the origin plane whose normal is that axis (probe 46t
+          identified all three by centre of gravity);
+        * a cylindrical `Face`: its axis, such as a boss or a bore (probe 46u);
+        * a linear `Edge` (probe 46v).
+
+        A face or edge gets the same checks as a fillet's edge -- current snapshot, this
+        Part, this body -- and is measured first to prove it is cylindrical or linear.
+        Radial rows, a non-zero rotation angle and complete-crown mode are not exposed:
+        crown mode was accepted by CATIA and ignored (probe 46w).
+
+        It never calls `Part.Update()`. A pattern that CATIA cannot build leaves a broken
+        feature behind, which `remove_circular_pattern` takes out again.
+
+        Args:
+            name: The new pattern's name. Must be non-empty, without surrounding
+                whitespace, and must not contain `"\\"`.
+            feature: The feature to copy -- a `Pad`, `Pocket`, fillet, and so on, from
+                `part.part_design`. It must belong to the body being modelled in.
+            angular_instances: How many instances in total, the original included.
+            angular_spacing_deg: The angle between neighbouring instances, in degrees.
+            axis: `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge`.
+            reverse: Turn the other way (`iIsReversedRotationAxis`). About Z the default
+                turns clockwise seen from +Z and `True` counter-clockwise (probe 46x); for
+                the other axes the sense was not measured.
+
+        Returns:
+            The newly created `CircularPattern`, already renamed to `name`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `feature` is not a feature wrapper, the instance count
+                is not usable, or the spacing is not a number.
+            UnsupportedSupportError: If `axis` is not a verified axis, or is a face that is
+                not cylindrical or an edge that is not a line.
+            StaleSnapshotError: If `axis` is a face or edge from an outdated snapshot.
+            CrossBodyReferenceError: If the feature, or an axis face or edge, belongs to a
+                different body.
+            FeatureConflictError: If a circular pattern named `name` already exists.
+            AmbiguousNameError: If two or more already exist with that name.
+            PartialCreationError: If it was created but the follow-up rename failed.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        if not isinstance(feature, WORK_AT_FEATURES):
+            raise ParameterTypeError(
+                "A circular pattern copies a Part Design feature from part.part_design, "
+                f"not {type(feature).__name__}."
+            )
+        if not isinstance(reverse, bool):
+            raise ParameterTypeError(f"reverse must be a bool, not {type(reverse).__name__}.")
+        instances = _validate_instance_count(angular_instances)
+        spacing = validate_angle_value(angular_spacing_deg)
+        self._require_feature_in_target_body(feature, "circular pattern")
+        reference = self._circular_pattern_axis(axis)
+        return self._create_feature(
+            name,
+            CIRCULAR_PATTERN_KIND,
+            "AddNewCircPattern",
+            (
+                feature.com_object,
+                _CIRCULAR_RADIAL_INSTANCES,
+                instances,
+                _CIRCULAR_RADIAL_STEP,
+                spacing,
+                _PATTERN_COPY_POSITION,
+                _PATTERN_COPY_POSITION,
+                reference,
+                reference,
+                reverse,
+                _CIRCULAR_ROTATION_ANGLE,
+                _CIRCULAR_RADIUS_ALIGNED,
+            ),
+            CircularPattern,
+            "circular pattern",
+        )
+
+    def _circular_pattern_axis(self, axis: Any) -> Any:
+        """Resolves a circular pattern's axis to the reference CATIA takes, before any change.
+
+        Args:
+            axis: `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge`.
+
+        Returns:
+            The raw origin plane or topology `Reference`.
+
+        Raises:
+            UnsupportedSupportError: If `axis` is none of those, or is a face or edge of
+                the wrong shape.
+            StaleSnapshotError: If a face or edge comes from an outdated snapshot.
+            CrossBodyReferenceError: If a face or edge belongs to another body.
+            ValidationError: If a face or edge belongs to another Part.
+            Auto3dxError: If the origin plane cannot be read or the face/edge measured.
+        """
+        if isinstance(axis, Face):
+            self._require_current_face(axis, "circular pattern")
+            surface = axis.geometry.surface_type
+            if surface != _CYLINDRICAL_SURFACE:
+                raise UnsupportedSupportError(
+                    f"A face used as a pattern axis must be cylindrical; this one measures as "
+                    f"{surface!r}. Nothing was changed."
+                )
+            return axis.com_object
+        if isinstance(axis, Edge):
+            self._require_current_edge(axis, "circular pattern")
+            curve = axis.geometry.curve_type
+            if curve != _LINE_CURVE:
+                raise UnsupportedSupportError(
+                    f"An edge used as a pattern axis must be a straight line; this one "
+                    f"measures as {curve!r}. Nothing was changed."
+                )
+            return axis.com_object
+        if not isinstance(axis, str) or axis not in _CIRCULAR_AXIS_PLANES:
+            raise UnsupportedSupportError(
+                f"axis must be one of {sorted(SUPPORTED_CIRCULAR_PATTERN_AXES)}, a cylindrical "
+                f"Face or a linear Edge; got {axis!r}."
+            )
+        try:
+            return getattr(self._part_com_object.OriginElements, _CIRCULAR_AXIS_PLANES[axis])
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+
+    @property
+    def circular_patterns(self) -> "list[CircularPattern]":
+        """list[CircularPattern]: Every circular pattern in the body being modelled in.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._list(CIRCULAR_PATTERN_KIND, CircularPattern)
+
+    def get_circular_pattern(self, name: str) -> CircularPattern:
+        """Finds a circular pattern by name in the body being modelled in.
+
+        Args:
+            name: The pattern's name.
+
+        Returns:
+            The matching `CircularPattern`.
+
+        Raises:
+            FeatureNotFoundError: If no circular pattern has that name.
+            AmbiguousNameError: If two or more do.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._get(CIRCULAR_PATTERN_KIND, CircularPattern, "circular pattern", name)
+
+    def remove_circular_pattern(self, name: str) -> None:
+        """Removes a circular pattern by name, leaving the feature it copied in place.
+
+        This does not rebuild and never saves.
+
+        Args:
+            name: The pattern's name.
+
+        Raises:
+            FeatureNotFoundError: If no circular pattern has that name.
+            AmbiguousNameError: If two or more do.
+            Auto3dxError: If no editor selection is available, or deletion failed.
+        """
+        self._remove(name, self.get_circular_pattern, "circular pattern")
+
+    def _resolve_tool_body(self, tool_body: Any, noun: str) -> Any:
+        """Resolves and vets the tool body of a boolean operation.
+
+        Args:
+            tool_body: A `Body` wrapper, or the name of a body of this Part.
+            noun: The operation, for the messages.
+
+        Returns:
+            The raw tool `Body` COM object.
+
+        Raises:
+            ParameterTypeError: If `tool_body` is neither a body wrapper nor a name.
+            BooleanOperationError: If it is not a body of this Part, is the body being
+                modelled in, or has already been consumed by another boolean. Nothing
+                was changed.
+            Auto3dxError: If the bodies cannot be read.
+        """
+        if not isinstance(tool_body, str) and not hasattr(tool_body, "com_object"):
+            raise ParameterTypeError(
+                f"The tool body of a boolean {noun} must be a Body from part.bodies or "
+                f"its name, not {type(tool_body).__name__}."
+            )
+        wanted = tool_body if isinstance(tool_body, str) else None
+        raw_wanted = None if wanted is not None else tool_body.com_object
+        try:
+            bodies = self._part_com_object.Bodies
+            count = int(bodies.Count)
+            candidates = [bodies.Item(index) for index in range(1, count + 1)]
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        found = None
+        names = []
+        for candidate in candidates:
+            try:
+                candidate_name = str(candidate.Name)
+            except pywintypes.com_error:
+                continue
+            names.append(candidate_name)
+            if wanted is not None:
+                if candidate_name == wanted:
+                    found = candidate
+            else:
+                try:
+                    if bool(candidate == raw_wanted):
+                        found = candidate
+                except pywintypes.com_error:
+                    continue
+        if found is None:
+            label = wanted if wanted is not None else "that body"
+            raise BooleanOperationError(
+                f"{label!r} is not a body of this Part, so it cannot be the tool of a "
+                f"boolean {noun}. Bodies that are there: {names}. A body already consumed "
+                "by an earlier boolean is no longer listed."
+            )
+        target = self._body()
+        try:
+            if bool(found == target):
+                raise BooleanOperationError(
+                    f"A boolean {noun} cannot use the body it is applied to as its own "
+                    "tool. Open part.work_in(other_body) for the target, or pass a "
+                    "different tool body."
+                )
+        except pywintypes.com_error:
+            pass
+        try:
+            if bool(found.InBooleanOperation):
+                raise BooleanOperationError(
+                    f"Body {str(found.Name)!r} has already been consumed by a boolean "
+                    "operation, so it cannot be used again. Nothing was changed."
+                )
+        except pywintypes.com_error:
+            pass
+        return found
+
+    def _create_boolean(
+        self, name: str, kind: str, factory_method: str, tool_body: Any, noun: str
+    ) -> BooleanOperation:
+        """Creates one boolean feature after vetting its tool body.
+
+        Args:
+            name: The new feature's name.
+            kind: The `type(item).__name__` CATIA gives it.
+            factory_method: The `ShapeFactory` method.
+            tool_body: The tool body wrapper or name.
+            noun: The operation, for messages.
+
+        Returns:
+            The newly created `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            FeatureConflictError: If a feature of this kind already has that name.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        validate_parameter_name(name)
+        raw_tool = self._resolve_tool_body(tool_body, noun)
+        return self._create_feature(
+            name, kind, factory_method, (raw_tool,), BooleanOperation, f"boolean {noun}"
+        )
+
+    def create_boolean_remove(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Subtracts a tool body from the body being modelled in.
+
+        Live (probe 44): a cylinder removed exactly its overlap from a disc, the update
+        succeeded, and the tool body reported `InBooleanOperation` afterwards.
+
+        **The tool body is consumed**: it disappears from `part.bodies` and lives under
+        this feature instead. Removing the feature later deletes that body with it
+        (`remove_boolean`).
+
+        The target is whichever body is being modelled in, so wrap the call in
+        `part.work_in(target_body)` when it is not the main body. This never calls
+        `Part.Update()`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to subtract, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is the target body, is not a body of
+                this Part, or has already been consumed.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(
+            name, BOOLEAN_REMOVE_KIND, "AddNewRemove", tool_body, "remove"
+        )
+
+    def create_boolean_add(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Adds a tool body into the body being modelled in.
+
+        Live (probe 44): the disc gained exactly the part of the cylinder that lay outside
+        it. The tool body is consumed, exactly as for `create_boolean_remove`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to add, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(name, BOOLEAN_ADD_KIND, "AddNewAdd", tool_body, "add")
+
+    def create_boolean_intersect(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Keeps only what the tool body and the body being modelled in share.
+
+        Live (probe 44): the result was exactly the overlap volume. The tool body is
+        consumed, exactly as for `create_boolean_remove`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to intersect with, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(
+            name, BOOLEAN_INTERSECT_KIND, "AddNewIntersect", tool_body, "intersect"
+        )
+
+    def create_boolean_assemble(self, name: str, tool_body: Any) -> BooleanOperation:
+        """Assembles a tool body into the body being modelled in.
+
+        Live (probe 44) this gave the same volume as `create_boolean_add` for two solids
+        that only overlapped; assemble differs from add by honouring the tool body's own
+        add/remove history, which this SDK has not exercised. The tool body is consumed,
+        exactly as for `create_boolean_remove`.
+
+        Args:
+            name: The new feature's name.
+            tool_body: The `Body` to assemble, or its name.
+
+        Returns:
+            The new `BooleanOperation`.
+
+        Raises:
+            ParameterNameError: If `name` is not usable as a name.
+            ParameterTypeError: If `tool_body` is not a body wrapper or a name.
+            BooleanOperationError: If the tool body is refused.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return self._create_boolean(
+            name, BOOLEAN_ASSEMBLE_KIND, "AddNewAssemble", tool_body, "assemble"
+        )
+
+    @property
+    def boolean_operations(self) -> "list[BooleanOperation]":
+        """list[BooleanOperation]: Every boolean in the body being modelled in.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        found: list[BooleanOperation] = []
+        for kind in BOOLEAN_KINDS:
+            found.extend(self._list(kind, BooleanOperation))
+        return found
+
+    def get_boolean(self, name: str) -> BooleanOperation:
+        """Finds a boolean operation by name, whichever of the four kinds it is.
+
+        Args:
+            name: The feature's name.
+
+        Returns:
+            The matching `BooleanOperation`.
+
+        Raises:
+            FeatureNotFoundError: If no boolean has that name.
+            AmbiguousNameError: If two or more do.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        matches = [item for item in self.boolean_operations if item.name == name]
+        if not matches:
+            raise FeatureNotFoundError(f"No boolean operation named {name!r} was found.")
+        if len(matches) > 1:
+            raise AmbiguousNameError(
+                f"{len(matches)} boolean operations are named {name!r}; refusing to guess."
+            )
+        return matches[0]
+
+    def remove_boolean(self, name: str, *, delete_consumed_body: bool = False) -> None:
+        """Removes a boolean operation -- and the body it consumed.
+
+        **This is destructive beyond the feature itself.** Live (probe 44), deleting a
+        boolean took the consumed tool body with it: the body did not come back, its name
+        could no longer be found, and only the target body's original geometry returned.
+        There is no verified way to release a tool body back out of a boolean, so this asks
+        the caller to say that losing it is intended.
+
+        This does not rebuild and never saves.
+
+        Args:
+            name: The boolean feature's name.
+            delete_consumed_body: Must be `True`. Deleting the feature deletes the tool
+                body and everything in it.
+
+        Raises:
+            FeatureNotFoundError: If no boolean has that name.
+            AmbiguousNameError: If two or more do.
+            BooleanOperationError: If `delete_consumed_body` is not `True`. Nothing was
+                changed.
+            Auto3dxError: If no editor selection is available, or deletion failed.
+        """
+        operation = self.get_boolean(name)
+        if not delete_consumed_body:
+            try:
+                tool = operation.tool_body_name
+            except Auto3dxError:
+                tool = "the consumed body"
+            raise BooleanOperationError(
+                f"Removing boolean {name!r} would also delete {tool!r}, the body it "
+                "consumed, with everything in it; CATIA gives no way to release that body "
+                "again. Nothing was changed. Pass delete_consumed_body=True to confirm."
+            )
+        with self._generation.mutation():
+            delete_via_selection(
+                self._selection,
+                operation.com_object,
+                f"boolean operation {name!r}",
+                self._part_com_object,
+            )
 
     def remove_rectangular_pattern(self, pattern: RectangularPattern) -> None:
         """Removes a rectangular pattern through the owning editor's Selection.
@@ -3125,4 +5289,5 @@ class PartDesign:
                 self._selection,
                 pattern.com_object,
                 "rectangular pattern",
+                self._part_com_object,
             )

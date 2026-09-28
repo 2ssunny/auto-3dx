@@ -117,6 +117,17 @@ class NoActivePartError(SessionError):
     """Raised when the ActiveEditor's ActiveObject is missing or not a Part."""
 
 
+class InactivePartError(SessionError):
+    """Raised when a Selection-based operation targets a Part that is not the active one.
+
+    Deletion, topology search and visibility go through an editor's `Selection`, and
+    `Selection.Search` was observed to act on the active editor even through another
+    Part's selection (2026-09-17). Until a verified per-editor path exists, these
+    operations refuse a Part unless `ActiveEditor.ActiveObject` is that Part. Nothing was
+    changed; activate the Part in CATIA and retry.
+    """
+
+
 # --- Validation ------------------------------------------------------------------
 
 
@@ -148,6 +159,56 @@ class UnsupportedMagnitudeError(ValidationError):
 
 class UnsupportedSupportError(ValidationError):
     """Raised when a sketch support string is not one of the supported planes."""
+
+
+class CrossBodyReferenceError(ValidationError):
+    """Raised when a topology reference from one body is used to build in another.
+
+    `Selection.Search("Topology.Edge,all")` returns the edges of every body in the
+    Part in one flat list (live, 2026-09-18: a two-body Part reported both bodies'
+    edges together), so it is easy to take an edge that belongs to one body and hand
+    it to a feature being built in another. CATIA accepts the creation call and fails
+    the next `Part.Update()` instead, leaving a broken feature in the tree.
+
+    Every edge and face therefore carries the body it was found in, read from the
+    reference's owner chain in the model, and a feature refuses one that belongs to a
+    different body before CATIA is called. Nothing was changed: take a snapshot of the
+    body you are building in (`part.topology.edges(body=...)`) and use an edge from it.
+
+    The same rule covers a feature used as a pattern seed: patterning a feature of one
+    body into another body is refused here rather than left to fail at the next update.
+    """
+
+
+class SupportNotUpdatedError(ValidationError):
+    """Raised when a sketch is created on a user plane that has not been rebuilt yet.
+
+    A plane made by `part.planes.create_offset`/`create_angle` is not usable as a
+    sketch support until the Part has been rebuilt: `Sketches.Add` fails with an opaque
+    `E_FAIL` (live, verified repeatedly). CATIA reports the plane as not up to date
+    until then, so the SDK checks that first and refuses with this error instead.
+    Nothing was changed; call `part.update()` after creating the plane, then create the
+    sketch.
+    """
+
+
+class UnsupportedOperationError(ValidationError):
+    """Raised when a request is well formed but the SDK cannot carry it out safely.
+
+    The request names something this release has no live evidence for: a geometry read on
+    a sketch element kind whose reads were never verified, a direction that cannot be
+    determined for this sketch (`"into_material"` on a sketch not created on a face), a
+    fillet over several edges at once, or a circular-pattern axis kind that was never
+    driven end to end. Nothing was changed. Use the Level 2 call the message names, or a
+    request the evidence covers (`docs/phase5-api-design.md` section 3).
+    """
+
+
+class UnknownFactError(ValidationError):
+    """Raised when `part.inspect.facts()` is asked for a fact it does not know.
+
+    The message lists the supported fact names. Nothing was read.
+    """
 
 
 class StaleSnapshotError(ValidationError):
@@ -192,6 +253,34 @@ class FormulaNotFoundError(NotFoundError):
     """Raised when a formula cannot be found by name in a Relations collection."""
 
 
+class TopologyQueryNoMatchError(NotFoundError):
+    """Raised when a geometry query that must find something finds nothing.
+
+    `one()` and `first()` on a face or edge query raise this rather than returning
+    `None`, so an agent cannot carry on with a selection that never happened. The message
+    lists the filters that were applied. Loosen a tolerance, check the body scope, or
+    take a fresh snapshot after the model changed.
+    """
+
+
+class SketchElementNotFoundError(NotFoundError):
+    """Raised when a sketch holds no geometric element with the requested name.
+
+    Elements are found by the name CATIA gives them (`"Line.1"`, `"Circle.1"`), read from
+    the sketch's `GeometricElements` collection, so an element drawn in an earlier
+    session or by another process is found again by name. A missing name is reported
+    here rather than as the bare COM failure `GeometricElements.Item` raises.
+    """
+
+
+class BodyNotFoundError(NotFoundError):
+    """Raised when a body cannot be found by name in a Part's `Bodies`."""
+
+
+class PlaneNotFoundError(NotFoundError):
+    """Raised when a plane cannot be found by name in this SDK's geometrical set."""
+
+
 class ConstraintNotFoundError(NotFoundError):
     """Raised when a constraint cannot be found by name in a Constraints collection."""
 
@@ -218,6 +307,94 @@ class SketchAlreadyExistsError(ConflictError):
 
 class FormulaAlreadyExistsError(ConflictError):
     """Raised when creating a formula whose name is already taken."""
+
+
+class BodyAlreadyExistsError(ConflictError):
+    """Raised when creating a body whose name is already taken."""
+
+
+class BodyRemovalError(ConflictError):
+    """Raised when removing a body is refused: the main body, or a non-empty body.
+
+    Deleting a body deletes every feature and sketch in it, so a body that still holds
+    content is removed only when the caller says so. Nothing was changed.
+    """
+
+
+class TopologyQueryAmbiguousError(ConflictError):
+    """Raised when a geometry query meant to identify one element matches several.
+
+    `one()` never picks among candidates: two faces of equal area, or two edges equally
+    near a point, are reported with their measured values so the query can be narrowed.
+    Rankings such as `largest()` keep every element tied within their tolerance, which is
+    what lets this error see a tie instead of silently choosing whichever came first.
+    """
+
+
+class ReferenceInUseError(ConflictError):
+    """Raised when deleting a reference plane that a sketch still sits on.
+
+    CATIA deletes the plane without complaint, leaving the sketch -- and every feature
+    built from it -- without a support: live, the next `Part.Update()` failed (probe 45).
+    A sketch has no Automation member naming its support, so the dependency is found by
+    the one verified signal: the sketch's absolute axis equals the plane's own frame
+    exactly (`docs/conventions.md` 1.7). Nothing was changed. Remove or move the sketches
+    first, or pass `force=True` to accept breaking them.
+    """
+
+
+class BooleanOperationError(ConflictError):
+    """Raised when a multi-body boolean is refused, or removed without acknowledgement.
+
+    A boolean consumes its tool body: after `AddNewRemove`/`AddNewAdd`/`AddNewIntersect`/
+    `AddNewAssemble`, that body reports `InBooleanOperation` and is no longer listed in
+    `part.bodies` (live, 2026-09-19). Building one is refused when the tool body is the
+    target body itself, belongs to another Part, or has already been consumed by an
+    earlier boolean.
+
+    Removal is refused for a different reason. Deleting the boolean feature deletes the
+    consumed tool body with it -- live, the tool body did not come back and its name
+    could no longer be found -- so `remove_boolean` asks for that to be stated with
+    `delete_consumed_body=True`. Nothing was changed when this is raised.
+    """
+
+
+class ParameterInUseError(ConflictError):
+    """Raised when removing a parameter that a formula still reads.
+
+    CATIA removes such a parameter without complaint and rewrites every formula that
+    referenced it, leaving a body like `deleted_L_box * 2` and a Part that is no longer
+    up to date (live, 2026-09-18). The relation survives as an orphan that no longer
+    computes anything.
+
+    Removal therefore checks `Relations` first: every formula's inputs are read through
+    `Formula.GetInParameter`, so the answer comes from the model and is the same in any
+    process. Nothing was changed. Remove or rewrite the formulas first --
+    `part.parameters.dependents(name)` lists them -- or pass `force=True` to accept the
+    orphaned relations deliberately.
+    """
+
+
+class TargetNotUpToDateError(ConflictError):
+    """Raised when something is measured that CATIA has not rebuilt yet.
+
+    A body whose features have not been rebuilt has no valid solid: the inertia
+    service accepts it and then fails deep inside with `E_FAIL` (live, 2026-09-18,
+    a pad created in a body that had not been updated). `Part.IsUpToDate(body)` reports
+    that state reliably, so measurement checks it first and says what to do instead of
+    surfacing a COM failure. Nothing was changed and nothing was rebuilt: measurement
+    is read-only. Call `part.update()`, or `body.update()` for one body, and measure
+    again.
+    """
+
+
+class FactUnavailableError(ConflictError):
+    """Raised when a requested fact exists but cannot be read in the model's current state.
+
+    `part.inspect.facts()` records such a fact in `PartFacts.unavailable` with the reason,
+    for example a main body that has no solid yet or that has not been rebuilt; reading it
+    through `facts[name]` raises this error with that reason. Nothing was changed.
+    """
 
 
 class SketchSupportMismatchError(ConflictError):
@@ -253,11 +430,28 @@ class AmbiguousNameError(ConflictError):
 
 
 class PartUpdateError(AutomationError):
-    """Raised when Part.Update() fails.
+    """Raised when a rebuild fails.
 
-    The feature that caused the failure is still in the model, and every later
-    update fails until it is removed. Remove it before doing anything else.
+    The model is left as CATIA left it -- nothing is rolled back and nothing is deleted
+    -- and every later update fails while it stays invalid, so repair it before doing
+    anything else.
+
+    **Repair usually means undoing the change, not deleting the feature.** When the
+    failure followed an edit to something that already worked, put the old value back and
+    update again: live, a pad taken from 30 mm to 1 mm broke a fillet that depended on it,
+    and restoring 30 mm rebuilt the Part with the fillet intact. Removing the feature is
+    for the other case, where a newly created feature never built at all, or where there
+    is no previous value to restore.
+
+    Attributes:
+        issues: What CATIA reported per feature right after the failure: a tuple of
+            `auto_3dx.inspect.UpdateIssue`, each saying whether a feature is up to date and
+            whether it is suppressed. Empty when nothing could be read. These are
+            observations, not a root cause: the feature reported out of date is where the
+            rebuild stopped, not necessarily what broke it (`part.inspect.update_issues()`).
     """
+
+    issues: tuple = ()
 
 
 class PartialCreationError(AutomationError):

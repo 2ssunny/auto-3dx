@@ -183,6 +183,29 @@ class FormulaCollection:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    def reading(self, parameter: Any) -> "list[Formula]":
+        """Returns every formula that reads the given parameter.
+
+        This is the reverse dependency lookup CATIA does not offer directly: each
+        formula is asked for its own inputs (`Formula.inputs`), which is model-backed
+        and therefore works just as well in a process that did not create anything.
+
+        Only formulas are covered. `Relations` can also hold rules, checks, laws,
+        programs and design tables; none of those expose a verified input list here, so a
+        parameter used only by one of them is not reported. `docs/conventions.md` section
+        1.11 records that boundary.
+
+        Args:
+            parameter: A `Parameter`, or its raw COM object.
+
+        Returns:
+            The formulas reading it, in `Relations` order. Empty when none do.
+
+        Raises:
+            AutomationError: If the relations or their inputs cannot be read.
+        """
+        return [formula for formula in self.list() if formula.reads(parameter)]
+
     def create(
         self,
         name: str,

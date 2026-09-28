@@ -35,6 +35,20 @@ class _Body(_NoSaveOrUpdate):
         self.Name = "PartBody"
 
 
+class _Collection:
+    """Fake 1-based COM collection."""
+
+    def __init__(self, items: "list[Any]") -> None:
+        self._items = items
+
+    @property
+    def Count(self) -> int:  # noqa: N802 - COM property name
+        return len(self._items)
+
+    def Item(self, index: int) -> Any:  # noqa: N802 - COM method name
+        return self._items[index - 1]
+
+
 class _HybridBody(_NoSaveOrUpdate):
     """Fake geometrical set."""
 
@@ -45,9 +59,13 @@ class _HybridBody(_NoSaveOrUpdate):
     def AppendHybridShape(self, shape: Any) -> None:  # noqa: N802 - COM method name
         self.appended.append(shape)
 
+    @property
+    def HybridShapes(self) -> _Collection:  # noqa: N802 - COM property name
+        return _Collection(self.appended)
+
 
 class _HybridBodies:
-    """Fake `Part.HybridBodies`, recording how many sets were created."""
+    """Fake `Part.HybridBodies`: created sets are also findable by `Count`/`Item`."""
 
     def __init__(self) -> None:
         self.created: list[_HybridBody] = []
@@ -56,14 +74,17 @@ class _HybridBodies:
     def Count(self) -> int:  # noqa: N802 - COM property name
         return len(self.created)
 
+    def Item(self, index: int) -> _HybridBody:  # noqa: N802 - COM method name
+        return self.created[index - 1]
+
     def Add(self) -> _HybridBody:  # noqa: N802 - COM method name
         hybrid_body = _HybridBody()
         self.created.append(hybrid_body)
         return hybrid_body
 
 
-class _PlaneShape(_NoSaveOrUpdate):
-    """Fake hybrid plane shape."""
+class HybridShapePlaneOffset(_NoSaveOrUpdate):
+    """Fake hybrid plane shape; the class name is the kind CATIA reports."""
 
     def __init__(self, name: str = "PLANE") -> None:
         self.Name = name
@@ -74,8 +95,8 @@ class _HybridShapeFactory:
 
     def AddNewPlaneOffset(  # noqa: N802 - COM method name
         self, iPlane: Any, iOffset: float, iOrientation: bool  # noqa: N803
-    ) -> _PlaneShape:
-        return _PlaneShape("OFFSET")
+    ) -> HybridShapePlaneOffset:
+        return HybridShapePlaneOffset("OFFSET")
 
 
 class _OriginElements:
@@ -100,11 +121,17 @@ class _Part(_NoSaveOrUpdate):
 
 
 class _Selection:
-    """Fake `Editor.Selection` recording the Clear/Add/Delete deletion sequence."""
+    """Fake `Editor.Selection` recording the Clear/Add/Delete deletion sequence.
 
-    def __init__(self) -> None:
+    Given the `_Part`, `Delete` really removes the object from it: the plane layer
+    now finds its geometrical set by enumerating the Part, so a fake that only
+    records the call would still report a deleted set as present.
+    """
+
+    def __init__(self, part: "Any | None" = None) -> None:
         self.calls: list[str] = []
         self.added: list[Any] = []
+        self._part = part
 
     def Clear(self) -> None:  # noqa: N802 - COM method name
         self.calls.append("Clear")
@@ -115,6 +142,11 @@ class _Selection:
 
     def Delete(self) -> None:  # noqa: N802 - COM method name
         self.calls.append("Delete")
+        if self._part is None:
+            return
+        for item in self.added:
+            if item in self._part.HybridBodies.created:
+                self._part.HybridBodies.created.remove(item)
 
 
 def test_remove_deletes_the_plane_through_the_selection() -> None:
@@ -161,19 +193,24 @@ def test_remove_without_a_selection_is_an_auto3dx_error() -> None:
         planes.remove(plane)
 
 
-def test_remove_geometrical_set_clears_the_cache() -> None:
-    """The cached set must go, or the next create appends into a deleted set."""
+def test_remove_geometrical_set_leaves_no_set_behind_for_the_next_create() -> None:
+    """After removal the Part has no such set, so a later create builds a fresh one."""
     part = _Part()
-    selection = _Selection()
+    selection = _Selection(part)
     planes = PlaneCollection(part, selection)
     planes.create_offset("P", "XY", 30.0)
+    created_set = part.HybridBodies.created[0]
     assert part.HybridBodies.Count == 1
 
     planes.remove_geometrical_set()
-    assert selection.added == [part.HybridBodies.created[0]]
+    assert selection.added == [created_set]
+    assert part.HybridBodies.Count == 0
+    assert planes.names() == []
 
     planes.create_offset("Q", "XY", 30.0)
-    assert part.HybridBodies.Count == 2
+    assert part.HybridBodies.Count == 1
+    assert part.HybridBodies.created[0] is not created_set
+    assert planes.names() == ["Q"]
 
 
 def test_remove_geometrical_set_does_nothing_when_none_was_created() -> None:
@@ -226,4 +263,4 @@ def test_a_plane_wrapper_exposes_its_raw_shape() -> None:
     plane = planes.create_offset("P", "XY", 30.0)
 
     assert isinstance(plane, Plane)
-    assert isinstance(plane.com_object, _PlaneShape)
+    assert isinstance(plane.com_object, HybridShapePlaneOffset)

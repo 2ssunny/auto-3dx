@@ -1,7 +1,9 @@
 # auto-3dx Module & API Conventions
 
 이 문서는 `auto-3dx` 라이브러리 코드를 작성할 때 따르는 규칙과, 첫 번째 수직 기능
-("실행 중인 Part의 기존 Length Parameter 수정 + update")의 확정된 공개 API contract를 정의한다.
+("실행 중인 Part의 기존 Length Parameter 수정 + update")부터 축적한 실측 기록을 정의한다.
+아래 첫 표는 초기 단계의 검증 범위이며 현재 지원 범위가 아니다. 이후 절의 추가 실측과
+현재 공개 API 상태는 `docs/capabilities.md` 및 `docs/api-design.md`를 따른다.
 
 여러 작업자가 병렬로 구현하더라도 이 문서의 signature를 그대로 구현하면 서로 맞물린다.
 
@@ -9,8 +11,9 @@
 
 ## 1. 검증된 사실 (Ground truth)
 
-추측 금지. 아래는 B428_Cloud 설치본에서 실제 COM 호출로 확인한 내용이다.
-이 목록에 없는 동작은 **미검증**이며, 구현 대상이 아니다.
+추측 금지. 아래는 B428_Cloud 설치본에서 초기 단계에 실제 COM 호출로 확인한 내용이다.
+이 초기 목록에 없는 동작은 해당 단계에서는 미검증이었다. 이후 절에서 검증한 동작은
+현재 공개 API에 포함될 수 있다.
 
 ### 환경
 
@@ -73,7 +76,7 @@ Value python type: float
 UI 대응          : Value == 150.0  <->  CATIA UI 표시 150mm
 ```
 
-### 검증된 동작
+### 초기 단계에서 검증된 동작 (역사적 기록)
 
 | 동작 | 상태 |
 |---|---|
@@ -84,9 +87,9 @@ UI 대응          : Value == 150.0  <->  CATIA UI 표시 150mm
 | `Length.Value` 읽기 / 쓰기 | 검증 완료 |
 | `Part.Update()` | 검증 완료 |
 | Length parameter 생성 / ensure / remove | 검증 완료 (아래 1.1) |
-| 그 외 Parameter 생성 (`CreateReal` 등) | **미검증 — 구현 금지** |
-| Formula / Relations | **미검증 — 구현 금지** |
-| Sketch / Pad / GSD | **미검증 — 구현 금지** |
+| 그 외 Parameter 생성 (`CreateReal` 등) | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
+| Formula / Relations | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
+| Sketch / Pad / GSD | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
 | 새 Part 생성 | **미검증 — 구현 금지** |
 | Save / PLM propagate | **미검증 — 호출 금지** |
 
@@ -257,9 +260,10 @@ GetAbsoluteAxisData(oAxisData) -> 9 doubles
 쓰기 가능: Name, CenterLine
 ```
 
-**`Sketch`에는 support/plane 속성이 없다.** 어느 평면에 붙었는지는
+**`Sketch`에는 support/plane 속성이 없다.** 2026-09-16에 live 객체의 멤버를 다시 확인해도
+`Support`/`Plane`/`Reference`는 없고 `Parent`는 `Sketches` 컬렉션이다. 어느 평면에 붙었는지는
 `GetAbsoluteAxisData`로만 알 수 있고, 실측값은 support마다 다음과 같이 구분된다
-(origin 3 + X방향 3 + Y방향 3):
+(origin 3 + X방향 3 + Y방향 3). 사용자 정의 평면 위의 스케치는 1.7절 방식으로 판정한다:
 
 ```text
 XY -> (0,0,0,  1,0,0,  0,1,0)
@@ -467,11 +471,14 @@ OpenEdition()~CloseEdition() 사이        -> 동작
 건강 신호: `Status == 0`이 정상이고, `BrokenConstraintsCount` / `UnUpdatedConstraintsCount`로
 스케치 상태를 확인할 수 있다.
 
-**미검증:** `Constraints.Remove(i)`는 호출해 보지 않았다. 제약 삭제는 구현하지 않는다.
+**당시 미검증:** `Constraints.Remove(i)`는 이 단계에서 호출해 보지 않았다.
+이후 스케치 제약 삭제를 검증·구현했다(`docs/api-design.md` 18절).
 
 ### 1.2.7 사용자 정의 평면 (실측, probes 29·33·36)
 
-지금은 원점 평면 3개(XY/YZ/ZX)에만 스케치를 만들 수 있다. offset 평면까지는 길이 났다.
+이 실측 단계에서는 원점 평면 3개(XY/YZ/ZX)에만 스케치를 만들 수 있었다.
+이후 offset/각도 평면(이 절)과, Phase 5에서 평면 Face support(1.14, `docs/api-design.md`
+20절)를 검증·구현했다.
 
 ```text
 Part.HybridShapeFactory -> HybridShapeFactory   (선언 타입은 generic Factory, 런타임 캐스팅)
@@ -986,6 +993,36 @@ InWorkObject = 원래 객체       AUTO3DX_BASE_PAD  Pad   main=False
 이 읽기로 `part.inspect.in_work_object()`를 만들었다. 통합 테스트 세션은 In-Work Object도
 시작 시 저장하고 끝날 때 되돌린다(`tests/integration/conftest.py`).
 
+### 1.6 평면 재발견 (실측, 2026-09-16)
+
+`PlaneCollection`이 만든 기하 세트를 인스턴스에 들고 있었기 때문에, 파이썬 프로세스가
+끝나면 그 안의 평면을 찾지도 지우지도 못했다. 이제 매번 모델에서 찾는다.
+
+```text
+Part.HybridBodies.Count / Item(i).Name        -> 동작 (auto_3dx_Planes 찾기)
+HybridBody.HybridShapes.Count / Item(i).Name  -> 동작
+type(HybridShapes.Item(i)).__name__           -> HybridShapePlaneOffset / HybridShapePlaneAngle
+                                                 HybridShapePointCoord / HybridShapeLinePtPt
+```
+
+`create_angle`이 만드는 축 점 2개와 축 선도 같은 세트에 있으므로, 평면만 돌려주도록
+타입 이름으로 거른다. offset 평면은 `OffsetPlane`, 각도 평면은 `AnglePlane`으로 감싸고
+`Offset.Value`(40.0)와 `Angle.Value`(30.0)를 그대로 읽었다.
+
+**별도 프로세스 검증 (A/B/C, 공개 API만 사용).**
+
+```text
+A: create_offset("AUTO3DX_LIFECYCLE_PLANE", "XY", 40) + update -> names() ['AUTO3DX_LIFECYCLE_PLANE']
+   정리하지 않고 종료
+B: 새 인터프리터로 attach -> names()에서 A의 평면 발견, get()으로 offset 40.0,
+   base_display_name 'xy plane' -> remove(plane) -> remove_geometrical_set() -> update
+   -> names() [] , get()은 PlaneNotFoundError
+C: 새 인터프리터로 inspect -> 기하 세트 0개, 평면 0개, feature/스케치/파라미터/부피/
+   In-Work Object가 A 이전 기준과 같음
+```
+
+세 프로세스 모두 저장·propagate·export를 하지 않았고 raw COM도 쓰지 않았다.
+
 **export는 이 설치본에서 쓸 수 없다.** 유일한 Automation 경로는
 `Application.Documents`에서 `PartDocument.Part == Part`로 문서를 찾아
 `PartDocument.ExportData(path, format)`을 부르는 것이다. `Documents`에는 CATPCCModel
@@ -1000,6 +1037,754 @@ ExportData(path, "stl") -> 같은 실패
 
 시도 뒤에 활성 객체를 읽을 수 없는 editor(`CATIAEditor36`)가 새로 생겼다. 원인을 확실히 가리지
 못했으므로 export 시도는 반복하지 않는다.
+
+### 1.7 스케치 support 판정 (실측, 2026-09-16)
+
+사용자 정의 평면 위에 만든 스케치는 `support()`가 `None`이었다. 원점 평면 3개의 기준 프레임과만
+비교했기 때문이다. 평면 쪽이 자기 프레임을 알려준다는 것이 확인되어 이제 프레임을 맞춰 본다.
+
+```text
+plane.IsARefPlane()          -> 1
+plane.GetOrigin([0,0,0])     -> (0.0, 0.0, 35.0)      # 3개짜리 seed 필요, 인자 없으면 Type mismatch
+plane.GetFirstAxis([0,0,0])  -> (1.0, 0.0, 0.0)
+plane.GetSecondAxis([0,0,0]) -> (0.0, 1.0, 0.0)
+sketch.GetAbsoluteAxisData   -> (0,0,35, 1,0,0, 0,1,0)   # 평면 프레임과 완전히 같음
+```
+
+각도 평면(30도)에서도 같았다: 평면 `(0,0,0)/(0,1,0)/(-0.8660254037844386,0,0.5)`,
+스케치 `(0,0,0, 0,1,0, -0.866...,0,0.5)`. 축에 정렬되지 않은 프레임까지 그대로 일치하므로
+기하 추정이 아니라 **동등 비교**로 판정한다. 프레임이 같은 평면이 둘이면 고르지 않고 `None`이다.
+
+**원점 평면은 이 방법을 못 쓴다.** `OriginElements.PlaneXY`는 이 릴리스에서 `AnyObject`로 오고
+`GetOrigin`/`GetFirstAxis`/`GetSecondAxis`/`IsARefPlane`이 전부 `AttributeError`다. 그래서
+원점 3개는 검증된 상수 프레임으로 먼저 판정하고, 그다음에 `part.planes`의 평면과 비교한다.
+
+`MeasurableService`도 시도했다. `GetService("MeasurableService")`는 응답하지만
+`GetMeasurable(reference)`가 `Parameter not optional`로 실패했다. 평면 프레임 경로가 이미
+있으므로 더 파지 않았고, 이 서비스는 여전히 미검증이다.
+
+**평면을 만든 뒤에는 `Part.Update()`를 먼저 불러야 그 평면에 스케치를 만들 수 있다.** update 없이
+`sketches.create(support=plane)`를 부르면 `Sketches.Add`가 `The method Add failed`(0x80004005)로
+거부한다. 기존 live 테스트가 평면 생성 뒤 update를 부르고 있어 그동안 드러나지 않았다.
+
+### 1.8 Multi-sections Solid (probe 40, 실측 2026-09-17)
+
+타입 라이브러리에서 확인한 시그니처:
+
+```text
+ShapeFactory.AddNewLoft() -> Loft                         (인자 없음)
+Loft: Name (r/w), HybridShape -> HybridShape, Parent, GetItem
+HybridShapeLoft.AddSectionToLoft(iCrv, iOri, iPoint)
+HybridShapeLoft.GetSectionFromLoft(iRank, oCrv, oOri, oPoint)
+HybridShapeLoft.RemoveSection(iSection), GetNbOfGuides()  -- 섹션 개수 멤버는 없다
+```
+
+live 결과 (공개 API로 XY의 40x20 사각형 스케치, +30mm offset 평면, 그 위 30x15 사각형 스케치를
+만든 뒤 Loft만 raw로 호출):
+
+```text
+AddNewLoft()                         -> type 'Loft', 기본 이름 'Multi-sections Solid.1'
+In-Work Object                       -> PartBody에서 HybridShapeLoft 'Multi-sections Solid.1'로 바뀜
+loft.HybridShape                     -> HybridShapeLoft
+CreateReferenceFromObject(sketch)    -> Reference
+AddSectionToLoft(reference, 1, None) -> 예외 없음 (두 섹션 모두)
+loft.Name = 'AUTO3DX_P40_LOFT'       -> 동작
+Part.Update()                        -> 실패 (E_FAIL)  <- 사각형 두 개로는 solid가 만들어지지 않았다
+MainBody.Shapes.Item(i)              -> type 'Loft', 바뀐 이름으로 다시 찾음
+Shapes 항목 == AddNewLoft 반환 객체    -> False   (COM 동일성으로 같은 feature를 판정할 수 없다)
+GetSectionFromLoft(0)                -> 실패 E_FAIL
+GetSectionFromLoft(1) / (2)          -> (Reference, 1, None), Reference.DisplayName == 스케치 이름
+                                        Reference == Sketch 객체 -> False
+GetSectionFromLoft(3)                -> 실패 E_FAIL (섹션 2개일 때 마지막 다음 순위)
+Selection으로 Loft 삭제                -> 섹션 스케치 두 개도 함께 삭제됨 (Pad가 스케치를 지우는 것과 같다)
+```
+
+그 전에 사용자가 raw로 같은 경로(`AddNewLoft` + `AddSectionToLoft(reference, 1, None)` 두 번 +
+`Part.Update()`)를 돌려 NACA 2415(root, chord 150mm, XY)와 NACA 2412(tip, chord 100mm, +300mm)
+사이의 날개 solid를 만들고 측정까지 했다. SDK로는 아직 재현하지 않았다.
+
+이 사실로 `part_design.create_multi_section_solid`/`get_`/`remove_`/`multi_section_solids`와
+`MultiSectionSolid.section_names()`를 만들었다.
+
+- 섹션은 스케치에서 만든 `Reference`로 넘기고 `iOri`는 1, 닫힘점은 `None`이다. 시도한 조합이 이것뿐이다.
+- 섹션 개수 멤버가 없으므로 `section_names()`는 1순위부터 읽다가 **E_FAIL**이 나오면 멈춘다. 다른
+  오류는 끝으로 보지 않고 그대로 올린다. 이름은 `Reference.DisplayName`이다.
+- feature를 찾는 것은 이름과 타입(`Loft`)으로 한다. COM 동일성은 위에서처럼 믿을 수 없다.
+- In-Work Object가 Loft의 `HybridShape`로 바뀌는 것은 그대로 둔다. 되돌리지 않는다.
+
+**공개 API live 검증 (2026-09-17, 표준 CPython 3.14.2, Part `3D Shape00422533`).**
+
+사용자가 raw로 만든 날개가 들어 있는 Part에서 돌렸다. 그 날개는 읽기만 했고, 검증이 만든 것만
+지웠으며, 평면 생성이 옮긴 In-Work Object는 매번 원래 값으로 되돌렸다. 모든 실행 뒤 전체 Part
+(In-Work Object와 selection 포함)가 실행 전 기준과 같았다.
+
+```text
+사용자의 raw 날개를 새 프로세스에서 SDK로 읽기(읽기 전용)
+  get_multi_section_solid('WING_SOLID_LOFT')     -> kind Loft, supported
+  section_names()                                -> ['WING_ROOT_NACA2415', 'WING_TIP_NACA2412']
+  두 섹션 스케치의 support()                        -> 'XY' / OffsetPlane('WING_TIP_PLANE', 300.0)
+  부피 449699.966 mm3, 면적 80076.347 mm2
+  섹션 구성                                       -> 스케치마다 닫힌 Spline2D 하나, 제어점 49개,
+                                                   시작점 = 끝점 = 날카로운 뒷전, 제약 0개
+
+섹션 모양별 Part.Update() (AddSectionToLoft(reference, 1, None), 닫힘점 없음)
+  사각형 40x20 -> 30x15                  실패 (probe 40, acceptance, 통합 테스트 세 번)
+  NACA, 열린 뒷전 spline + 선            실패
+  원 R20 -> R12                          성공
+  NACA, 닫힌 spline 하나                  성공
+```
+
+즉 모서리가 있는 섹션은 닫힘점 없이는 만들어지지 않았고, 모서리 없는 섹션은 만들어졌다. 닫힘점을
+설정하는 API는 범위 밖이므로 원인을 닫힘점으로 확정하지는 않았고, 관찰된 규칙으로만 기록한다.
+
+```text
+원 두 개 (통합 테스트, 새 wrapper에서 재발견)
+  update, kind Loft, topology 변화, 부피 증가 = 원뿔대 부피 +-1%
+  section_names() == [root, tip], 삭제하면 섹션 스케치도 사라짐
+사각형 두 개 (통합 테스트)
+  update -> PartUpdateError, is_up_to_date False
+  remove_multi_section_solid -> update 성공, is_up_to_date True
+원 두 개 수명 주기 (scripts/acceptance/multi_section_solid_lifecycle.py create circle / verify-and-remove)
+  프로세스 A: 생성, update, 검증 후 정리 없이 종료
+  프로세스 B: get_multi_section_solid로 재발견, section_names 확인, 삭제, 기준 복원
+NACA 날개 (scripts/acceptance/naca_wing_multi_section_solid.py create / verify / remove, 공개 API만)
+  root NACA 2415 chord 150 (XY), tip NACA 2412 chord 100 (+300mm 평면), X로 400mm 옮김
+  A: update 성공, 부피 +449702.881 mm3 (raw 날개 449699.966), 면적 +80076.4, topology 8/4 -> 16/8
+  B: 새 프로세스에서 root/tip 스케치·tip 평면·날개를 이름으로 찾음, section_names, is_up_to_date,
+     topology, 부피, 면적, 무게중심 x 253.95 (두 날개 중간)
+  C: 새 프로세스에서 삭제, 기준 복원
+```
+
+**B에서 드러난 한계.** 사용자의 `WING_TIP_PLANE`과 검증용 평면이 둘 다 XY에서 +300mm라 프레임이
+같았고, 검증용 tip 스케치의 `support()`는 설계대로 `None`이었다(1.7). 스케치에 support 멤버가 없으니
+프레임이 같은 평면은 구분할 수 없다.
+
+**`part.planes`와 In-Work Object.** 섹션 스케치를 위한 평면을 만들면 `geometry.planes`가 In-Work
+Object를 main body로 되찾는다. Loft가 In-Work Object였던 Part라면 그 값이 바뀐다. 통합 테스트
+세션은 끝날 때 되돌리고, 수동 검증에서는 되돌리는 단계를 따로 뒀다.
+
+지원하지 않는 것: guide 곡선, spine, 닫힘점, coupling 설정, tangency, relimitation, Multi-Section
+Surface(GSD loft).
+
+**사고 기록.** probe 40의 첫 실행은 활성 Part가 테스트 Part가 아니었는데 그대로 돌았고, 정리 단계의
+`remove_geometrical_set()`이 `auto_3dx_Planes` 세트를 통째로 지워 다른 작업의 `GEAR_TOP_PLANE`을
+삭제했다. 그 평면 위의 스케치가 support를 잃어 `Part.Update()`가 실패하는 상태가 됐다(저장은 없음).
+이후 probe와 acceptance 스크립트는 `AUTO3DX_LIVE_PART`로 이름을 지정한 Part에서만 돌고, 자기가 만든
+평면 하나만 지운다. live 통합 테스트 세션도 같은 환경 변수가 활성 Part와 일치해야만 시작한다.
+
+### 1.9 Multi-Body와 활성 Part 가드 (probe 41, 실측 2026-09-17)
+
+모든 live 실행은 사용자가 연 빈 테스트 Part `AUTO3DX_MULTIBODY_TEST`에서만 했다.
+
+**Part 이름.** 이 Part의 Automation `Part.Name`은 `3D Shape00422557`이고, 3DEXPERIENCE 제목
+`AUTO3DX_MULTIBODY_TEST`는 `Application.ActiveWindow.Caption`으로만 읽혔다. 그래서 통합 테스트 세션,
+probe, acceptance 스크립트는 `AUTO3DX_LIVE_PART`가 활성 Part의 `Part.Name` **또는** 활성 창 제목과
+같을 때만 돈다. 창 제목은 활성 Part에만 쓸 수 있다.
+
+**비활성 Part의 `Selection.Search`.** 열린 Part 다섯 개에서 각자 editor의 Selection으로
+`Topology.Edge,all`/`Topology.Face,all`을 검색했더니 모두 활성 Part의 개수(모서리 198, 면 53)를
+돌려줬다. 측정 service는 editor마다 맞는 값을 줬다. 즉 비활성 Part에 대한 Selection 기반 검색은
+다른 Part를 가리키고, 같은 경로의 삭제도 안전하다고 볼 수 없다.
+
+```text
+Part.Application.ActiveEditor.ActiveObject == Part   -> 활성 Part에서만 True (세 번 연속 읽기)
+ActiveEditor.Selection == 그 editor의 selection      -> 활성 Part에서도 False, 판정에 못 씀
+```
+
+이 사실로 `geometry.deletion.require_active_part`를 만들었다. Selection을 거치는 모든 동작
+(`remove_*` 삭제, `part.topology` 검색, body 표시/숨김, `bodies.remove`)이 COM을 건드리기 전에
+`ActiveEditor.ActiveObject`가 대상 Part인지 확인하고, 아니거나 확인할 수 없으면
+`InactivePartError`(`SessionError`)로 거부한다. `part.inspect.topology()`는 이 경우 틀린 숫자 대신
+`None`을 돌려준다. 검증된 per-editor 경로가 생길 때까지 유지한다.
+
+**Body (probe 41).**
+
+```text
+Part.Bodies.Add()                    -> Body, 기본 이름 'Body.N', 새 body가 In-Work Object가 됨
+body.Name = 'X'                      -> 동작, Bodies.Item(i) == Add 반환 객체 -> True
+Part.InWorkObject = body             -> 동작, 읽으면 그 body
+body.Sketches.Add(plane)             -> 그 body에 들어감
+MainBody.Sketches.Add(plane)         -> 다른 body가 In-Work여도 PartBody에 들어감
+ShapeFactory.AddNewPad / AddNewPocket -> In-Work Object인 body에 들어가고, 새 feature가 In-Work Object가 됨
+body.InBooleanOperation              -> False
+body.HybridBodies                    -> 기하 세트가 없는 body에서는 None (Count를 읽으면 AttributeError)
+Selection.Add(body); VisProperties.GetShow()  -> (0, state), 0 = 보임, 1 = 숨김
+VisProperties.SetShow(1)             -> 숨김. 다시 선택해 읽어도 1, 다른 body는 영향 없음
+VisProperties.SetShow(0)             -> 다시 보임, 부피 그대로
+Selection으로 body 삭제                -> body와 그 안의 feature, 스케치가 함께 사라짐
+빈 body나 숨긴 body 측정               -> GetArea E_FAIL (AutomationError)
+```
+
+이 사실로 `part.bodies`(`list`/`names`/`get`/`main`/`create`/`remove`)와 `Body`
+(`name`/`is_main`/`features`/`sketch_names`/`is_visible`/`hide()`/`show()`), `part.work_in(body)`를
+만들었다.
+
+- **body 찾기**는 이름으로, main body 판정은 `MainBody`와의 COM 동일성으로 한다.
+- **`bodies.create`**는 `Bodies.Add`가 옮긴 In-Work Object를 원래 값으로 되돌린다. 이름을 붙이지
+  못하면 `PartialCreationError`.
+- **`work_in(body)`**는 이전 In-Work Object를 저장하고 body를 In-Work Object로 둔 뒤, 블록 안의
+  스케치는 `body.Sketches`에, Part Design feature는 그 body에 만든다. Pad가 In-Work Object를 새
+  feature로 옮기므로 **factory 호출마다 직전에** body를 다시 In-Work Object로 둔다. 평면 생성이
+  In-Work Object를 되찾을 때도 main body가 아니라 이 body로 돌린다. 블록을 나가면 예외든 아니든
+  이전 값으로 되돌린다. 예외 중 복원이 실패하면 원래 예외에 note로 붙이고, 정상 종료 중 실패하면
+  `AutomationError`를 낸다. 중첩할 수 있다. `work_in` 밖의 동작은 이전과 같다(In-Work Object를
+  건드리지 않는다). main body로 조용히 돌아가는 경로는 없다: 다른 Part의 body는 `ParameterTypeError`,
+  없는 이름은 `BodyNotFoundError`다.
+- **`get_pad`/`pads` 등 조회**는 `work_in` 안에서 그 body의 `Shapes`를 본다.
+- **표시/숨김**은 selection을 캡처하고 body만 선택해 `VisProperties`를 부른 뒤 복원한다
+  (`SelectionNotRestoredWarning`). `is_visible`은 위의 read-back이 검증되어 노출했다. 형상이 그대로라도
+  보수적으로 model generation을 올린다.
+- **`bodies.remove(name, delete_contents=False)`**는 main body와, `delete_contents=True` 없이 내용이
+  있는 body를 `BodyRemovalError`로 거부한다. 지운 body 안에 In-Work Object가 있었으면 main body로,
+  아니면 원래 값으로 둔다.
+
+**공개 API live 검증.**
+
+```text
+통합 테스트 (test_multi_body_live.py, 2 통과)
+  body A: pad 20x20x10, body B: pad 30x30x12 + work_in 안에서 만든 offset 평면 위 pocket 10x10x5
+  블록 뒤 In-Work Object 복원, 새 wrapper에서 두 body의 feature·스케치 재발견
+  부피 A 4000, B 10300, main body의 feature 불변, A 숨김/B 보임 read-back, 다시 보임 후 부피 동일
+  내용 있는 body 삭제 거부, work_in 안의 예외 뒤 In-Work Object 복원
+A->B 수명 주기 (scripts/acceptance/multi_body_lifecycle.py create / verify-and-remove)
+  프로세스 A: AUTO3DX_BODY_A/B 생성, 부피 4000 / 10800, 숨김/보임, 정리 없이 종료
+  프로세스 B: 이름으로 재발견, 내용·부피·숨김/보임 확인, 두 body만 삭제, 기준 상태와 정확히 같음
+enclosure (scripts/acceptance/multi_body_enclosure.py create / verify / remove, 각각 새 프로세스)
+  OuterHousing / LEDTray / ElectronicsFloor / SpeakerMounts / MountingBosses, body마다 pad 하나
+  create에서 OuterHousing 숨김 -> verify(새 프로세스)에서 OuterHousing 숨김, 나머지 네 개 보임과
+  부피 12000 / 14400 / 9000 / 1500 확인, OuterHousing 다시 보임 -> remove 후 기준 상태와 같음
+전체 통합 테스트 (같은 Part): 40 통과, 6 skip, 실행 뒤 기준 상태와 같음
+```
+
+**정리 중 발견.** `planes.remove(plane)`은 평면만 지우고 `auto_3dx_Planes` 세트는 남긴다. 테스트가
+그 세트를 새로 만들었고 비어 있을 때만 세트를 지우도록 Multi-Body와 Multi-sections Solid 통합 테스트의
+정리를 고쳤다. 빈 main body를 측정할 수 없으므로 측정·Mirror 통합 테스트는 main body가 비어 있으면
+skip한다.
+
+지원하지 않는 것: boolean 연산(Add/Remove/Intersect/Assemble), body 이름 바꾸기와 순서, body 안의 기하
+세트, Product/Assembly, In-Work Object의 공개 setter(`work_in` 밖), 비활성 Part의 topology·삭제·표시.
+
+### 1.10 body 단위 topology·update·측정 (probe 42, 실측 2026-09-18)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**topology는 body로 범위를 좁힐 수 있다.** 지금까지 "`Topology.Edge,sel`은 전체를 돌려준다"로
+기록돼 있었는데(1.2.2.2), 그때는 아무것도 선택하지 않은 상태였다. body 하나를 **먼저 선택하면**
+그 body만 검색된다.
+
+```text
+Search('Topology.Edge,all')                    -> 32 (두 body의 모서리가 한 목록에 섞여 나온다)
+Selection.Add(MainBody); Search('...Edge,sel') -> 16, owner: MAIN_PAD / MAIN_SKETCH
+Selection.Add(ToolBody); Search('...Edge,sel') -> ToolBody 것만
+Selection.Add(body);     Search('...Face,sel') -> 그 body의 면만 (재빌드 안 된 body는 0개)
+Search('Topology.Edge,in')                     -> 전체 (범위 지정 아님)
+ToolBody를 In-Work로 두고 MainBody를 선택 + ,sel -> MainBody 것. 선택을 따르고 In-Work Object는 무시한다
+```
+
+**모서리·면의 소유 body를 모델에서 읽을 수 있다.** `Reference.Parent`가 그 참조를 만든 feature이고,
+거기서 `Parent`를 따라 올라가면 `Body`가 나온다.
+
+```text
+솔리드 모서리      Reference.Parent -> Pad:MAIN_PAD -> Shapes -> Body:PartBody -> Bodies
+스케치 wire 모서리  Reference.Parent -> Sketch:TOOL_SKETCH -> Pad:TOOL_PAD -> Shapes -> Body:TOOL_BODY
+```
+
+body의 모서리에는 그 body가 소비한 **스케치의 wire 모서리도 섞여 있다.** fillet은 솔리드 모서리만
+받으므로 `owner_feature_name`으로 골라야 한다(라이브에서 wire 모서리에 fillet을 걸었더니
+`AddNewEdgeFilletWithConstantRadius`가 실패했다).
+
+이 사실로 `part.topology.edges(body=...)`/`faces(body=...)`와 `Edge`/`Face`의 `owner_body`,
+`owner_body_name`, `owner_feature_name`, 그리고 `CrossBodyReferenceError` 가드를 만들었다. 소유
+정보는 스냅샷을 찍을 때마다 모델에서 다시 읽으므로 새 프로세스에서도 그대로 동작한다. Python에
+저장해 두는 것은 없다.
+
+**비어 있는 답은 거부하지 않는다.** CATIA가 소유 body를 알려주지 않으면(`owner_body is None`)
+가드는 통과시킨다. 없는 답을 근거로 막으면 정상 호출이 깨지기 때문이다. 이것이 이 가드의 유일한
+구멍이다.
+
+**non-main body는 따로 재빌드해야 한다.**
+
+```text
+work_in에서 ToolBody에 pad 생성 직후
+  IsUpToDate(Part) False / IsUpToDate(MainBody) True / IsUpToDate(ToolBody) False
+  measure(ToolBody) -> GetArea E_FAIL (AutomationError)
+Part.UpdateObject(ToolBody)  -> ToolBody만 up to date, MainBody는 그대로 False,
+                                In-Work Object도 그대로
+measure(ToolBody) -> 4800 mm3 (20x20x12)
+Part.Update()                -> 전체. 이 세션에서는 ToolBody도 함께 up to date가 됐다
+```
+
+`Part.Update()`가 non-main body를 재빌드하지 못한 사례가 보고됐지만 이 Part에서는 재현되지
+않았다. 어느 쪽이든 body 하나만 확실히 재빌드하는 경로가 필요하므로 `body.update()`와
+`part.update(body)`(둘 다 `Part.UpdateObject`)를 만들었다. 측정 전에는
+`Part.IsUpToDate(body)`를 먼저 보고 `TargetNotUpToDateError`로 거부한다. 측정은 읽기 전용이므로
+스스로 재빌드하지 않는다.
+
+**EnumParam에는 `Value`가 없다.**
+
+```text
+EnumParam (Coincidence.1\Mode, Parallelism.1\Mode 등 스케치 제약이 만든다)
+  .Value          -> AttributeError
+  .ValueAsString()-> 'CstAttr_Mode_Constrained'   (property가 아니라 메서드)
+  .ValueAsInt / .EnumeratedValues / .ValuationType -> 없음
+  public 멤버: Application, Comment, Context, GetItem, Hidden, IsTrueParameter, Name,
+               OptionalRelation, Parent, ReadOnly, Rename, Renamed, UserAccessMode,
+               ValuateFromString, ValueAsString, ValueEnum
+```
+
+제약이 하나라도 있는 Part는 이런 파라미터를 갖게 되므로 `Parameter.value`는 `Value`가 없으면
+`ValueAsString()`을 읽는다. 쓰기(`ValuateFromString`)는 검증하지 않았으므로 `set()`은 여전히
+거부한다.
+
+**새로 만든 평면은 재빌드 전에는 스케치 support로 못 쓴다.** 이건 알려진 현상이었고, 이번에
+**상태를 미리 읽을 수 있다**는 것을 확인했다.
+
+```text
+planes.create_offset(...) 직후
+  IsUpToDate(Part) False / IsUpToDate(plane) False
+  sketches.create(support=plane) -> E_FAIL 0x80020009
+part.update() 뒤
+  IsUpToDate(plane) True / sketches.create(support=plane) -> 성공
+```
+
+그래서 `SketchCollection`이 support 평면의 `IsUpToDate`를 먼저 보고 `SupportNotUpdatedError`로
+거부한다. 상태를 읽지 못하면 막지 않고 CATIA에 맡긴다.
+
+**PartUpdateError는 대개 되돌리면 낫는다.**
+
+```text
+pad 30mm + fillet 5mm, update 성공, 부피 47785.398
+pad.set_height(1.0) -> update 실패 (PartUpdateError), IsUpToDate False, fillet은 트리에 그대로
+pad.set_height(30.0) -> update 성공, IsUpToDate True, 부피 47785.398로 복귀, fillet 그대로
+```
+
+즉 **정상이던 값을 바꿔서 실패한 경우는 그 값을 되돌리는 것이 먼저**이고, feature 삭제는 새로
+만든 feature가 애초에 만들어지지 않았거나 되돌릴 값이 없을 때만 한다. 기존 문서·docstring의
+"실패한 feature를 지워야 한다"는 안내를 이에 맞게 고쳤다.
+
+**여전히 남은 한계.** feature 단위 범위 지정은 없다(`Topology.Edge,in,<name>` 등은 probe 35에서
+전부 실패). 모서리 index와 BRep 이름은 재빌드마다 바뀌고 프로세스를 넘겨 저장할 수 없다.
+`_GenerationRegistry`는 프로세스 안에서만 유효하므로, 새 프로세스는 스냅샷을 새로 찍어야 한다.
+
+### 1.11 기존 모델 편집: feature 치수, 스케치 요소 재발견, work_at, 파라미터 의존성 (probe 43, 실측 2026-09-18)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**feature 치수 검증 표.** `dir()`에 보이는 것이 아니라 읽기·쓰기·update·형상 변화·새 wrapper까지
+확인한 것만 공개했다.
+
+| feature | 치수 | Automation 멤버 | 읽기 | 쓰기 | update | 형상 변화 | 새 wrapper | 새 프로세스 | 공개 API |
+|---|---|---|---|---|---|---|---|---|---|
+| Edge Fillet | 반지름 | `Radius` (Length) | O | O 4→8 | O | O 47862.7→47450.6 | O | O | `radius` / `set_radius` / `radius_parameter` |
+| Chamfer | 길이1 | `Length1` (Length) | O | O 2→5 | O | O | - | - | `length1` / `set_length1` |
+| Chamfer | 각도 | `Angle` (Angle) | O | O 45→30 | O | O | - | - | `angle` / `set_angle` |
+| Chamfer | 길이2 | `Length2` (Length) | O | **X** `CATIALength: The method Value failed` | - | - | - | - | 없음 (이 SDK가 만드는 길이/각도 모드에서 쓰기 거부) |
+| Hole | 지름 | `Diameter` (Length) | O | O 10→12 | O | O | - | - | `diameter` / `set_diameter` |
+| Hole | 깊이 | `BottomLimit.Dimension` (Length) | O | O 5→12 | O | O 47303.9→46512.2 | O | O | `depth` / `set_depth` |
+| Shell | 내부 두께 | `InternalThickness` (Length) | O | O 2→4 | O | O | - | - | `internal_thickness` / `set_internal_thickness` |
+| Shell | 외부 두께 | `ExternalThickness` (Length) | O | O 0→1.5 | O | O 11712→21955.5 | - | - | `external_thickness` / `set_external_thickness` |
+| Thickness | 두께 | `Offset` (Length) | O | O 3→6 | O | O 52800→57600 | O | O | `offset` / `set_offset` |
+| Pad / Pocket | 깊이 | `FirstLimit.Dimension` | O | O | O | O | O | O | 이미 있음 (`depth`/`height`) |
+| Shaft / Groove | 각도 | `FirstAngle`/`SecondAngle` | O | O | O | O | O | O | 이미 있음 |
+| Hole | `Depth` | — | **멤버 없음** | - | - | - | - | - | 없음 (깊이는 `BottomLimit`에 있다) |
+| Thickness | `Thickness`/`Value` | — | **멤버 없음** | - | - | - | - | - | 없음 (멤버 이름은 `Offset`) |
+| Chamfer | `Mode`/`Propagation` | int | O | 미시도 | - | - | - | - | 없음 (파라미터가 아니라 정수) |
+| RectPattern | 간격/개수 | 미조사 | - | - | - | - | - | - | 없음 (패턴은 생성·삭제만 검증돼 있다) |
+| MultiSectionSolid | — | 단순 치수 없음 | - | - | - | - | - | - | 없음 |
+
+setter는 `part.update()`를 부르지 않는다. 라이브에서 setter 직후 측정은
+`TargetNotUpToDateError`로 거부됐고(Phase 1 가드), update 뒤에야 부피가 바뀌었다. 즉 "setter가
+몰래 재빌드하지 않는다"가 관측으로 확인된다. 실패한 update는 이전 값을 되돌리고 다시 update하면
+복구된다(1.10과 같은 규칙, fillet 8→4로 부피까지 원복 확인).
+
+**스케치 요소 재발견.**
+
+```text
+Sketch.GeometricElements            -> Count/Item(i) 그리고 Item("Line.1")처럼 이름으로도 조회된다
+  내용                               -> ['AbsoluteAxis'(Axis2D), 'Line.1', 'Line.2', 'Circle.1']
+Item('없는 이름')                     -> com_error (HRESULT 0x80020003)
+Circle2D.Radius                     -> 5.0 (읽기 O)
+Line2D 멤버                          -> Application, Construction, GeometricType, GetItem,
+                                       HorizontalReference, Name, Origin, Parent, ReportName,
+                                       VerticalReference  (좌표 접근자 없음)
+Circle2D.GetCenter()                -> com_error
+edit() 없이 Name 읽기                 -> 동작
+edit() 안에서 AddBiEltCst(재발견 요소) -> 'Parallelism.1' 생성, update 성공
+```
+
+즉 **이름이 스케치 요소의 지속 identity**이고, 인덱스는 아니다. 이 사실로
+`sketch.get_element(name)`/`sketch.elements()`와 `SketchElement.name`/`radius`를 만들었다.
+선 좌표는 이 단계에서 `Line2D`가 노출하지 않는다고 보고 넣지 않았다. **Phase 5에서 정정:**
+`GetEndPoints(seed)`로 읽히며 `SketchElement.geometry()`로 공개했다(1.14). 같은 두 선에 같은
+parallelism을 다시 걸면 CATIA는 중복을 만들지 않고 기존 것을 둔다(프로세스 B에서 개수 1→1).
+
+**feature를 In-Work Object로 두면 그 뒤에 삽입된다.**
+
+```text
+tree before        ['AUTO3DX_P43_PAD', 'AUTO3DX_P43_FILLET']
+IWO before         AUTO3DX_P43_FILLET (마지막으로 만든 feature)
+Part.InWorkObject = PAD    -> IWO inside: AUTO3DX_P43_PAD
+그 상태에서 pad 생성        -> 'AUTO3DX_P43_PAD2', IWO는 새 pad로 이동
+tree after         ['AUTO3DX_P43_PAD', 'AUTO3DX_P43_PAD2', 'AUTO3DX_P43_FILLET']
+update             성공, is_up_to_date True, 부피에 두 pad 모두 반영
+```
+
+즉 **선택한 feature "바로 뒤"에 삽입**되고, 그 뒤의 fillet은 여전히 하류에 남는다. 트리 재정렬이
+아니다(기존 feature는 아무것도 움직이지 않는다). 이 사실로 `part.work_at(feature)`를 만들었다.
+`work_in(body)`는 어느 body에 만들지, `work_at(feature)`는 그 body의 history 어디에 만들지를
+고른다. 둘은 하나의 스택을 공유하고 안쪽 블록이 이긴다.
+
+**파라미터 의존성은 Relations에서 읽는다.**
+
+```text
+Formula 멤버        Activate, Activated, Comment, Context, Deactivate, GetInParameter, GetItem,
+                   GetOutParameter, Hidden, IsConst, Modify, Name, NbInParameters,
+                   NbOutParameters, Parent, Rename, Value
+NbInParameters     1
+GetInParameter(1)  '3D Shape00422558\\AUTO3DX_P43_L'  (정규화된 이름)
+GetInParameter(2)  com_error (마지막 다음)
+Parameter.OptionalRelation  입력 파라미터 -> None / 구동되는 파라미터 -> 'AUTO3DX_P43_FORMULA'
+```
+
+`OptionalRelation`은 그 파라미터를 **구동하는** relation(출력 쪽)만 알려주므로, "이 파라미터를
+읽는 formula"는 각 formula의 입력을 훑어야 한다. 문자열 파싱은 하지 않는다.
+
+**참조 중인 파라미터를 지우면 생기는 일(수정 전 동작).**
+
+```text
+parameters.remove('AUTO3DX_P43_L')  -> 예외 없이 성공
+formula 목록                         -> 그대로 남아 있음
+formula body                        -> 'deleted_AUTO3DX_P43_L * 2'
+is_up_to_date                       -> False
+```
+
+그래서 `parameters.remove`는 먼저 `Relations`를 훑어 그 파라미터를 읽는 formula가 있으면
+`ParameterInUseError`로 거부한다. `parameters.dependents(name)`이 무엇이 막고 있는지 알려주고,
+`force=True`는 위 결과를 감수하겠다는 뜻이다. 지원 경계는 **formula까지**다: rule, check, law,
+program, design table은 검증된 입력 목록이 없어 탐지하지 않는다.
+
+**남은 한계.** Chamfer의 `Length2`는 쓰기 불가, 선 좌표는 읽을 수 없고, RectPattern 치수는
+미조사다. 요소 이름은 지속되지만 topology의 모서리·면 index와 BRep 이름은 여전히 재빌드마다
+바뀐다(1.10).
+
+### 1.12 원형 패턴, boolean, 제약 삭제, feature 억제 (probe 44, 실측 2026-09-19)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**AddNewCircPattern의 실제 시그니처** (타입 라이브러리에서 읽음):
+
+```text
+AddNewCircPattern(iShapeToCopy, iNbOfCopiesInRadialDir, iNbOfCopiesInAngularDir,
+                  iStepInRadialDir, iStepInAngularDir,
+                  iShapeToCopyPositionAlongRadialDir, iShapeToCopyPositionAlongAngularDir,
+                  iRotationCenter, iRotationAxis, iIsReversedRotationAxis,
+                  iRotationAngle, iIsRadiusAligned)      -- 12개
+```
+
+**축 매핑은 회전 중심/축에 넘긴 원점 평면이 정한다.** 지름 120, 두께 10 디스크에 반지름 6
+구멍 하나(한 구멍 = 1130.973 mm3)를 뚫고 6개 60도로 패턴했다.
+
+```text
+PlaneXY / PlaneXY  -> 5654.867 제거 = 정확히 구멍 5개. 즉 Z축 회전 (검증)
+PlaneYZ / PlaneYZ  ->  766.234 제거. Z축이 아니다. 구멍들이 디스크 밖으로 나가 일부만 잘림
+PlaneZX / PlaneZX  -> 1130.973 제거. 역시 Z축이 아니다
+```
+
+디스크 형상으로는 YZ/ZX가 정확히 어느 축인지 확정할 수 없었다. 그래서 Phase 3의 공개 API는
+**Z축만** 받았다. 검증 못 한 매핑을 이름만 그럴듯하게 여는 것보다 없는 편이 안전하다.
+**Phase 5에서 정정:** 무게중심으로 YZ -> X, ZX -> Y를 확정했고, 원통면·직선 모서리 축도
+검증해 공개했다(1.14).
+
+**패턴 파라미터.**
+
+```text
+CircPattern 멤버   ActivatePosition, AngularDirectionRow, AngularRepartition,
+                  CircularPatternParameters, DesactivatePosition, GetRotationAxis,
+                  GetRotationCenter, ItemToCopy, RadialAlignment, RadialDirectionRow,
+                  RadialRepartition, RotationAngle, RotationOrientation,
+                  SetInstanceAngularSpacing, SetRotationAxis, SetRotationCenter, ...
+AngularRepartition 멤버  AngularSpacing, InstanceSpacing, InstancesCount
+RadialRepartition       LinearRepartition 타입 (AngularSpacing 없음, Spacing)
+RotationCenter/RotationAxis 속성  없음 (Get/Set 메서드만 있다)
+
+InstancesCount 6 -> 8, update -> 구멍 7개 분량 제거로 일치
+AngularSpacing 60 -> 45, update -> 반영됨
+MainBody.Shapes에 ('이름', 'CircPattern')으로 남아 새 프로세스에서 이름으로 찾힌다
+패턴을 지워도 원본 pocket은 남는다
+```
+
+**boolean 네 가지 모두 동작한다.** 디스크(111966.362)에 반지름 15 높이 40 원기둥(28274.334,
+겹치는 부피 7068.583)을 tool body로 썼다.
+
+| 연산 | 메서드 | 결과 부피 | 해석 |
+|---|---|---|---|
+| Remove | `AddNewRemove(tool)` | 104897.779 | 겹친 7068.583 제거 |
+| Add | `AddNewAdd(tool)` | 133172.113 | 밖에 있던 21205.751 추가 |
+| Intersect | `AddNewIntersect(tool)` | 7068.583 | 겹친 부분만 남음 |
+| Assemble | `AddNewAssemble(tool)` | 133172.113 | 이 형상에서는 Add와 같음 |
+
+```text
+인자                 tool body 하나뿐 (AddNewRemove(iBodyToRemove))
+대상                 In-Work Object인 body. work_in(target)으로 고른다
+생성 후 tool body    InBooleanOperation True, 그리고 Part.Bodies에서 사라진다
+feature 멤버         Application, Body, GetItem, Name, Parent, SetOperatedObject,
+                    SetOperatingVolume   (AffectedBody/ToolBody 같은 건 없다)
+result.Body.Name    소비된 tool body 이름 -> 새 프로세스에서도 읽힌다
+```
+
+**boolean 삭제는 소비된 body까지 지운다.** feature를 지우면 대상 body의 부피는 원래대로
+돌아오지만 tool body는 **돌아오지 않는다**(`Bodies`에도 없고 이름으로도 못 찾는다). 되돌릴
+방법이 확인되지 않았으므로 `remove_boolean(name, delete_consumed_body=True)`로 명시하게 했다.
+
+**제약 삭제.** `Constraints.Remove(iIndex)`는 **인덱스**를 받는다(이름이 아니다). 살아 있는
+스케치에서 두 경로 모두 성공했다.
+
+```text
+스케치 닫힌 채 Remove(1)            -> count 3->2, broken 0, update 성공
+OpenEdition + Remove(1) + CloseEdition -> count 2->1, broken 0, update 성공
+Constraints.Item("이름")            -> 동작 (조회는 이름으로 된다)
+Constraint 객체끼리 COM 동일성 비교   -> 실패. 인덱스는 이름으로 찾아야 한다
+```
+
+SDK는 edition 경로를 쓴다. 제약 생성이 이미 그 경로이고, solver를 열어둔 채 두는 것이 스케치를
+깨뜨리는 원인이기 때문이다. 이미 `with sketch.edit()` 안이면 열린 세션을 재사용한다(중첩
+`OpenEdition`은 미검증).
+
+**feature 억제는 Activity 파라미터로 한다.**
+
+```text
+feature.Activity            -> 멤버 없음
+feature.GetItem("Activity") -> com_error
+Part.Parameters.Item("<Part>\\<Body>\\<Feature>\\Activity") -> BoolParam   <- 이 경로
+Parameters 전체를 "\\<Feature>\\Activity"로 훑어도 정확히 하나 나온다 (대비 경로)
+feature.Parent 체인          Shapes -> Body -> Bodies -> Part(Parameters 보유)
+```
+
+```text
+fillet Activity True -> False, update  -> 부피 111931.591 -> 111966.362 (필렛 효과 사라짐)
+                                          feature는 트리에 그대로
+False -> True, update                  -> 111931.591로 정확히 복귀
+Activity를 쓰면 즉시 is_up_to_date False (update 전)
+```
+
+**상류 feature를 억제하면 하류가 깨진다.** pad를 억제하고 update하면 `Part.Update()`가
+**실패**하고(PartUpdateError) Part는 not-up-to-date가 된다. 하류 fillet은 트리에 남고 Activity도
+True 그대로이며, 측정은 Phase 1 가드에 걸린다. pad Activity를 되돌리고 update하면 완전히
+복구된다. 즉 1.10의 "먼저 되돌려라" 규칙이 억제에도 그대로 적용된다. 의존성을 미리 판단해
+주지는 않는다.
+
+**공개 세션 API.** acceptance 스크립트에서 raw COM을 없애기 위해 `catia.active_window_title`
+하나만 열었다(읽기 전용). 창 조작은 하지 않는다.
+
+**남은 한계.** 원형 패턴의 X/Y축과 반경 방향 행, `RotationAngle`/`RotationOrientation`,
+`ActivatePosition`으로 개별 인스턴스를 끄는 것, boolean으로 소비된 body를 되살리는 것,
+rect 패턴의 치수 편집은 모두 미검증이다.
+
+### 1.13 기하 사실 측정, 방향, 평면 편집, update 진단 (probe 45, 실측 2026-09-20~21)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 기준 상태로 복원했다.
+
+**측정 경로는 `MeasurableService`다.**
+
+```text
+Editor.GetService("MeasurableService").GetMeasurable(reference, CATMeasurableType)
+  -> win32com.client.CastTo(item, "MeasurablePlane" | "MeasurableCylinder" | ...)
+CATMeasurableType  Circle=2 Cone=3 Curve=4 Cylinder=5 Line=6 Plane=7 Sphere=9 Surface=10
+                   (probe 31이 넘긴 1은 틀린 값이었다)
+MeasureService.GetMeasureItem의 분류 값  -> 모든 요소에 unknown(5/5/7). 쓰지 않는다
+측정은 모델을 바꾸지 않는다 (generation 불변, update 상태 불변)
+```
+
+**단위가 섞여 있다.**
+
+| getter | 단위 | SDK 변환 |
+|---|---|---|
+| `GetArea` | **m²** | ×1e6 → `area_mm2` |
+| `GetCOfG`, `GetPerimeter`, `GetRadius`, `GetLength`, `GetPoints`, `GetPlane` | mm | 그대로 |
+| `GetAngle` (원) | deg | 그대로 |
+
+**Cast는 실패하지 않는다. 분류는 "어느 typed getter가 답하느냐"로 한다.**
+
+```text
+면  MeasurablePlane.GetPlane([0.0]*9) 성공 -> 평면 (origin, u, v)
+    Cylinder.GetRadius 성공 + Cone.GetAngle 실패 + Sphere.GetCenter 실패 -> 원통
+    Sphere.GetRadius는 원통에서도 성공한다 -> 판별에 쓰지 않는다
+    그 밖 -> "unknown"
+모서리  MeasurableCurve.GetPoints(seed, seed, seed) -> (start, mid, end), 모든 모서리에서 성공
+    Circle.GetRadius/GetCenter/GetAngle 성공 -> 원 (angle 360) 또는 호
+        필렛 호 r=3 angle 90, 구멍 테두리 r=5 angle 360
+    Circle 실패 + |end-start| = length + mid가 정확히 중점 -> 직선
+    Line getter는 원에서도 답하지만 값이 쓰레기다 -> 판별에 쓰지 않는다
+    그 밖 -> "unknown"
+```
+
+**평면 법선(u×v)의 부호는 바깥 방향이 아니다.** 블록의 윗면과 아랫면이 **둘 다 +Z**였다.
+옆면은 우연히 바깥이었다. 그래서 SDK는 법선을 축으로만 쓰고(`normal_parallel`은 부호 무관),
+"윗면"은 `extreme((0, 0, 1))`처럼 중심 위치로 고른다.
+
+**owner는 provenance가 아니다.** 필렛 뒤에는 필렛이 건드리지 않은 모서리까지 솔리드 모서리 전부의
+`Reference.Parent`가 FILLET이었다. 마지막으로 결과를 만든 feature다.
+
+**Parent 체인은 세션에 따라 body에 닿지 않는다.** 2026-09-21 3DEXPERIENCE 재시작 뒤, pad가
+소비한 스케치의 wire edge에서 `Parent`를 따라가니 `Sketch -> AnyObject:CATIABase1481 ->
+AnyObject:CATIABase1482 -> ...`로 Body가 나오지 않았다(probe 42에서는 `Sketch -> Pad -> Shapes ->
+Body`). 솔리드 모서리는 여전히 Body에 닿았다. 그래서 체인이 실패하면 Part의 모든 body의
+`Shapes`/`Sketches`에서 그 feature 이름을 찾아, **정확히 한 body**에만 있을 때 그 body로 본다
+(`_topology_search.BodyIndex`). 둘 이상이면 모른다(None)로 둔다.
+
+**Pad/Pocket 방향은 `DirectionOrientation`이다.**
+
+```text
+0 = 스케치 법선 방향(along), 1 = 반대(against). Pad와 Pocket 모두 같은 의미
+CATIA 기본값    Pad 0, Pocket 1
+블록 아래 XY 스케치의 기본 pocket   -> 제거 0 mm3, update 성공  (zero-effect pocket)
+같은 pocket을 0으로                 -> 제거 502.655 mm3 = 기대값 정확히 일치
+Pad를 1로                           -> 무게중심 z가 -방향으로 이동
+```
+
+**평면 편집.**
+
+```text
+HybridShapePlaneOffset.Offset.Value 40 -> 55, update -> 스케치와 pad가 따라 이동, 새 wrapper가 55를 읽음
+HybridShapePlaneAngle.Angle.Value 30 -> 45, update   -> 스케치 frame 회전
+편집 전후 모두 sketch frame == plane frame
+Sketch에는 support 멤버가 없다 -> 의존 스케치는 frame 비교로 찾는다
+사용 중인 평면 삭제 -> 성공하지만 스케치와 pad가 고아가 되고 다음 update가 실패한다
+```
+
+**update 진단.**
+
+```text
+Part.IsUpToDate(feature), Part.IsInactive(feature)  -> 둘 다 동작
+base pad 억제: pad IsUpToDate True, IsInactive True / 하류 fillet IsUpToDate False
+fillet 반지름 500: fillet만 표시된다
+acceptance, boss 높이 1: RIM_FILLET과 SLOT이 표시되고 boss는 표시되지 않았다
+-> "up to date 아님"은 증상이지 원인이 아니다
+```
+
+**그 밖.**
+
+```text
+Sketch.rectangle()           -> 선 4개, 제약 0개 (구속 헬퍼는 다음 단계)
+원형 패턴 씨앗 pocket 삭제   -> 그 스케치는 함께 지워지지 않는다. 스케치를 따로 지워야 한다
+```
+
+**성능** (18면 + 41모서리 = 59요소, 원형 패턴 12개가 있는 판):
+
+```text
+faces + edges 스냅샷      1.024 s
+59요소 전부 측정          0.588 s (요소당 약 10 ms)
+측정된 스냅샷에서 쿼리 2개  1.1 ms
+새 edge 스냅샷 + 측정 쿼리  0.873 s
+```
+
+### 1.14 Phase 5: 스케치 읽기, 면 위 스케치, Hole 위치·한계, 패턴 축 (probe 46 계열, 실측 2026-09-27)
+
+모든 실행은 빈 테스트 Part `3D Shape00422558`에서만 했고, 매번 빈 기준 상태로 복원해 다시 확인했다.
+
+**단일 probe가 CATIA를 멈추게 했다.** 처음의 probe 46은 한 번에 스케치 요소를 만들고, 열린 편집
+안에서 `GetEndPoints`/`GetOrigin`/`GetDirection`/`CenterPoint.GetCoordinates`/`GetParamExtents`
+등을 읽고, 사각형에 제약 여러 개를 걸었다. 그 단계에서 3DEXPERIENCE가 CPU 한 코어를 쓴 채 응답
+없음이 됐고 출력이 버퍼링돼 호출을 특정하지 못했다(사용자가 재시작, 대상 Part에는 남은 것이
+없었다). 이후로는 질문 하나당 micro-probe 하나(`scripts/probes/46*.py`, 공통 틀 `_micro.py`):
+대상·빈 기준 확인, 모든 Automation 호출 앞뒤에 flush된 BEFORE/AFTER 마커, `python -u`, 정리 뒤
+기준 재확인. 29개 모두 멈추지 않았다. **타입 라이브러리에 있다는 것은 런타임에 안전하다는 뜻이
+아니다.**
+
+**스케치 읽기 (편집을 닫은 뒤)**
+
+```text
+Line2D.GetEndPoints([0]*4)        -> (10, 5, 40.00000000000001, 25.000000000000007)   46a
+Circle2D.GetCenter([0]*2)         -> (20, 15)   probe 43은 seed 없이 불러 실패했다     46b
+Circle2D.Radius                   -> 4.0
+호 CreateCircle(-20,-10,6,0,pi/2) -> GetEndPoints (-14,-10,-20,-4): 매개변수는 radian   46c
+닫힌 원 GetEndPoints              -> 시작 == 끝 (2e-15 차이). 호는 다르다               46ab
+Point2D.GetCoordinates([0]*2)     -> (-5, 7.5)                                          46g
+Construction 읽기                 -> False / True                                       46f
+Constraint.Mode                   -> 0 (driving), Status 0, Type 5, Dimension.Value 30  46d
+GetConstraintElement(1)           -> Reference, DisplayName 'Line.1'                    46e
+GetConstraintElement(1)/(2)       -> 수직 제약의 'Line.1', 'Line.2'                      46ac
+GeometricElements.Item(name)      -> 새 attach에서도 같은 값. 첫 요소는 AbsoluteAxis(Axis2D) 46h
+열린 편집 안에서의 읽기           -> 일부러 반복하지 않았다. 멈춤의 용의자 (UNKNOWN)
+```
+
+SDK는 편집이 열린 동안의 geometry 읽기를 COM 전에 `ValidationError`로 거부한다.
+
+**평면 면 위 스케치**
+
+```text
+Sketches.Add(<윗면 Reference>)      -> Sketch, frame (0,0,20 | X | Y), update 성공         46i
+아랫면                             -> (0,0,0 | X | -Y), 법선 -Z = 재료 바깥                46j
++X 옆면                            -> (30,-20,0 | Y | Z), 법선 +X = 재료 바깥. 원점은 면 중심이 아니다
+포켓 바닥(오목한 면)               -> (0,0,16 | X | Y), 법선 +Z = 재료 바깥               46aa
+윗면 스케치 로컬 (10,5) 원 + pocket 기본 방향(DirectionOrientation 1)
+                                   -> 정확히 113.097 mm3 제거, 보어 중심 (10,5,18)          46k
+pad 높이 20 -> 30, update          -> 스케치 원점 z 30, pocket이 면을 따라감               46l
+원통면 위 스케치                   -> 시도하지 않음. SDK가 평면이 아닌 면을 COM 전에 거부
+```
+
+그래서 SDK가 면 위에 만든 스케치에 한해 "into_material" = 법선 반대, "out_of_material" = 법선 방향으로
+답한다. 다시 찾은 스케치는 support를 읽을 멤버가 없어 이 판단을 하지 않는다.
+
+**Hole**
+
+```text
+AddNewHoleFromPoint(10,5,20, 윗면, 8) -> GetOrigin (10,5,20) update 전후 동일, 보어 중심 (10,5,16)  46m
+기본값                              -> Diameter 12, LimitMode 0, BottomType 1(V), BottomAngle 120
+BottomLimit.LimitMode = 2           -> 20 mm 관통 정확히. CATIA가 깊이 치수를 8 -> 20으로 다시 씀   46n
+  다시 0                            -> 깊이는 20 그대로. blind로 돌아갈 때 깊이를 다시 줘야 한다
+BottomType = 0                      -> 평평한 바닥, 정확한 원통 부피                              46o
+새 Hole (아무것도 안 씀)            -> 직전 Hole의 BottomType 0을 물려받음                          46q
+  BottomAngle (평평할 때)           -> E_FAIL
+BottomType = 1                      -> V, 120, 46m과 같은 부피                                    46r
+Diameter/BottomType/LimitMode를 첫 update 전에 모두 씀 -> 정확한 관통 부피                          46s
++X 옆면 Hole GetDirection           -> (-1,0,0): 재료 안쪽                                        46p
+Reverse/SetOrigin/SetDirection/나사/카운터보어 -> 호출하지 않음 (TYPELIB_ONLY)
+```
+
+**Hole 설정은 세션 상태로 이어진다.** Phase 5 live 스테이지가 관통 Hole을 만든 뒤, 기존 Phase 2 테스트의
+`create_hole(name, face, 5.0)`이 관통 Hole(깊이 30)이 되어 실패했다. LimitMode도 BottomType처럼 이어진다.
+그래서 `create_hole`은 이제 limit을 항상 명시적으로 쓴다(깊이가 있으면 blind). 지름과 바닥은 넘긴 경우에만
+쓴다. 상위 API는 모두 쓴다. `scripts/probes/46af_restore_hole_session_defaults.py`가 세션 기본값을
+(12, V, blind)로 되돌리고 새 Hole로 확인한다.
+
+**원형 패턴**
+
+```text
+큐브(중심 (25,0,5)) 4 x 90도
+  PlaneYZ를 중심·축으로  -> COG (25,0,0): X축                                           46t
+  PlaneZX                -> COG (0,0,0):  Y축
+  PlaneXY                -> COG (0,0,5):  Z축
+원통면 Reference (허브 r5, (50,40)) -> 부피 4785.398, COG (50,40,5): 허브 축              46u
+직선 모서리 Reference ((30,5) 수직) -> 부피 4000, COG (30,5,5): 모서리 축                 46v
+CircularPatternParameters = 1 (complete crown) -> 기록·읽기는 되지만 형상은 10도 간격 그대로 46w
+  기본값 읽기                     -> E_FAIL
+iIsReversedRotationAxis False/True (Z축) -> 복사본이 -Y / +Y: +Z에서 볼 때 시계 / 반시계   46x
+Hole을 씨앗으로 6개, 360도 (live stage 10) -> 정확히 6개 분량, instances=4로 바꾸면 4개 분량
+```
+
+**인접 관계는 검증된 경로가 없다.**
+
+```text
+면 하나 선택 + Search("Topology.Edge,sel")           -> 0개                                 46y
+MeasurableBetween.DistanceMinToPoint(x,y,z [, seeds]) -> "Invalid number of parameters"      46z, 46z2
+```
+
+대신 `EdgeQuery.on_plane_of(face)`는 측정된 시작·중간·끝점이 그 면의 평면 위에 있는 모서리를 남긴다.
+평면 사실이지 인접이 아니다.
+
+**사각형 제약**
+
+```text
+H(아래), H(위), V(오른쪽), V(왼쪽)          -> 4개 모두 Parallelism(8), 상태 0, update 성공  46ad
++ 길이(아래)=12, 길이(왼쪽)=8               -> 6개, 상태 0, update 성공                   46ae
+```
+
+모서리 일치 구속(점 제약)은 근거가 없어 "완전 구속" 옵션은 두지 않았다.
+
+**기타.** 허브 면을 패턴 축으로 쓴 pad를 지웠더니 그 스케치가 **연쇄 삭제되지 않았다**(46u 정리 중
+발견). probe 정리는 이제 접두어로 남은 것을 쓸어낸다(`_micro.sweep`). `inspect.facts("volume",
+"up_to_date", ...)`는 live에서 0.038 s였다(`summary()`는 1-3.5 s).
 
 ## 2. 코드 스타일
 

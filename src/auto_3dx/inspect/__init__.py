@@ -6,6 +6,7 @@ Reached as `part.inspect`. Results are frozen dataclasses; text rendering sits o
 
 from auto_3dx.inspect.summary import (
     SUPPORTED_FEATURE_KINDS,
+    UpdateIssue,
     BodyInfo,
     FeatureInfo,
     GeometricalSetInfo,
@@ -18,6 +19,7 @@ from auto_3dx.inspect.summary import (
 
 __all__ = [
     "SUPPORTED_FEATURE_KINDS",
+    "UpdateIssue",
     "BodyInfo",
     "FeatureInfo",
     "GeometricalSetInfo",

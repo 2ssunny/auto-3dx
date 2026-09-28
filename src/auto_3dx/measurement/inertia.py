@@ -56,7 +56,12 @@ from typing import Any
 import pywintypes
 
 from auto_3dx._com import automation_error
-from auto_3dx.errors import AutomationError, ValidationError
+from auto_3dx.errors import (
+    Auto3dxError,
+    AutomationError,
+    TargetNotUpToDateError,
+    ValidationError,
+)
 
 INERTIA_SERVICE_NAME: str = "InertiaService"
 """The `iService` string `Editor.GetService` accepts for volume/area/mass/COG.
@@ -123,6 +128,7 @@ class SolidMeasurement:
         self,
         editor_com_object: Any,
         default_target: Callable[[], Any] | None = None,
+        up_to_date: Callable[[Any], bool] | None = None,
     ) -> None:
         """Stores the raw Editor COM object without contacting it yet.
 
@@ -135,9 +141,14 @@ class SolidMeasurement:
                 body, so ordinary use never has to reach for a raw COM object
                 (`docs/api-design.md` section 9). It is called at measurement
                 time rather than here, so each call reads the body afresh.
+            up_to_date: Reports whether CATIA has rebuilt a raw item. `Part.measurement`
+                supplies `Part.IsUpToDate`, so measuring a body whose features have not
+                been rebuilt is refused with a clear error instead of failing inside
+                CATIA's inertia service. Without it, no such check is made.
         """
         self._editor_com_object = editor_com_object
         self._default_target = default_target
+        self._up_to_date = up_to_date
         self._inertia_service: Any = None
 
     @property
@@ -221,11 +232,18 @@ class SolidMeasurement:
             millimetre-based units.
 
         Raises:
+            TargetNotUpToDateError: `item` has not been rebuilt since it last changed.
+                Nothing was measured and nothing was rebuilt: measurement never changes
+                the model. Call `part.update()`, or `body.update()` for one body, first.
             Auto3dxError: The underlying COM call failed unexpectedly (for
                 example, `item` is not something the service can measure).
         """
         if item is None:
             item = self._read_default_target()
+        else:
+            # An SDK wrapper such as `Body` is measured through its COM object.
+            item = getattr(item, "com_object", item)
+        self._require_up_to_date(item)
         service = self._inertia_service_com_object()
         try:
             inertia = service.GetInertiaElement(item)
@@ -253,6 +271,43 @@ class SolidMeasurement:
                 y_m * METRES_TO_MILLIMETRES,
                 z_m * METRES_TO_MILLIMETRES,
             ),
+        )
+
+    def _require_up_to_date(self, item: Any) -> None:
+        """Refuses to measure something CATIA has not rebuilt.
+
+        A body whose pad has never been rebuilt is accepted by `GetInertiaElement` and
+        then fails at `GetArea`/`GetVolume` with a bare `E_FAIL` (probe 42, live), which
+        tells a caller nothing. `Part.IsUpToDate(item)` reports that state before any of
+        it happens.
+
+        Measurement stays read-only: this never rebuilds anything, it only refuses.
+
+        Args:
+            item: The raw item about to be measured.
+
+        Raises:
+            TargetNotUpToDateError: If CATIA reports the item as not up to date.
+        """
+        if self._up_to_date is None:
+            return
+        try:
+            current = self._up_to_date(item)
+        except Auto3dxError:
+            # The status could not be read; let the measurement itself decide, rather
+            # than refusing a measurement that might well work.
+            return
+        if current:
+            return
+        try:
+            name = str(item.Name)
+        except (pywintypes.com_error, AttributeError):
+            name = "this item"
+        raise TargetNotUpToDateError(
+            f"{name} has not been rebuilt since it last changed, so CATIA has no valid "
+            "solid to measure and the inertia service would fail with an opaque COM "
+            "error. Nothing was measured or changed. Call part.update(), or "
+            "body.update() to rebuild just that body, and measure again."
         )
 
     def __repr__(self) -> str:

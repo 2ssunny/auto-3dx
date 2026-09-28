@@ -12,7 +12,8 @@ Every field here comes from a read already backed by live evidence:
   by `ParameterCollection.user_parameters()`;
 * sketch names through `Body.Sketches`, verified live;
 * features through `Body.Shapes` enumeration and each item's `Name` and
-  `type(item).__name__`, live-verified for all thirteen kinds the SDK creates;
+  `type(item).__name__`, live-verified for every kind the SDK creates, including the
+  Multi-sections Solid's `Loft` (probe 40);
 * bodies through `Part.Bodies` `Count`/`Item`/`Name`, with the main body recognised by
   COM identity (`Bodies.Item(1) == MainBody`, probe 38);
 * geometrical sets through `Part.HybridBodies`, each set's `HybridShapes` items with
@@ -39,13 +40,16 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import pywintypes
 
 from auto_3dx._com import automation_error
-from auto_3dx.errors import ValidationError
+from auto_3dx.errors import InactivePartError, ValidationError
 from auto_3dx.geometry.part_design import (
+    BOOLEAN_KINDS,
     CHAMFER_KIND,
+    CIRCULAR_PATTERN_KIND,
     EDGE_FILLET_KIND,
     GROOVE_KIND,
     HOLE_KIND,
     MIRROR_KIND,
+    MULTI_SECTION_SOLID_KIND,
     PAD_KIND,
     POCKET_KIND,
     RECTANGULAR_PATTERN_KIND,
@@ -59,6 +63,7 @@ from auto_3dx.parameters.parameter import ParameterInfo
 
 if TYPE_CHECKING:
     from auto_3dx.core.part import Part
+    from auto_3dx.highlevel.facts import PartFacts
 
 _T = TypeVar("_T")
 _FIRST_COM_INDEX = 1
@@ -72,15 +77,25 @@ SUPPORTED_FEATURE_KINDS: frozenset[str] = frozenset(
         MIRROR_KIND,
         RIB_KIND,
         SLOT_KIND,
+        MULTI_SECTION_SOLID_KIND,
         RECTANGULAR_PATTERN_KIND,
         EDGE_FILLET_KIND,
         CHAMFER_KIND,
         SHELL_KIND,
         THICKNESS_KIND,
         HOLE_KIND,
+        CIRCULAR_PATTERN_KIND,
+        *BOOLEAN_KINDS,
     }
 )
-"""The feature kinds `part.part_design` can create, list and remove."""
+"""The feature kinds `part.part_design` can create, list and remove.
+
+Each entry is the COM wrapper type name CATIA reports for that feature -- the same
+string `part_design` itself filters `Body.Shapes` by -- so a feature is reported as
+supported exactly when the SDK can find it again. Circular patterns and the four
+boolean kinds were missing here after Phase 3 and so were reported as unsupported even
+though `part_design` created them (Discovery Pass 3).
+"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,9 +107,9 @@ class FeatureInfo:
         kind: The CATIA wrapper type name, such as ``"Pad"`` or ``"ConstRadEdgeFillet"``.
             A feature created in the CATIA user interface can be of a kind the SDK
             does not wrap; it is still listed, with its real kind.
-        supported: Whether `part.part_design` can create, list and remove this feature.
-            It works on the main body only, so a feature in any other body is `False`
-            whatever its kind.
+        supported: Whether `part.part_design` can create, list and remove this kind of
+            feature. In a body other than the main one it does so inside
+            `part.work_in(body)`.
     """
 
     name: str
@@ -109,7 +124,7 @@ class BodyInfo:
     Attributes:
         name: The body's name.
         is_main: Whether this is the Part's main body, the one `part.part_design` and
-            `part.sketches` work on.
+            `part.sketches` work on outside a `part.work_in(body)` block.
         features: The body's solid features, in model-tree order.
         sketches: The body's sketch names, in model-tree order.
     """
@@ -184,6 +199,32 @@ class InWorkObjectInfo:
 
 
 @dataclasses.dataclass(frozen=True)
+class UpdateIssue:
+    """One feature that is not up to date, or is suppressed, read from CATIA after the fact.
+
+    These are observations, not a diagnosis. Live (probe 45), suppressing a base pad made
+    `Part.Update()` fail, and the feature reported NOT up to date was the fillet downstream
+    -- the pad itself reported up to date and inactive. So `up_to_date=False` says where
+    CATIA stopped being able to rebuild, and `active=False` points at a common cause; neither
+    says which change broke the model. When the failure followed an invalid dimension, the
+    feature with that dimension was the one reported (a 500 mm fillet radius).
+
+    Attributes:
+        name: The feature's name.
+        kind: The feature's COM wrapper type name, as in `FeatureInfo.kind`.
+        body_name: The body the feature is in.
+        up_to_date: `Part.IsUpToDate(feature)`.
+        active: `not Part.IsInactive(feature)`; `False` when the feature is suppressed.
+    """
+
+    name: str
+    kind: str
+    body_name: str
+    up_to_date: bool
+    active: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class PartSummary:
     """A structured snapshot of what a Part contains.
 
@@ -197,7 +238,7 @@ class PartSummary:
         bodies: Every body, including the main body, in `Part.Bodies` order.
         geometrical_sets: The geometrical sets directly under the Part.
         topology: Edge and face counts, or `None` when this Part has no editor
-            selection to search with.
+            selection to search with or is not the active Part.
         in_work_object: The In-Work Object, or `None` when CATIA reports none.
     """
 
@@ -241,6 +282,7 @@ class PartSummary:
                 f"- {body.name} ({role}{len(body.features)} features, "
                 f"{len(body.sketches)} sketches)"
             )
+            lines.extend(f"  - {feature.name} ({feature.kind})" for feature in body.features)
         lines.append(f"Geometrical sets ({len(self.geometrical_sets)})")
         for geometrical_set in self.geometrical_sets:
             nested = (
@@ -360,7 +402,7 @@ class Inspector:
             AutomationError: If enumerating the shapes or reading a name fails.
         """
         main_body = _read("Part.MainBody", lambda: self._part.com_object.MainBody)
-        return self._features_of(main_body, "MainBody", is_main=True)
+        return self._features_of(main_body, "MainBody")
 
     def sketches(self) -> "tuple[str, ...]":
         """Lists the main body's sketch names, in model-tree order.
@@ -412,7 +454,7 @@ class Inspector:
                 BodyInfo(
                     name=_read(f"{label}.Name", lambda body=body: body.Name),
                     is_main=is_main,
-                    features=self._features_of(body, label, is_main=is_main),
+                    features=self._features_of(body, label),
                     sketches=tuple(
                         _read(f"{label}.Sketches name", lambda sketch=sketch: sketch.Name)
                         for sketch in sketches
@@ -468,7 +510,10 @@ class Inspector:
 
         Returns:
             The counts, or `None` when this Part has no editor selection, as happens
-            for a Part built directly from a raw COM object.
+            for a Part built directly from a raw COM object, or when it is not the
+            active Part: a search through its editor would count the active Part's
+            topology instead (`InactivePartError`), so no number is better than a
+            wrong one.
 
         Raises:
             AutomationError: If the selection cannot be read or a search fails.
@@ -478,8 +523,9 @@ class Inspector:
         """
         try:
             edges = self._part.topology.edges()
-        except ValidationError:
-            # The only refusal before COM is a missing selection: nothing to search with.
+        except (ValidationError, InactivePartError):
+            # Both refusals happen before COM: no selection to search with, or a
+            # selection that would search another Part.
             return None
         faces = self._part.topology.faces()
         return TopologyCounts(edges=len(edges), faces=len(faces))
@@ -510,13 +556,12 @@ class Inspector:
         )
 
     @staticmethod
-    def _features_of(body: Any, label: str, is_main: bool) -> "tuple[FeatureInfo, ...]":
+    def _features_of(body: Any, label: str) -> "tuple[FeatureInfo, ...]":
         """Reads one body's solid features.
 
         Args:
             body: The raw CATIA `Body`.
             label: How to name the body in error messages.
-            is_main: Whether it is the main body, the only one `part_design` handles.
 
         Returns:
             One `FeatureInfo` per item in the body's `Shapes`.
@@ -534,10 +579,76 @@ class Inspector:
                         f"{label}.Shapes.Item({index}).Name", lambda shape=shape: shape.Name
                     ),
                     kind=kind,
-                    supported=is_main and kind in SUPPORTED_FEATURE_KINDS,
+                    supported=kind in SUPPORTED_FEATURE_KINDS,
                 )
             )
         return tuple(features)
+
+    def facts(self, *names: str) -> "PartFacts":
+        """Reads only the named facts: no topology search, no full summary.
+
+        `part.inspect.facts("volume", "up_to_date")` costs one `IsUpToDate` and one inertia
+        measurement. The mass facts share one measurement. See
+        `auto_3dx.highlevel.facts.SUPPORTED_FACTS` for the names and their units.
+
+        Args:
+            *names: Fact names, such as `"volume"`, `"up_to_date"`, `"feature_count"`.
+
+        Returns:
+            A `PartFacts`: `values` for what was read, `unavailable` for what the model's
+            state does not allow (with the reason).
+
+        Raises:
+            UnknownFactError: If a name is not supported. Nothing was read.
+            Auto3dxError: If a read fails for another reason.
+        """
+        from auto_3dx.highlevel.facts import read_facts
+
+        return read_facts(self._part, names)
+
+    def update_issues(self) -> "tuple[UpdateIssue, ...]":
+        """Lists the features CATIA reports as not up to date or suppressed.
+
+        Every feature in every listed body is asked `Part.IsUpToDate` and `Part.IsInactive`
+        (both verified live, probe 45). A healthy model returns an empty tuple. Read-only.
+
+        Bodies consumed by a boolean are not listed in `Part.Bodies`, so their features are
+        not visited.
+
+        Returns:
+            One `UpdateIssue` per feature that is not up to date or is inactive, in body and
+            tree order. See `UpdateIssue` for what these can and cannot tell.
+
+        Raises:
+            AutomationError: If the bodies or their features cannot be read.
+        """
+        raw = self._part.com_object
+        issues: list[UpdateIssue] = []
+        bodies = _read("Part.Bodies", lambda: raw.Bodies)
+        for body in _items(bodies, "Part.Bodies"):
+            body_name = str(_read("Body.Name", lambda body=body: body.Name))
+            shapes = _read("Body.Shapes", lambda body=body: body.Shapes)
+            if shapes is None:
+                continue
+            for shape in _items(shapes, "Body.Shapes"):
+                up_to_date = bool(
+                    _read("Part.IsUpToDate", lambda shape=shape: raw.IsUpToDate(shape))
+                )
+                inactive = bool(
+                    _read("Part.IsInactive", lambda shape=shape: raw.IsInactive(shape))
+                )
+                if up_to_date and not inactive:
+                    continue
+                issues.append(
+                    UpdateIssue(
+                        name=str(_read("feature Name", lambda shape=shape: shape.Name)),
+                        kind=type(shape).__name__,
+                        body_name=body_name,
+                        up_to_date=up_to_date,
+                        active=not inactive,
+                    )
+                )
+        return tuple(issues)
 
     def __repr__(self) -> str:
         """str: Debug representation; does not contact CATIA."""
