@@ -101,6 +101,8 @@ def _hole(feature: Hole) -> "dict[str, Any]":
         "depth": feature.depth,
         "limit": feature.limit,
         "bottom": feature.bottom,
+        "hole_type": feature.hole_type,
+        "head": feature.head,
         "origin": feature.origin,
         "direction": feature.direction,
     }

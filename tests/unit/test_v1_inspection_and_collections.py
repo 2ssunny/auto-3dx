@@ -65,6 +65,7 @@ class Hole:  # noqa: N801
         self.Diameter = _Value(6.0)
         self.BottomLimit = _BottomLimit()
         self.BottomType = 0
+        self.Type = 0
 
     def GetOrigin(self, seed: Any) -> Any:  # noqa: N802
         return (10.0, 5.0, 20.0)
@@ -141,6 +142,8 @@ def test_one_feature_is_read_with_its_verified_dimensions() -> None:
         "depth": 20.0,
         "limit": "through_all",
         "bottom": "flat",
+        "hole_type": "simple",
+        "head": None,
         "origin": (10.0, 5.0, 20.0),
         "direction": (0.0, 0.0, -1.0),
     }

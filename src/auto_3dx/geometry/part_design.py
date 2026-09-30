@@ -68,8 +68,9 @@ the live feature by name (`MultiSectionSolid.section_names`), but guides, spine,
 coupling, closing points, tangency and relimitation are neither set nor read.
 """
 
-import warnings
+import dataclasses
 import math
+import warnings
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -84,6 +85,7 @@ from auto_3dx.errors import (
     CrossBodyReferenceError,
     FeatureConflictError,
     FeatureNotFoundError,
+    HolePlacementMismatchError,
     PartialCreationError,
     ParameterTypeError,
     UnsupportedSupportError,
@@ -324,7 +326,25 @@ CATIA then rewrites the depth dimension to the computed length (8 became 20), so
 back to `HOLE_LIMIT_BLIND` needs an explicit depth.
 """
 
-SUPPORTED_HOLE_LIMITS: "frozenset[str]" = frozenset({HOLE_LIMIT_BLIND, HOLE_LIMIT_THROUGH_ALL})
+HOLE_LIMIT_UP_TO_NEXT: str = "up_to_next"
+"""A hole that stops at the next face it meets: `LimitMode = catUpToNextLimit (1)`.
+
+Live (probe 47f): on a block with a 10 mm plate above a gap, a 6 mm up-to-next hole
+removed exactly the plate (pi * 9 * 10 mm3) where through-all went through both.
+"""
+
+SUPPORTED_HOLE_LIMITS: "frozenset[str]" = frozenset(
+    {HOLE_LIMIT_BLIND, HOLE_LIMIT_UP_TO_NEXT, HOLE_LIMIT_THROUGH_ALL}
+)
+
+HOLE_TYPE_SIMPLE: str = "simple"
+"""A plain cylindrical hole: `Type = catSimpleHole (0)`."""
+
+HOLE_TYPE_COUNTERBORED: str = "counterbored"
+"""A hole with a cylindrical head: `Type = catCounterboredHole (2)` (probe 47h)."""
+
+HOLE_TYPE_COUNTERSUNK: str = "countersunk"
+"""A hole with a conical head: `Type = catCountersunkHole (3)` (probe 47h)."""
 
 HOLE_BOTTOM_FLAT: str = "flat"
 """A flat-bottomed hole: `BottomType = catFlatHoleBottom (0)` (probe 46o, exact volume)."""
@@ -337,7 +357,22 @@ SUPPORTED_HOLE_BOTTOMS: "frozenset[str]" = frozenset({HOLE_BOTTOM_FLAT, HOLE_BOT
 HOLE_ORIGIN_TOLERANCE_MM: float = 1e-3
 """How far off a face's plane a hole origin may lie and still count as on it."""
 
-_LIMIT_MODE_BY_NAME: "dict[str, int]" = {HOLE_LIMIT_BLIND: 0, HOLE_LIMIT_THROUGH_ALL: 2}
+_LIMIT_MODE_BY_NAME: "dict[str, int]" = {
+    HOLE_LIMIT_BLIND: 0,
+    HOLE_LIMIT_UP_TO_NEXT: 1,
+    HOLE_LIMIT_THROUGH_ALL: 2,
+}
+_DEPTHLESS_LIMITS: "frozenset[str]" = frozenset({HOLE_LIMIT_UP_TO_NEXT, HOLE_LIMIT_THROUGH_ALL})
+"""Limits CATIA computes the depth for; they take no depth (probes 46n, 47f)."""
+_TYPE_CODE_BY_NAME: "dict[str, int]" = {
+    HOLE_TYPE_SIMPLE: 0,
+    HOLE_TYPE_COUNTERBORED: 2,
+    HOLE_TYPE_COUNTERSUNK: 3,
+}
+_TYPE_NAME_BY_CODE: "dict[int, str]" = {code: name for name, code in _TYPE_CODE_BY_NAME.items()}
+_COUNTERSUNK_MODE_DEPTH_ANGLE: int = 0
+_STRAIGHT_ANGLE_DEG: float = 180.0
+"""`CounterSunkMode = catCSModeDepthAngle (0)`: the head is given by depth and angle."""
 _LIMIT_NAME_BY_MODE: "dict[int, str]" = {mode: name for name, mode in _LIMIT_MODE_BY_NAME.items()}
 _BOTTOM_TYPE_BY_NAME: "dict[str, int]" = {HOLE_BOTTOM_FLAT: 0, HOLE_BOTTOM_V: 1}
 _BOTTOM_NAME_BY_TYPE: "dict[int, str]" = {code: name for name, code in _BOTTOM_TYPE_BY_NAME.items()}
@@ -1758,15 +1793,48 @@ class Thickness(_NamedFeature):
         self._write_length(("Offset",), offset, unit)
 
 
+@dataclasses.dataclass(frozen=True)
+class Counterbore:
+    """A counterbored hole's head: a wider cylinder at the top of the hole.
+
+    Written as `Type = 2`, `HeadDiameter`, `HeadDepth` (probe 47h: a 6 mm hole 10 deep
+    with a 12 x 4 head removed exactly pi*9*10 + pi*27*4 mm3).
+
+    Attributes:
+        diameter: The head diameter in millimetres; larger than the hole's.
+        depth: The head depth in millimetres.
+    """
+
+    diameter: float
+    depth: float
+
+
+@dataclasses.dataclass(frozen=True)
+class Countersink:
+    """A countersunk hole's head: a cone at the top of the hole, by depth and angle.
+
+    Written as `Type = 3`, `CounterSunkMode = 0` (depth and angle), `HeadDepth`,
+    `HeadAngle` (probe 47h: a 6 mm hole with a 90-degree, 2 mm head removed the expected
+    volume to 0.001 mm3). CATIA keeps a stale head diameter in this mode; it is not used.
+
+    Attributes:
+        depth: The cone's depth in millimetres.
+        angle_deg: The cone's full angle in degrees. Defaults to 90.
+    """
+
+    depth: float
+    angle_deg: float = 90.0
+
+
 class Hole(_NamedFeature):
     """Wraps a raw CATIA `Hole` COM object.
 
     Created by `AddNewHole(face_reference, depth)` from one face `Reference`
     (`geometry.faces.Face`) -- verified on the first face tried with
-    `(face, 5.0)` (probe 37, `docs/conventions.md` section 1.2.2.2). Reduces
-    to `com_object`/`name` only, for the same reason as `Shell`/`Thickness`:
-    there is no verified way to read the source face back, so there is no
-    `ensure_hole` either (`geometry.faces`).
+    `(face, 5.0)` (probe 37, `docs/conventions.md` section 1.2.2.2). Reads and writes
+    its diameter, depth, limit, bottom and head, and reads its origin and direction.
+    There is no verified way to read the source face back, so there is no `ensure_hole`
+    (`geometry.faces`).
     """
 
     @property
@@ -1869,8 +1937,8 @@ class Hole(_NamedFeature):
 
     @property
     def limit(self) -> str:
-        """str: `HOLE_LIMIT_BLIND`, `HOLE_LIMIT_THROUGH_ALL`, or `"other"` for a mode
-        this SDK does not create (read from `BottomLimit.LimitMode`).
+        """str: `HOLE_LIMIT_BLIND`, `HOLE_LIMIT_UP_TO_NEXT`, `HOLE_LIMIT_THROUGH_ALL`, or
+        `"other"` for a mode this SDK does not create (read from `BottomLimit.LimitMode`).
 
         Raises:
             Auto3dxError: If the underlying COM call fails unexpectedly.
@@ -1884,29 +1952,29 @@ class Hole(_NamedFeature):
     def set_limit(
         self, limit: str, depth: "float | None" = None, unit: str = MILLIMETRE
     ) -> None:
-        """Makes the hole blind or through-all. Does not rebuild; call `part.update()`.
+        """Makes the hole blind, up-to-next or through-all. Does not rebuild.
 
-        Going through-all makes CATIA rewrite the depth to the length it computes
-        (probe 46n), so going back to blind requires the depth to be given again.
+        Up-to-next and through-all make CATIA rewrite the depth to the length it computes
+        (probes 46n, 47f), so going back to blind requires the depth to be given again.
 
         Args:
-            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`.
-            depth: The depth for a blind hole; must be omitted for through-all.
+            limit: `HOLE_LIMIT_BLIND`, `HOLE_LIMIT_UP_TO_NEXT` or `HOLE_LIMIT_THROUGH_ALL`.
+            depth: The depth for a blind hole; must be omitted for the other limits.
             unit: The unit `depth` is expressed in. Defaults to `MILLIMETRE`.
 
         Raises:
-            ParameterTypeError: If `limit` is unknown, a blind hole has no depth, or a
-                through-all hole was given one.
+            ParameterTypeError: If `limit` is unknown, a blind hole has no depth, or an
+                up-to-next or through-all hole was given one.
             Auto3dxError: If CATIA refuses the write.
         """
         mode = _validate_hole_limit(limit)
-        if limit == HOLE_LIMIT_THROUGH_ALL and depth is not None:
-            raise ParameterTypeError("A through-all hole takes no depth.")
+        if limit in _DEPTHLESS_LIMITS and depth is not None:
+            raise ParameterTypeError(f"A {limit!r} hole takes no depth; CATIA computes it.")
         if limit == HOLE_LIMIT_BLIND:
             if depth is None:
                 raise ParameterTypeError(
                     "A blind hole needs its depth: CATIA replaced the old one when the hole "
-                    "went through-all."
+                    "stopped being blind."
                 )
             validate_length_unit(unit)
             _validate_positive_length(depth, "depth")
@@ -1949,6 +2017,77 @@ class Hole(_NamedFeature):
             except pywintypes.com_error as error:
                 raise _wrap_com_error(error) from error
 
+    @property
+    def hole_type(self) -> str:
+        """str: `HOLE_TYPE_SIMPLE`, `HOLE_TYPE_COUNTERBORED`, `HOLE_TYPE_COUNTERSUNK`, or
+        `"other"` for a type this SDK does not create (read from `Type`).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            code = int(self._com_object.Type)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return _TYPE_NAME_BY_CODE.get(code, _HOLE_OTHER)
+
+    @property
+    def head(self) -> "Counterbore | Countersink | None":
+        """The hole's head as written: a `Counterbore`, a `Countersink`, or `None` for a
+        simple hole (or a type this SDK does not create).
+
+        Only the members that type uses are read: live (probe 47h) `HeadAngle` fails on a
+        counterbored hole, and a countersunk hole keeps a stale `HeadDiameter`.
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        kind = self.hole_type
+        if kind == HOLE_TYPE_COUNTERBORED:
+            return Counterbore(
+                diameter=self._read_dimension(("HeadDiameter",)),
+                depth=self._read_dimension(("HeadDepth",)),
+            )
+        if kind == HOLE_TYPE_COUNTERSUNK:
+            return Countersink(
+                depth=self._read_dimension(("HeadDepth",)),
+                angle_deg=self._read_dimension(("HeadAngle",)),
+            )
+        return None
+
+    def set_head(self, head: "Counterbore | Countersink | None") -> None:
+        """Makes the hole simple, counterbored or countersunk. Does not rebuild.
+
+        The type is written first, then the head's own dimensions -- the order probe 47h
+        used. `None` makes the hole simple (`Type = 0`).
+
+        Args:
+            head: A `Counterbore`, a `Countersink`, or `None`.
+
+        Raises:
+            ParameterTypeError: If `head` is none of those, or a dimension is not finite
+                and positive (a countersink angle must lie strictly between 0 and 180).
+            Auto3dxError: If CATIA refuses a write.
+        """
+        writes = _head_writes(head)
+        with self._generation.mutation():
+            try:
+                _write_head(self._com_object, writes)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
+    def _set_origin(self, point: "tuple[float, float, float]") -> None:
+        """Moves the hole's positioning point: `SetOrigin(x, y, z)` (probe 47m).
+
+        Internal: only `create_hole` calls it, with a point it has already checked against
+        the hole's own face. Moving an existing hole elsewhere has no face to check against.
+        """
+        with self._generation.mutation():
+            try:
+                self._com_object.SetOrigin(*point)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+
 
 def _validate_hole_limit(limit: Any) -> int:
     """Turns a public hole limit into `LimitMode`, before any COM call."""
@@ -1966,6 +2105,54 @@ def _validate_hole_bottom(bottom: Any) -> int:
             f"bottom must be one of {sorted(SUPPORTED_HOLE_BOTTOMS)}, not {bottom!r}."
         )
     return _BOTTOM_TYPE_BY_NAME[bottom]
+
+
+def _head_writes(head: Any) -> "tuple[int, tuple[tuple[str, float], ...]]":
+    """Validates a hole head before any COM call: `(Type code, ((member, value), ...))`."""
+    if head is None:
+        return (_TYPE_CODE_BY_NAME[HOLE_TYPE_SIMPLE], ())
+    if isinstance(head, Counterbore):
+        diameter = _validate_positive_length(head.diameter, "counterbore diameter")
+        depth = _validate_positive_length(head.depth, "counterbore depth")
+        return (
+            _TYPE_CODE_BY_NAME[HOLE_TYPE_COUNTERBORED],
+            (("HeadDiameter", diameter), ("HeadDepth", depth)),
+        )
+    if isinstance(head, Countersink):
+        depth = _validate_positive_length(head.depth, "countersink depth")
+        angle = validate_angle_value(head.angle_deg)
+        if not math.isfinite(angle) or not 0.0 < angle < _STRAIGHT_ANGLE_DEG:
+            raise ParameterTypeError(
+                f"countersink angle_deg must lie strictly between 0 and 180, not "
+                f"{head.angle_deg!r}."
+            )
+        return (
+            _TYPE_CODE_BY_NAME[HOLE_TYPE_COUNTERSUNK],
+            (("HeadDepth", depth), ("HeadAngle", angle)),
+        )
+    raise ParameterTypeError(
+        f"head must be a Counterbore, a Countersink or None, not {type(head).__name__}."
+    )
+
+
+def _write_head(hole: Any, writes: "tuple[int, tuple[tuple[str, float], ...]]") -> None:
+    """Writes a validated head to a raw hole. Always writes `Type`: CATIA carries it over."""
+    code, dimensions = writes
+    hole.Type = code
+    if code == _TYPE_CODE_BY_NAME[HOLE_TYPE_COUNTERSUNK]:
+        hole.CounterSunkMode = _COUNTERSUNK_MODE_DEPTH_ANGLE
+    for member, value in dimensions:
+        getattr(hole, member).Value = value
+
+
+def _distance(a: "tuple[float, float, float]", b: "tuple[float, float, float]") -> float:
+    """The Euclidean distance between two Part points, in millimetres."""
+    return math.dist(a, b)
+
+
+def _point_text(point: "tuple[float, float, float]") -> str:
+    """Formats a Part point for an error message."""
+    return "(" + ", ".join(f"{value:.3f}" for value in point) + ")"
 
 
 def _validate_point3(value: Any, label: str) -> "tuple[float, float, float]":
@@ -4527,8 +4714,9 @@ class PartDesign:
         diameter: "float | None" = None,
         limit: "str | None" = None,
         bottom: "str | None" = None,
+        head: "Counterbore | Countersink | None" = None,
     ) -> Hole:
-        """Creates a new simple hole into the solid from one face.
+        """Creates a new hole into the solid from one face.
 
         Without `origin` this is exactly the verified `AddNewHole(face_reference, depth)`
         of probe 37, which leaves the position to CATIA. With `origin` it is
@@ -4540,10 +4728,18 @@ class PartDesign:
         rebuild (probe 46s: all three, then one update, removed exactly the expected
         volume). CATIA carries the previous hole's settings over to the next one (probe
         46q: a new hole inherited a flat bottom from the hole before it; live, a hole made
-        with depth 5 after a through-all hole came out through-all). So the limit is
-        ALWAYS written -- blind when a depth is given, through-all when asked -- which keeps
+        with depth 5 after a through-all hole came out through-all; probe 47h: the hole
+        type carries over too). So the limit and the type are ALWAYS written -- blind when
+        a depth is given, simple unless `head` says otherwise -- which keeps
         `create_hole(name, face, depth)` meaning what it says. Diameter and bottom are
         written only when passed: pass every attribute whose value matters.
+
+        **A positioned hole is read back before this returns.** Live (probe 47d), CATIA
+        snapped a hole requested off-centre on a face bounded by one circle to the
+        circle's centre, silently. So after creation the origin is read with `GetOrigin`;
+        when it differs from `origin` by more than `HOLE_ORIGIN_TOLERANCE_MM` it is moved
+        with `SetOrigin` (probe 47m: the correction holds through the rebuild) and read
+        again, and `HolePlacementMismatchError` is raised if it still differs.
 
         A successful call here does not mean the feature is valid
         (`docs/conventions.md` section 1.2.2.1): this method never calls
@@ -4559,16 +4755,19 @@ class PartDesign:
             name: The new hole's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
             face: The `Face` to drill from, from `part.topology.faces()`.
-            depth: The hole's depth, finite and strictly positive. Required unless
-                `limit` is `HOLE_LIMIT_THROUGH_ALL`, which must not be given one.
+            depth: The hole's depth, finite and strictly positive. Required for a blind
+                hole; `HOLE_LIMIT_UP_TO_NEXT` and `HOLE_LIMIT_THROUGH_ALL` must not be
+                given one.
             unit: The unit `depth` and `diameter` are expressed in. Defaults to
                 `MILLIMETRE`.
             origin: Where the hole starts, `(x, y, z)` in Part millimetres. It must lie in
                 the plane of `face`, which must be planar; both are checked by measuring
                 the face before CATIA is called. `None` leaves the position to CATIA.
             diameter: The hole diameter. `None` keeps CATIA's (carried-over) value.
-            limit: `HOLE_LIMIT_BLIND` or `HOLE_LIMIT_THROUGH_ALL`. `None` means blind.
+            limit: `HOLE_LIMIT_BLIND`, `HOLE_LIMIT_UP_TO_NEXT` or
+                `HOLE_LIMIT_THROUGH_ALL`. `None` means blind.
             bottom: `HOLE_BOTTOM_FLAT` or `HOLE_BOTTOM_V`. `None` writes nothing.
+            head: A `Counterbore` or a `Countersink`; `None` makes a simple hole.
 
         Returns:
             The newly created `Hole`, already renamed to `name`.
@@ -4577,8 +4776,8 @@ class PartDesign:
             ParameterNameError: If `name` is not usable as a name.
             ParameterTypeError: If `face` is not a `Face`, `depth` or `diameter` is not
                 finite and positive, `depth` is missing or given where it must not be,
-                `limit`/`bottom` is unknown, or `origin` is not three finite numbers or
-                does not lie on the face's plane.
+                `limit`/`bottom`/`head` is unknown or invalid, or `origin` is not three
+                finite numbers or does not lie on the face's plane.
             UnsupportedSupportError: If `origin` is given and `face` is not planar.
             StaleSnapshotError: If `face` comes from an outdated snapshot.
             CrossBodyReferenceError: If `face` belongs to another body.
@@ -4587,7 +4786,9 @@ class PartDesign:
             AmbiguousNameError: If two or more holes named `name` already
                 exist.
             PartialCreationError: If the hole was created but the follow-up
-                rename failed.
+                rename or configuration failed.
+            HolePlacementMismatchError: If CATIA put a positioned hole elsewhere and
+                moving it did not help. The hole exists under `name`.
             Auto3dxError: If the underlying COM call fails unexpectedly (for
                 example, `face` no longer resolves to a real face).
         """
@@ -4598,21 +4799,25 @@ class PartDesign:
                 f"{type(face).__name__}."
             )
         self._require_current_face(face, "hole")
+        head_writes = _head_writes(head)
         validate_length_unit(unit)
         # A depth always means a blind hole: the limit is written explicitly because CATIA
         # carries the previous hole's limit over (live: after a through-all hole, a new
         # hole made with depth 5 came out through-all, depth 30).
         limit_mode = _validate_hole_limit(HOLE_LIMIT_BLIND if limit is None else limit)
         bottom_type = None if bottom is None else _validate_hole_bottom(bottom)
-        if limit == HOLE_LIMIT_THROUGH_ALL:
+        if limit in _DEPTHLESS_LIMITS:
             if depth is not None:
                 raise ParameterTypeError(
-                    "A through-all hole takes no depth; CATIA computes it from the solid."
+                    f"A {limit!r} hole takes no depth; CATIA computes it from the solid."
                 )
             coerced_depth = _HOLE_NOMINAL_DEPTH
         else:
             if depth is None:
-                raise ParameterTypeError("depth is required unless limit is 'through_all'.")
+                raise ParameterTypeError(
+                    "depth is required for a blind hole (limit 'up_to_next' and "
+                    "'through_all' take none)."
+                )
             coerced_depth = _validate_positive_length(depth, "depth")
         coerced_diameter = (
             None if diameter is None else _validate_positive_length(diameter, "diameter")
@@ -4633,8 +4838,9 @@ class PartDesign:
             if bottom_type is not None:
                 hole.BottomType = bottom_type
             hole.BottomLimit.LimitMode = limit_mode
+            _write_head(hole, head_writes)
 
-        return self._create_feature(
+        created: Hole = self._create_feature(
             name,
             HOLE_KIND,
             factory_method,
@@ -4643,6 +4849,48 @@ class PartDesign:
             "hole",
             configure,
         )
+        if origin is not None:
+            self._settle_hole_origin(created, name, point)
+        return created
+
+    @staticmethod
+    def _settle_hole_origin(
+        hole: Hole, name: str, requested: "tuple[float, float, float]"
+    ) -> None:
+        """Makes a new positioned hole start where it was asked, or raises.
+
+        Reads `GetOrigin`; when it is off, moves the hole with `SetOrigin` once and reads
+        it again (probes 47d, 47m). Never retries further and never deletes the hole.
+
+        Raises:
+            HolePlacementMismatchError: If the origin still differs after the move, or the
+                move itself failed.
+        """
+        actual = hole.origin
+        if _distance(actual, requested) <= HOLE_ORIGIN_TOLERANCE_MM:
+            return
+        try:
+            hole._set_origin(requested)
+            actual = hole.origin
+        except Auto3dxError as error:
+            raise HolePlacementMismatchError(
+                f"CATIA placed hole {name!r} at {_point_text(actual)}, not at "
+                f"{_point_text(requested)}, and moving it failed. The hole is in the model "
+                "under that name, in the wrong place: remove it before continuing.",
+                hole_name=name,
+                requested=requested,
+                actual=actual,
+            ) from error
+        if _distance(actual, requested) > HOLE_ORIGIN_TOLERANCE_MM:
+            raise HolePlacementMismatchError(
+                f"CATIA placed hole {name!r} at {_point_text(actual)}, not at "
+                f"{_point_text(requested)}, and it stayed there after SetOrigin. The hole "
+                "is in the model under that name, in the wrong place: remove it before "
+                "continuing.",
+                hole_name=name,
+                requested=requested,
+                actual=actual,
+            )
 
     @staticmethod
     def _require_point_on_planar_face(

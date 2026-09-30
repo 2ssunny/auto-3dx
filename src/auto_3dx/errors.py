@@ -462,3 +462,44 @@ class PartialCreationError(AutomationError):
     model even though the caller sees an error. Retrying naively would then
     add more geometry on top of the leftover object instead of replacing it.
     """
+
+
+class HolePlacementMismatchError(PartialCreationError):
+    """Raised when CATIA put a positioned hole somewhere other than where it was asked.
+
+    Live (probe 47d), a hole requested at (8, 0, 10) on a disc's top face -- a face bounded
+    by one circle -- was created at the circle's centre, (0, 0, 10), with no error: CATIA
+    snaps the hole's positioning point to the centre of a circular boundary. The SDK reads
+    the origin back after every positioned hole, moves it with `SetOrigin` when it differs
+    (probe 47m: that correction holds through the rebuild), and raises this only when the
+    origin still differs afterwards. It is never raised silently late: the hole is checked
+    before `create_hole` returns.
+
+    The hole exists in the model under the requested name, in the wrong place. Remove it
+    (`part.part_design.remove_hole(name)`) before doing anything else.
+
+    Attributes:
+        hole_name: The name the hole was created under.
+        requested: The origin that was asked for, `(x, y, z)` in Part millimetres.
+        actual: The origin CATIA reports, `(x, y, z)` in Part millimetres.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        hole_name: str = "",
+        requested: "tuple[float, float, float] | None" = None,
+        actual: "tuple[float, float, float] | None" = None,
+    ) -> None:
+        """Initializes the error.
+
+        Args:
+            message: The human-readable description.
+            hole_name: The name the hole was created under.
+            requested: The origin that was asked for.
+            actual: The origin CATIA reports.
+        """
+        super().__init__(message)
+        self.hole_name = hole_name
+        self.requested = requested
+        self.actual = actual

@@ -166,7 +166,13 @@ def test_hole_maps_a_two_number_center_and_writes_every_attribute() -> None:
     assert part.log[1] == (
         "create_hole",
         ("H", top, None, "mm"),
-        {"origin": (20.0, 15.0, 20.0), "diameter": 6.0, "limit": "through_all", "bottom": "flat"},
+        {
+            "origin": (20.0, 15.0, 20.0),
+            "diameter": 6.0,
+            "limit": "through_all",
+            "bottom": "flat",
+            "head": None,
+        },
     )
 
 
