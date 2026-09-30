@@ -194,6 +194,20 @@ def _removed(part: Any) -> float:
     return BLOCK_VOLUME - _volume(part)
 
 
+def _witness(part: Any) -> Any:
+    """A face taken now: it stays usable only while nothing changes the model."""
+    return part.geometry.top_face(body="PartBody")
+
+
+def _still_current(witness: Any) -> bool:
+    """Whether the model is unchanged since `witness` was taken (public API only)."""
+    try:
+        witness.geometry  # noqa: B018 - the generation check runs on every read
+    except StaleSnapshotError:
+        return False
+    return True
+
+
 # --- 1: rectangle -> pad ---------------------------------------------------------------------
 
 
@@ -391,7 +405,7 @@ def test_v09_targeted_inspection_reads_without_changing_anything(part: Any) -> N
         head=Counterbore(10.0, 3.0),
     )
     part.update()
-    before = (part._generation.value, _volume(part))
+    witness, volume = _witness(part), _volume(part)
 
     details = part.inspect.feature(f"{PREFIX}V09_HOLE")
     sketch = part.inspect.sketch(f"{PREFIX}V09_BLOCK_SK")
@@ -401,7 +415,7 @@ def test_v09_targeted_inspection_reads_without_changing_anything(part: Any) -> N
     assert details.parameters["head"] == Counterbore(10.0, 3.0)
     assert details.parameters["origin"] == pytest.approx((5.0, 5.0, HEIGHT))
     assert len(sketch.lines) == 4
-    assert (part._generation.value, _volume(part)) == before
+    assert _still_current(witness) and _volume(part) == volume
     assert part.is_up_to_date()
 
 
@@ -476,7 +490,7 @@ def test_v13_agent_highlights_an_edge_without_changing_the_model(part: Any) -> N
     _block(part, "V13")
     top = part.geometry.top_face(body="PartBody")
     edge = part.geometry.find_edge(parallel="X", adjacent_to=top, nearest=(0.0, -20.0, 20.0))
-    before = (part._generation.value, _volume(part))
+    witness, volume = _witness(part), _volume(part)
 
     mark("V13: highlight the edge")
     part.selection.set(edge)
@@ -485,7 +499,7 @@ def test_v13_agent_highlights_an_edge_without_changing_the_model(part: Any) -> N
     selected = part.selection.one_edge()
     assert selected.geometry.start_mm == pytest.approx(edge.geometry.start_mm)
     assert selected.geometry.end_mm == pytest.approx(edge.geometry.end_mm)
-    assert (part._generation.value, _volume(part)) == before
+    assert _still_current(witness) and _volume(part) == volume
     assert part.is_up_to_date()
     part.selection.clear()
     assert part.selection.count == 0
@@ -518,11 +532,8 @@ def test_v14_reference_plane_from_a_face_carries_a_feature(part: Any) -> None:
 def test_v15_ambiguity_is_an_error_and_changes_nothing(part: Any) -> None:
     _block(part, "V15")
     part.selection.clear()
-    before = (
-        part._generation.value,
-        _volume(part),
-        [f.name for f in part.inspect.features()],
-    )
+    witness = _witness(part)
+    before = (_volume(part), [f.name for f in part.inspect.features()])
 
     with pytest.raises(TopologyQueryAmbiguousError):
         part.geometry.find_edge(kind="line", parallel="X")
@@ -533,10 +544,6 @@ def test_v15_ambiguity_is_an_error_and_changes_nothing(part: Any) -> None:
     with pytest.raises(SelectionCountError):
         part.selection.one_edge()
 
-    after = (
-        part._generation.value,
-        _volume(part),
-        [f.name for f in part.inspect.features()],
-    )
-    assert after == before
+    assert (_volume(part), [f.name for f in part.inspect.features()]) == before
+    assert _still_current(witness)
     assert part.is_up_to_date()

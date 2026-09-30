@@ -579,12 +579,9 @@ class SketchEditor:
             y: The point's Y coordinate, in millimetres.
 
         Returns:
-            A `SketchElement` wrapping the raw `Point2D` COM object. It has
-            no `X`/`Y` properties (verified,
-            `scripts/probes/27_sketch_geometry.py`): read its coordinates
-            back with ``element.com_object.GetCoordinates([0.0, 0.0])``,
-            which returns an `(x, y)` tuple -- the same seed-array-as-output
-            convention already used by `Sketch.GetAbsoluteAxisData` above.
+            A `SketchElement` wrapping the raw `Point2D` COM object. Read its
+            coordinates with `element.geometry()` (a `PointGeometry`) once the
+            `edit()` block has closed.
 
         Raises:
             ParameterTypeError: If `x` or `y` is not an `int`/`float` (or is a `bool`).
@@ -750,10 +747,10 @@ class SketchEditor:
                 by CATIA itself is not established here.
 
         Returns:
-            A `SketchElement` wrapping the raw `Spline2D` COM object.
-            `element.com_object.GetNumberOfControlPoints()` returns a
-            `float`, not an `int` (verified live); `.StartPoint` and
-            `.EndPoint` return `ControlPoint2D` objects.
+            A `SketchElement` wrapping the raw `Spline2D` COM object. Spline
+            geometry has no typed read in this release (`geometry()` raises
+            `UnsupportedOperationError`); its identity, kind and construction flag
+            are readable.
 
         Raises:
             ParameterTypeError: If `points` is not a list of two-item tuples,
