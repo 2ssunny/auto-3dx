@@ -16,11 +16,13 @@ from auto_3dx.inspect.summary import (
     PartSummary,
     TopologyCounts,
 )
+from auto_3dx.inspect.targeted import FeatureDetails
 
 __all__ = [
     "SUPPORTED_FEATURE_KINDS",
     "UpdateIssue",
     "BodyInfo",
+    "FeatureDetails",
     "FeatureInfo",
     "GeometricalSetInfo",
     "GeometryInfo",

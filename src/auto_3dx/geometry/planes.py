@@ -82,7 +82,8 @@ first instead of tracking the returned `Plane` object itself.
 """
 
 import math
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import Any, cast
 
 import pywintypes
 
@@ -960,6 +961,24 @@ class PlaneCollection:
                 "cannot safely pick one."
             )
         return matches[0]
+
+    def __len__(self) -> int:
+        """int: How many planes there are now, read from the live Part."""
+        return len(self.list())
+
+    def __iter__(self) -> "Iterator[Plane]":
+        """Iterates over the planes as `list()` returns them, read from the live Part."""
+        return iter(self.list())
+
+    def __contains__(self, name: object) -> bool:
+        """Whether a plane with that name exists now. A non-string is simply absent.
+
+        Existence is decided by enumeration, like `get`, so two planes sharing the name
+        still count as present.
+        """
+        if not isinstance(name, str):
+            return False
+        return name in cast(Sequence[str], self.names())
 
     def _all_sketches(self) -> "list[Any]":
         """Every sketch in every body of the Part, read from the model."""

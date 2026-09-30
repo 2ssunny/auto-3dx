@@ -251,6 +251,35 @@ class Face:
         """int: The model generation this face's snapshot was taken at."""
         return self._generation
 
+    def describe(self) -> str:
+        """One line of measured facts about this face, for messages, logs and agents.
+
+        Built from `geometry` (measured once, lazily) and the owner read at snapshot time,
+        for example ``"planar face, area 2400.000 mm2, centre (0.000, 0.000, 20.000),
+        normal axis (0.000, 0.000, 1.000), owner 'Pad.1' in body 'PartBody'"``. The owner
+        is CATIA's current owner, not the feature that created the face. It contains no
+        index and no BRep name: neither identifies the face beyond this snapshot.
+
+        Returns:
+            The description.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the face cannot be measured.
+        """
+        facts = self.geometry
+        parts = [
+            f"{facts.surface_type} face",
+            f"area {facts.area_mm2:.3f} mm2",
+            f"centre {_point_text(facts.center_mm)}",
+        ]
+        if facts.normal is not None:
+            parts.append(f"normal axis {_point_text(facts.normal)}")
+        if facts.radius_mm is not None:
+            parts.append(f"radius {facts.radius_mm:.3f} mm")
+        parts.append(_owner_text(self._owner_feature_name, self._owner_body_name))
+        return ", ".join(part for part in parts if part)
+
     def _belongs_to(self, generation: Any) -> bool:
         """Whether this face came from the Part that owns `generation`.
 
@@ -483,3 +512,19 @@ def take_face_snapshot(
             )
         )
     return FaceSnapshot(faces, generation)
+
+
+def _point_text(point: "tuple[float, float, float]") -> str:
+    """Renders a point or direction with three decimals, for descriptions."""
+    return "(" + ", ".join(f"{value:.3f}" for value in point) + ")"
+
+
+def _owner_text(feature: "str | None", body: "str | None") -> str:
+    """Renders what CATIA reported as the owner, or nothing when it reported nothing."""
+    if feature and body:
+        return f"owner {feature!r} in body {body!r}"
+    if feature:
+        return f"owner {feature!r}"
+    if body:
+        return f"in body {body!r}"
+    return ""

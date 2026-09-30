@@ -263,6 +263,31 @@ class Edge:
         """int: The model generation this edge's snapshot was taken at."""
         return self._generation
 
+    def describe(self) -> str:
+        """One line of measured facts about this edge, for messages, logs and agents.
+
+        For example ``"line edge, length 60.000 mm, from (-30.000, 20.000, 20.000) to
+        (30.000, 20.000, 20.000), owner 'Pad.1' in body 'PartBody'"``, or for a circle its
+        radius and centre. The owner is CATIA's current owner, not provenance. It contains
+        no index and no BRep name.
+
+        Returns:
+            The description.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the edge cannot be measured.
+        """
+        facts = self.geometry
+        parts = [f"{facts.curve_type} edge", f"length {facts.length_mm:.3f} mm"]
+        if facts.radius_mm is not None and facts.center_mm is not None:
+            parts.append(f"radius {facts.radius_mm:.3f} mm")
+            parts.append(f"centre {_point_text(facts.center_mm)}")
+        else:
+            parts.append(f"from {_point_text(facts.start_mm)} to {_point_text(facts.end_mm)}")
+        parts.append(_owner_text(self._owner_feature_name, self._owner_body_name))
+        return ", ".join(part for part in parts if part)
+
     def _belongs_to(self, generation: Any) -> bool:
         """Whether this edge came from the Part that owns `generation`.
 
@@ -506,3 +531,19 @@ def take_edge_snapshot(
             )
         )
     return EdgeSnapshot(edges, generation)
+
+
+def _point_text(point: "tuple[float, float, float]") -> str:
+    """Renders a point or direction with three decimals, for descriptions."""
+    return "(" + ", ".join(f"{value:.3f}" for value in point) + ")"
+
+
+def _owner_text(feature: "str | None", body: "str | None") -> str:
+    """Renders what CATIA reported as the owner, or nothing when it reported nothing."""
+    if feature and body:
+        return f"owner {feature!r} in body {body!r}"
+    if feature:
+        return f"owner {feature!r}"
+    if body:
+        return f"in body {body!r}"
+    return ""

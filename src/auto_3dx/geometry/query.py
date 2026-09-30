@@ -281,12 +281,7 @@ class FaceQuery(_Query):
         return element.geometry.center_mm
 
     def _describe(self, element: Any) -> str:
-        geometry = element.geometry
-        return (
-            f"{geometry.surface_type} face area {geometry.area_mm2:.3f} mm2 at "
-            f"({geometry.center_mm[0]:.3f}, {geometry.center_mm[1]:.3f}, "
-            f"{geometry.center_mm[2]:.3f})"
-        )
+        return str(element.describe())
 
     def of_type(self, surface_type: str) -> "FaceQuery":
         """Keeps faces of one surface type (`geometry.facts.SURFACE_*`)."""
@@ -381,13 +376,7 @@ class EdgeQuery(_Query):
         return geometry.mid_mm
 
     def _describe(self, element: Any) -> str:
-        geometry = element.geometry
-        radius = f" radius {geometry.radius_mm:.3f} mm" if geometry.radius_mm else ""
-        where = self._position(element)
-        return (
-            f"{geometry.curve_type} edge length {geometry.length_mm:.3f} mm{radius} at "
-            f"({where[0]:.3f}, {where[1]:.3f}, {where[2]:.3f})"
-        )
+        return str(element.describe())
 
     def of_type(self, curve_type: str) -> "EdgeQuery":
         """Keeps edges of one curve type (`geometry.facts.CURVE_*`)."""

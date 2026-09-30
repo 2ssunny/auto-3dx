@@ -113,7 +113,10 @@ def hole_origin(center: Any, face: Face) -> "tuple[float, float, float]":
 
 
 def pattern_spacing(
-    instances: Any, spacing_deg: "float | None", total_angle_deg: "float | None"
+    instances: Any,
+    spacing_deg: "float | None",
+    total_angle_deg: "float | None",
+    full_circle: bool = False,
 ) -> float:
     """Resolves the angle between neighbouring copies from exactly one of two intents.
 
@@ -125,8 +128,19 @@ def pattern_spacing(
     Raises:
         ParameterTypeError: If neither or both are given, or a value is not usable.
     """
+    if not isinstance(full_circle, bool):
+        raise ParameterTypeError(f"full_circle must be a bool, not {type(full_circle).__name__}.")
+    if full_circle:
+        if spacing_deg is not None or total_angle_deg is not None:
+            raise ParameterTypeError(
+                "full_circle=True already fixes the spacing (360 / instances); do not also "
+                "give spacing_deg or total_angle_deg."
+            )
+        total_angle_deg = FULL_CIRCLE_DEG
     if (spacing_deg is None) == (total_angle_deg is None):
-        raise ParameterTypeError("Give exactly one of spacing_deg and total_angle_deg.")
+        raise ParameterTypeError(
+            "Give exactly one of spacing_deg, total_angle_deg or full_circle=True."
+        )
     if spacing_deg is not None:
         return float(spacing_deg)
     if isinstance(instances, bool) or not isinstance(instances, int) or instances < 2:
@@ -394,6 +408,7 @@ class BodyFeatures(tuple):
         total_angle_deg: "float | None" = None,
         axis: Any = CIRCULAR_PATTERN_AXIS_Z,
         reverse: bool = False,
+        full_circle: bool = False,
     ) -> CircularPattern:
         """Copies a feature of this body around an axis.
 
@@ -403,7 +418,8 @@ class BodyFeatures(tuple):
                 `body.features` call.
             instances: How many copies in total, the original included.
             spacing_deg: The angle between neighbouring copies; or
-            total_angle_deg: the angle the copies spread over (360 for a full circle).
+            total_angle_deg: the angle the copies spread over (360 for a full circle); or
+            full_circle: `True` to spread `instances` copies evenly over 360 degrees.
             axis: `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge`.
             reverse: Turn the other way (documented for Z only).
 
@@ -415,7 +431,7 @@ class BodyFeatures(tuple):
             Auto3dxError: Whatever `part.part_design.create_circular_pattern` raises.
         """
         part = self._require_part()
-        spacing = pattern_spacing(instances, spacing_deg, total_angle_deg)
+        spacing = pattern_spacing(instances, spacing_deg, total_angle_deg, full_circle)
         with part.work_in(self._body):
             return part.part_design.create_circular_pattern(
                 name, feature, instances, spacing, axis, reverse=reverse

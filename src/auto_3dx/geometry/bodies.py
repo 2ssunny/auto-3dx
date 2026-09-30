@@ -26,7 +26,8 @@ silently redirects later modelling; target a body explicitly with `part.work_in(
 """
 
 import warnings
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterator, Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 import pywintypes
 
@@ -438,6 +439,24 @@ class BodyCollection:
             return self._wrap(self._part_com_object.MainBody)
         except pywintypes.com_error as error:
             raise automation_error(error, "reading Part.MainBody") from error
+
+    def __len__(self) -> int:
+        """int: How many bodys there are now, read from the live Part."""
+        return len(self.list())
+
+    def __iter__(self) -> "Iterator[Body]":
+        """Iterates over the bodys as `list()` returns them, read from the live Part."""
+        return iter(self.list())
+
+    def __contains__(self, name: object) -> bool:
+        """Whether a body with that name exists now. A non-string is simply absent.
+
+        Existence is decided by enumeration, like `get`, so two bodys sharing the name
+        still count as present.
+        """
+        if not isinstance(name, str):
+            return False
+        return name in cast(Sequence[str], self.names())
 
     def create(self, name: str) -> Body:
         """Adds a new body to the Part.

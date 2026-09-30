@@ -2113,6 +2113,40 @@ class CircularPattern(_NamedFeature):
         self.set_angular_spacing_deg(value)
 
     @property
+    def full_circle(self) -> bool:
+        """bool: Whether the copies are spread evenly over 360 degrees (instances x spacing).
+
+        Read from the two verified parameters; CATIA's own complete-crown flag is not used
+        because it was accepted and ignored live (probe 46w).
+
+        Raises:
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        return math.isclose(
+            self.instances * self.spacing_deg, FULL_REVOLUTION, rel_tol=0.0, abs_tol=1e-6
+        )
+
+    def set_full_circle(self, instances: "int | None" = None) -> None:
+        """Spreads the copies evenly over a full turn. Does not rebuild; call `part.update()`.
+
+        Writes the instance count (when given) and then the spacing `360 / instances`, so
+        changing the count of a full-circle pattern keeps it a full circle -- assigning
+        `instances` alone keeps the old spacing and the copies would overlap or leave a gap.
+
+        Args:
+            instances: The new total count, the original included; `None` keeps the
+                current count and only corrects the spacing.
+
+        Raises:
+            ParameterTypeError: If `instances` is not an integer of at least two.
+            Auto3dxError: If CATIA refuses a write.
+        """
+        count = self.instances if instances is None else _validate_instance_count(instances)
+        if instances is not None:
+            self.set_angular_instances(count)
+        self.set_angular_spacing_deg(FULL_REVOLUTION / count)
+
+    @property
     def radial_instances(self) -> int:
         """int: The instance count of the radial row, which this SDK always creates as 1.
 
