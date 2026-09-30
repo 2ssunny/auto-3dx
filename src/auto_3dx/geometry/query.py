@@ -94,8 +94,30 @@ def _vector(value: Any, what: str) -> Point:
     return (x, y, z)
 
 
+_WORLD_AXES: "dict[str, Point]" = {
+    "X": (1.0, 0.0, 0.0),
+    "Y": (0.0, 1.0, 0.0),
+    "Z": (0.0, 0.0, 1.0),
+}
+
+
 def _direction(value: Any, what: str) -> Point:
-    """Validates a direction and returns it as a unit vector."""
+    """Validates a direction and returns it as a unit vector.
+
+    Accepts three numbers or a world axis name -- `"X"`, `"Y"`, `"Z"`, optionally signed
+    (`"-Z"`) -- the same words `part.geometry`'s finders take.
+    """
+    if isinstance(value, str):
+        text = value.strip().upper()
+        key = text.lstrip("+-")
+        if key not in _WORLD_AXES or len(text) - len(key) > 1:
+            raise ParameterTypeError(
+                f"{what} must be 'X', 'Y', 'Z' (optionally signed) or three numbers, "
+                f"not {value!r}."
+            )
+        sign = -1.0 if text.startswith("-") else 1.0
+        x, y, z = _WORLD_AXES[key]
+        return (sign * x, sign * y, sign * z)
     vector = _vector(value, what)
     length = math.hypot(*vector)
     if length == 0.0:

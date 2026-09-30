@@ -414,3 +414,17 @@ def test_high_level_edge_finders_skip_profile_edges_and_take_adjacency() -> None
     assert top_front.index == edges["top-front"].index  # a fresh snapshot, same edge
     assert len(geometry.edges_of(faces["front"]).all()) == 4
     assert len(geometry.faces_of(edges["top-front"]).all()) == 2
+
+
+def test_query_directions_take_the_same_axis_names_as_the_finders() -> None:
+    model = _Model()
+    snapshot, _ = model.edges()
+
+    assert len(snapshot.query().solid().parallel("X").all()) == 4
+    assert len(snapshot.query().solid().parallel("-z").all()) == 4
+    top = snapshot.query().solid().extreme("+Z").all()
+    assert len(top) == 4
+    with pytest.raises(ParameterTypeError):
+        snapshot.query().parallel("W")
+    with pytest.raises(ParameterTypeError):
+        snapshot.query().parallel("--X")

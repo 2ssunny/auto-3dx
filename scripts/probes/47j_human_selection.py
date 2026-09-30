@@ -84,6 +84,11 @@ def main() -> None:
                     "Reference.DisplayName", lambda r=reference: str(r.DisplayName), fatal=False
                 )
                 marker(f"[RESULT] in the fresh snapshot as: {known.get(name, 'NOT FOUND')}")
+        items = step(
+            "[composite] part.selection.items()", lambda: part.selection.items(), fatal=False
+        )
+        for selected in items or []:
+            marker(f"[RESULT] SDK: {selected.kind} -> {selected.describe()}")
     finally:
         step("Selection.Clear", selection.Clear, fatal=False)
         if pad is not None:
