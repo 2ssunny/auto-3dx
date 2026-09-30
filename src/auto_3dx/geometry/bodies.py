@@ -441,17 +441,17 @@ class BodyCollection:
             raise automation_error(error, "reading Part.MainBody") from error
 
     def __len__(self) -> int:
-        """int: How many bodys there are now, read from the live Part."""
+        """int: How many bodies there are now, read from the live Part."""
         return len(self.list())
 
     def __iter__(self) -> "Iterator[Body]":
-        """Iterates over the bodys as `list()` returns them, read from the live Part."""
+        """Iterates over the bodies as `list()` returns them, read from the live Part."""
         return iter(self.list())
 
     def __contains__(self, name: object) -> bool:
         """Whether a body with that name exists now. A non-string is simply absent.
 
-        Existence is decided by enumeration, like `get`, so two bodys sharing the name
+        Existence is decided by enumeration, like `get`, so two bodies sharing the name
         still count as present.
         """
         if not isinstance(name, str):
