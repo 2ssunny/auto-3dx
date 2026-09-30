@@ -27,6 +27,7 @@ from auto_3dx.highlevel.features import BodyFeatures, hole_origin, pattern_spaci
 from auto_3dx.highlevel.finders import PartGeometry, axis_vector
 from auto_3dx.highlevel.profiles import (
     CONSTRAINTS_DIMENSIONED,
+    CONSTRAINTS_FULLY,
     CONSTRAINTS_NONE,
     CONSTRAINTS_ORIENTATION,
     SUPPORTED_RECTANGLE_CONSTRAINTS,
@@ -52,6 +53,7 @@ __all__ = [
     "PartGeometry",
     "axis_vector",
     "CONSTRAINTS_DIMENSIONED",
+    "CONSTRAINTS_FULLY",
     "CONSTRAINTS_NONE",
     "CONSTRAINTS_ORIENTATION",
     "SUPPORTED_RECTANGLE_CONSTRAINTS",
