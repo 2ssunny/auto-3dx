@@ -10,7 +10,8 @@ Every method is one Level 2 call inside `part.work_in(body)`:
 
     pad              -> part.part_design.create_pad
     pocket           -> part.part_design.create_pocket
-    hole             -> part.part_design.create_hole(..., origin=, diameter=, limit=, bottom=)
+    hole             -> part.part_design.create_hole(..., origin=, diameter=, limit=, bottom=,
+                                                    head=)
     fillet           -> part.part_design.create_edge_fillet
     chamfer          -> part.part_design.create_chamfer (length/angle mode)
     circular_pattern -> part.part_design.create_circular_pattern
@@ -36,6 +37,8 @@ from auto_3dx.geometry.part_design import (
     Chamfer,
     CircularPattern,
     ConstRadEdgeFillet,
+    Counterbore,
+    Countersink,
     Hole,
     Pad,
     Pocket,
@@ -113,7 +116,10 @@ def hole_origin(center: Any, face: Face) -> "tuple[float, float, float]":
 
 
 def pattern_spacing(
-    instances: Any, spacing_deg: "float | None", total_angle_deg: "float | None"
+    instances: Any,
+    spacing_deg: "float | None",
+    total_angle_deg: "float | None",
+    full_circle: bool = False,
 ) -> float:
     """Resolves the angle between neighbouring copies from exactly one of two intents.
 
@@ -125,8 +131,19 @@ def pattern_spacing(
     Raises:
         ParameterTypeError: If neither or both are given, or a value is not usable.
     """
+    if not isinstance(full_circle, bool):
+        raise ParameterTypeError(f"full_circle must be a bool, not {type(full_circle).__name__}.")
+    if full_circle:
+        if spacing_deg is not None or total_angle_deg is not None:
+            raise ParameterTypeError(
+                "full_circle=True already fixes the spacing (360 / instances); do not also "
+                "give spacing_deg or total_angle_deg."
+            )
+        total_angle_deg = FULL_CIRCLE_DEG
     if (spacing_deg is None) == (total_angle_deg is None):
-        raise ParameterTypeError("Give exactly one of spacing_deg and total_angle_deg.")
+        raise ParameterTypeError(
+            "Give exactly one of spacing_deg, total_angle_deg or full_circle=True."
+        )
     if spacing_deg is not None:
         return float(spacing_deg)
     if isinstance(instances, bool) or not isinstance(instances, int) or instances < 2:
@@ -275,12 +292,16 @@ class BodyFeatures(tuple):
         limit: str = HOLE_LIMIT_BLIND,
         direction: str = INTO_MATERIAL,
         bottom: str = HOLE_BOTTOM_FLAT,
+        head: "Counterbore | Countersink | None" = None,
         unit: str = MILLIMETRE,
     ) -> Hole:
         """Drills a hole at a point of a planar face of this body.
 
-        Every attribute is written explicitly -- diameter, bottom and limit -- because
-        CATIA carries a hole's settings over to the next hole (probe 46q).
+        Every attribute is written explicitly -- diameter, bottom, limit and type --
+        because CATIA carries a hole's settings over to the next hole (probes 46q, 47h).
+        The hole's origin is read back before this returns, and a hole CATIA put
+        elsewhere is moved to `center` or reported (`HolePlacementMismatchError`): live,
+        CATIA snapped an off-centre hole on a circular face to the circle's centre.
 
         Args:
             name: The hole's name.
@@ -288,11 +309,17 @@ class BodyFeatures(tuple):
             center: `(x, y, z)`, or two numbers on a face perpendicular to a world axis
                 (`hole_origin`).
             diameter: The hole diameter.
-            depth: The depth of a blind hole; must be omitted for `"through_all"`.
-            limit: `"blind"` (the default) or `"through_all"`.
-            direction: Only `"into_material"`, CATIA's verified default.
+            depth: The depth of a blind hole; must be omitted for `"up_to_next"` and
+                `"through_all"`.
+            limit: `"blind"` (the default), `"up_to_next"` (stops at the next face it
+                meets) or `"through_all"`.
+            direction: Only `"into_material"`, CATIA's verified default. (Reversing a
+                hole was tried live, probe 47g: it drills away from the solid and removes
+                nothing, so it is not offered.)
             bottom: `"flat"` (the default; the volume is exactly a cylinder) or `"v"`
                 (a 120-degree drill point).
+            head: `Counterbore(diameter, depth)` or `Countersink(depth, angle_deg=90)`
+                from `auto_3dx.geometry`; `None` (the default) makes a simple hole.
             unit: The unit of `depth` and `diameter`. Defaults to millimetres.
 
         Returns:
@@ -302,13 +329,16 @@ class BodyFeatures(tuple):
             ParameterTypeError: If an argument is invalid (see `create_hole`).
             UnsupportedOperationError: If `direction` is not `"into_material"`, or `center`
                 cannot be placed on this face.
+            HolePlacementMismatchError: If CATIA placed the hole elsewhere and it could
+                not be moved; the hole exists under `name`.
             Auto3dxError: Whatever `part.part_design.create_hole` raises.
         """
         part = self._require_part()
         if direction not in _HOLE_DIRECTIONS:
             raise UnsupportedOperationError(
                 f"A hole can only drill {INTO_MATERIAL!r} (CATIA's default, verified on a top "
-                f"and a side face); got {direction!r}. Reversing a hole has no live evidence."
+                f"and a side face); got {direction!r}. A reversed hole drills away from the "
+                "solid and removes nothing (probe 47g)."
             )
         if not isinstance(support, Face):
             raise ParameterTypeError(
@@ -325,6 +355,7 @@ class BodyFeatures(tuple):
                 diameter=diameter,
                 limit=limit,
                 bottom=bottom,
+                head=head,
             )
 
     def fillet(
@@ -394,6 +425,7 @@ class BodyFeatures(tuple):
         total_angle_deg: "float | None" = None,
         axis: Any = CIRCULAR_PATTERN_AXIS_Z,
         reverse: bool = False,
+        full_circle: bool = False,
     ) -> CircularPattern:
         """Copies a feature of this body around an axis.
 
@@ -403,7 +435,8 @@ class BodyFeatures(tuple):
                 `body.features` call.
             instances: How many copies in total, the original included.
             spacing_deg: The angle between neighbouring copies; or
-            total_angle_deg: the angle the copies spread over (360 for a full circle).
+            total_angle_deg: the angle the copies spread over (360 for a full circle); or
+            full_circle: `True` to spread `instances` copies evenly over 360 degrees.
             axis: `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge`.
             reverse: Turn the other way (documented for Z only).
 
@@ -415,7 +448,7 @@ class BodyFeatures(tuple):
             Auto3dxError: Whatever `part.part_design.create_circular_pattern` raises.
         """
         part = self._require_part()
-        spacing = pattern_spacing(instances, spacing_deg, total_angle_deg)
+        spacing = pattern_spacing(instances, spacing_deg, total_angle_deg, full_circle)
         with part.work_in(self._body):
             return part.part_design.create_circular_pattern(
                 name, feature, instances, spacing, axis, reverse=reverse

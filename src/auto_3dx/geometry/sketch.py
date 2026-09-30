@@ -33,7 +33,7 @@ still only accepts the three origin-plane strings.
 
 import contextlib
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import pywintypes
@@ -460,6 +460,19 @@ def _resolve_element(element: Any, owner_sketch: Any) -> Any:
     return element.com_object
 
 
+SKETCH_AXIS_VERTICAL: str = "vertical"
+"""The sketch's V axis (`AbsoluteAxis.VerticalReference`): a distance to it fixes local X."""
+
+SKETCH_AXIS_HORIZONTAL: str = "horizontal"
+"""The sketch's H axis (`AbsoluteAxis.HorizontalReference`): a distance to it fixes local Y."""
+
+_AXIS_REFERENCES: "dict[str, str]" = {
+    SKETCH_AXIS_VERTICAL: "VerticalReference",
+    SKETCH_AXIS_HORIZONTAL: "HorizontalReference",
+}
+_POLYGON_MIN_CORNERS = 3
+
+
 class SketchEditor:
     """Wraps a `Factory2D` obtained from `Sketch.OpenEdition()`.
 
@@ -494,6 +507,7 @@ class SketchEditor:
         constraints: Any,
         generation: ModelGeneration | None = None,
         sketch: Any = None,
+        absolute_axis: Any = None,
     ) -> None:
         """Initializes the wrapper.
 
@@ -518,7 +532,11 @@ class SketchEditor:
                 constructor stays backward compatible with a caller that
                 built a `SketchEditor` before this parameter existed;
                 `Sketch.edit()` always supplies it.
+            absolute_axis: The sketch's raw `AbsoluteAxis`, read before the edition
+                opened, which `distance_to_axis` constrains against. `None` leaves that
+                one method unavailable.
         """
+        self._absolute_axis = absolute_axis
         self._com_object = com_object
         self._constraints = constraints
         self._generation = generation if generation is not None else ModelGeneration()
@@ -561,12 +579,9 @@ class SketchEditor:
             y: The point's Y coordinate, in millimetres.
 
         Returns:
-            A `SketchElement` wrapping the raw `Point2D` COM object. It has
-            no `X`/`Y` properties (verified,
-            `scripts/probes/27_sketch_geometry.py`): read its coordinates
-            back with ``element.com_object.GetCoordinates([0.0, 0.0])``,
-            which returns an `(x, y)` tuple -- the same seed-array-as-output
-            convention already used by `Sketch.GetAbsoluteAxisData` above.
+            A `SketchElement` wrapping the raw `Point2D` COM object. Read its
+            coordinates with `element.geometry()` (a `PointGeometry`) once the
+            `edit()` block has closed.
 
         Raises:
             ParameterTypeError: If `x` or `y` is not an `int`/`float` (or is a `bool`).
@@ -732,10 +747,10 @@ class SketchEditor:
                 by CATIA itself is not established here.
 
         Returns:
-            A `SketchElement` wrapping the raw `Spline2D` COM object.
-            `element.com_object.GetNumberOfControlPoints()` returns a
-            `float`, not an `int` (verified live); `.StartPoint` and
-            `.EndPoint` return `ControlPoint2D` objects.
+            A `SketchElement` wrapping the raw `Spline2D` COM object. Spline
+            geometry has no typed read in this release (`geometry()` raises
+            `UnsupportedOperationError`); its identity, kind and construction flag
+            are readable.
 
         Raises:
             ParameterTypeError: If `points` is not a list of two-item tuples,
@@ -853,6 +868,95 @@ class SketchEditor:
             self.line(far_x, far_y, origin_x_value, far_y),
             self.line(origin_x_value, far_y, origin_x_value, origin_y_value),
         ]
+
+    def polygon(
+        self, corners: "Sequence[tuple[float, float]]"
+    ) -> "tuple[list[SketchElement], list[SketchElement]]":
+        """Draws a closed polygon whose sides SHARE their corner points.
+
+        `rectangle()` draws four independent lines: constraining one side moves only that
+        side. Here each corner is one `Point2D`, and line `i` runs from corner `i` to
+        corner `i + 1` (the last back to the first) with its `StartPoint`/`EndPoint` set to
+        those points, so constraints propagate around the loop. Live (probe 47i): a
+        rectangle drawn this way, with horizontal/vertical, width, height and two anchor
+        constraints, grew as a whole rectangle when its width was driven 60 -> 70.
+
+        Args:
+            corners: Three or more `(x, y)` corners, in order around the polygon.
+
+        Returns:
+            `(points, lines)`: one `Point2D` element per corner, and one `Line2D` element
+            per side, `lines[i]` from `points[i]` to `points[i + 1]`.
+
+        Raises:
+            ParameterTypeError: If there are fewer than three corners or one is not two
+                numbers. Raised before anything is drawn.
+            Auto3dxError: If CATIA refuses a call.
+        """
+        self._require_active()
+        if not isinstance(corners, (list, tuple)) or len(corners) < _POLYGON_MIN_CORNERS:
+            raise ParameterTypeError(
+                f"A polygon needs at least {_POLYGON_MIN_CORNERS} corners, not {corners!r}."
+            )
+        checked: "list[tuple[float, float]]" = []
+        for corner in corners:
+            if not isinstance(corner, (list, tuple)) or len(corner) != 2:
+                raise ParameterTypeError(f"Each corner must be (x, y), not {corner!r}.")
+            checked.append((validate_length_value(corner[0]), validate_length_value(corner[1])))
+        points = [self.point(x, y) for x, y in checked]
+        lines = []
+        for index, (x1, y1) in enumerate(checked):
+            following = (index + 1) % len(checked)
+            x2, y2 = checked[following]
+            line = self.line(x1, y1, x2, y2)
+            try:
+                line.com_object.StartPoint = points[index].com_object
+                line.com_object.EndPoint = points[following].com_object
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            lines.append(line)
+        return points, lines
+
+    def distance_to_axis(
+        self, point: Any, axis: str, value: "float | None" = None, unit: str = MILLIMETRE
+    ) -> Constraint:
+        """Constrains a point's distance to one of the sketch's own axes.
+
+        `axis` is `SKETCH_AXIS_VERTICAL` (the sketch's V axis, so the constraint holds the
+        point's local X) or `SKETCH_AXIS_HORIZONTAL` (the H axis, holding local Y). It is
+        `AddBiEltCst(distance, point, AbsoluteAxis.VerticalReference | HorizontalReference)`
+        (probe 47i: statuses OK, including distance 0 for a point on the axis). The value is
+        an unsigned distance: a point at x = -30 reads 30.
+
+        Args:
+            point: A point element, such as one of `polygon()`'s points.
+            axis: `SKETCH_AXIS_VERTICAL` or `SKETCH_AXIS_HORIZONTAL`.
+            value: If given, the distance to drive; `None` keeps the drawn one.
+            unit: The unit of `value`. Defaults to `MILLIMETRE`.
+
+        Returns:
+            The new `Constraint`.
+
+        Raises:
+            ParameterTypeError: If `axis` is unknown or `value` is not a number.
+            ValidationError: If this editor has no `AbsoluteAxis` (a directly built one).
+            Auto3dxError: If CATIA refuses a call.
+        """
+        if axis not in _AXIS_REFERENCES:
+            raise ParameterTypeError(
+                f"axis must be {SKETCH_AXIS_VERTICAL!r} or {SKETCH_AXIS_HORIZONTAL!r}, "
+                f"not {axis!r}."
+            )
+        if self._absolute_axis is None:
+            raise ValidationError(
+                "This editor has no sketch axis to constrain against; open it through "
+                "Sketch.edit()."
+            )
+        try:
+            reference = getattr(self._absolute_axis, _AXIS_REFERENCES[axis])
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        return self.distance(point, reference, value, unit)
 
     def _mono(self, constraint_type: int, element: Any) -> Constraint:
         """Creates a single-element constraint via `Constraints.AddMonoEltCst`.
@@ -1407,10 +1511,11 @@ class Sketch:
     ) -> "RectangleProfile":
         """Draws a closed rectangle from its lower-left corner in one edit session.
 
-        `constraints` is `"none"` (four lines), `"orientation"` (+ horizontal/vertical)
-        or `"dimensioned"` (+ width and height lengths). None of them is a fully
-        constrained rectangle: the corners are not coincidence-constrained
-        (`auto_3dx.highlevel.profiles`). Does not rebuild.
+        `constraints` is `"none"` (four lines), `"orientation"` (+ horizontal/vertical),
+        `"dimensioned"` (+ width and height lengths) -- four independent lines, not fully
+        constrained -- or `"fully"`: shared corner points with eight constraints, whose
+        width and height can be driven afterwards (`auto_3dx.highlevel.profiles`,
+        probe 47i). Does not rebuild.
 
         Returns:
             A `RectangleProfile` with the four lines and the constraints created.
@@ -1669,13 +1774,21 @@ class Sketch:
             constraints = self._com_object.Constraints
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        # Read before OpenEdition, the order probe 47i used; only `distance_to_axis` needs
+        # it, so a sketch that cannot report it still opens.
+        try:
+            absolute_axis = self._com_object.AbsoluteAxis
+        except (pywintypes.com_error, AttributeError):
+            absolute_axis = None
         self._editing = True
         try:
             factory = self._com_object.OpenEdition()
         except pywintypes.com_error as error:
             self._editing = False
             raise _wrap_com_error(error) from error
-        editor = SketchEditor(factory, constraints, self._generation, self._com_object)
+        editor = SketchEditor(
+            factory, constraints, self._generation, self._com_object, absolute_axis
+        )
         try:
             yield editor
         finally:

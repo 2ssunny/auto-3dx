@@ -166,7 +166,13 @@ def test_hole_maps_a_two_number_center_and_writes_every_attribute() -> None:
     assert part.log[1] == (
         "create_hole",
         ("H", top, None, "mm"),
-        {"origin": (20.0, 15.0, 20.0), "diameter": 6.0, "limit": "through_all", "bottom": "flat"},
+        {
+            "origin": (20.0, 15.0, 20.0),
+            "diameter": 6.0,
+            "limit": "through_all",
+            "bottom": "flat",
+            "head": None,
+        },
     )
 
 
@@ -509,11 +515,11 @@ def test_dimensioned_rectangle_adds_exactly_the_verified_constraints() -> None:
     assert raw.factory2d.line_calls[0] == (-25.0, -15.0, 25.0, -15.0)
 
 
-@pytest.mark.parametrize("level", ["fully", "geometric", ""])
+@pytest.mark.parametrize("level", ["full", "geometric", ""])
 def test_no_constraint_level_claims_more_than_was_verified(level: str) -> None:
     raw = FakeSketch()
 
-    with pytest.raises(ParameterTypeError, match="fully"):
+    with pytest.raises(ParameterTypeError, match="constraints must be one of"):
         Sketch(raw).rectangle(10, 10, constraints=level)
     assert raw.open_edition_calls == 0
 

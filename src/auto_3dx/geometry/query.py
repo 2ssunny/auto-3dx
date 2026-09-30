@@ -30,6 +30,14 @@ Three rules make the result deterministic for an agent:
   `TopologyQueryAmbiguousError` for several, listing what was measured. `first()` exists for
   callers who genuinely accept snapshot order, which is not stable across rebuilds.
 
+Adjacency is measured, not inferred. `EdgeQuery.adjacent_to(face)` keeps the edges that
+bound a face and `FaceQuery.adjacent_to(edge)` the faces an edge bounds: an edge bounds a
+face when its start, middle and end points all lie ON that face, measured by CATIA as a
+distance to the bounded face (`Face.distance_to`, probe 47l) -- not to its plane, so an
+edge of a neighbouring coplanar face does not count. Profile edges of consumed sketches,
+which a topology search also returns, bound no face and are skipped (`Edge.from_sketch`).
+No BRep name is parsed and nothing is picked by position.
+
 Normals are compared as AXES: CATIA reports a planar face's plane normal, whose sign is not
 the outward direction (live, a block's top and bottom faces both reported +Z). To tell top
 from bottom, rank by position with `extreme(direction)`, which uses the face's centre.
@@ -44,7 +52,10 @@ from auto_3dx.errors import (
     UnsupportedOperationError,
     TopologyQueryAmbiguousError,
     TopologyQueryNoMatchError,
+    ValidationError,
 )
+from auto_3dx.geometry.edges import Edge
+from auto_3dx.geometry.faces import Face
 from auto_3dx.geometry.facts import (
     CURVE_ARC,
     CURVE_CIRCLE,
@@ -63,6 +74,12 @@ DEFAULT_LENGTH_TOLERANCE_MM: float = 1e-3
 DEFAULT_AREA_TOLERANCE_MM2: float = 1e-3
 """How close two areas must be to count as equal, in square millimetres."""
 
+DEFAULT_ADJACENCY_TOLERANCE_MM: float = 1e-3
+"""How far from a face an edge's sample points may measure and still bound it, in mm.
+
+Live (probe 47l) a point on a face measured exactly 0.0; a point 5 mm off measured 5.0.
+"""
+
 _Q = TypeVar("_Q", bound="_Query")
 
 
@@ -77,8 +94,30 @@ def _vector(value: Any, what: str) -> Point:
     return (x, y, z)
 
 
+_WORLD_AXES: "dict[str, Point]" = {
+    "X": (1.0, 0.0, 0.0),
+    "Y": (0.0, 1.0, 0.0),
+    "Z": (0.0, 0.0, 1.0),
+}
+
+
 def _direction(value: Any, what: str) -> Point:
-    """Validates a direction and returns it as a unit vector."""
+    """Validates a direction and returns it as a unit vector.
+
+    Accepts three numbers or a world axis name -- `"X"`, `"Y"`, `"Z"`, optionally signed
+    (`"-Z"`) -- the same words `part.geometry`'s finders take.
+    """
+    if isinstance(value, str):
+        text = value.strip().upper()
+        key = text.lstrip("+-")
+        if key not in _WORLD_AXES or len(text) - len(key) > 1:
+            raise ParameterTypeError(
+                f"{what} must be 'X', 'Y', 'Z' (optionally signed) or three numbers, "
+                f"not {value!r}."
+            )
+        sign = -1.0 if text.startswith("-") else 1.0
+        x, y, z = _WORLD_AXES[key]
+        return (sign * x, sign * y, sign * z)
     vector = _vector(value, what)
     length = math.hypot(*vector)
     if length == 0.0:
@@ -93,6 +132,32 @@ def _tolerance(value: Any, what: str) -> float:
     if not math.isfinite(value) or value < 0:
         raise ParameterTypeError(f"{what} must be finite and not negative, not {value!r}.")
     return float(value)
+
+
+def _require_same_part(first: Any, second: Any) -> None:
+    """Refuses to relate a face and an edge taken from two different Parts.
+
+    Both carry their Part's `ModelGeneration`; one Part shares one object, so identity of
+    that object is identity of the Part. A handle built without one cannot say.
+    """
+    mine = getattr(first, "_model_generation", None)
+    theirs = getattr(second, "_model_generation", None)
+    if mine is not None and theirs is not None and mine is not theirs:
+        raise ValidationError(
+            "The face and the edge belong to different Parts; adjacency only relates "
+            "elements of one Part. Take both from the same part.topology."
+        )
+
+
+def _bounds(face: Face, edge: Edge, tolerance: float) -> bool:
+    """Whether `edge` bounds `face`: its start, middle and end all measure ON the face."""
+    if edge.from_sketch:
+        return False
+    facts = edge.geometry
+    return all(
+        face.distance_to(point) <= tolerance
+        for point in (facts.mid_mm, facts.start_mm, facts.end_mm)
+    )
 
 
 def _dot(a: Point, b: Point) -> float:
@@ -281,12 +346,7 @@ class FaceQuery(_Query):
         return element.geometry.center_mm
 
     def _describe(self, element: Any) -> str:
-        geometry = element.geometry
-        return (
-            f"{geometry.surface_type} face area {geometry.area_mm2:.3f} mm2 at "
-            f"({geometry.center_mm[0]:.3f}, {geometry.center_mm[1]:.3f}, "
-            f"{geometry.center_mm[2]:.3f})"
-        )
+        return str(element.describe())
 
     def of_type(self, surface_type: str) -> "FaceQuery":
         """Keeps faces of one surface type (`geometry.facts.SURFACE_*`)."""
@@ -298,6 +358,47 @@ class FaceQuery(_Query):
     def planar(self) -> "FaceQuery":
         """Keeps planar faces."""
         return self.of_type(SURFACE_PLANAR)
+
+    def adjacent_to(
+        self, edge: Edge, tolerance_mm: float = DEFAULT_ADJACENCY_TOLERANCE_MM
+    ) -> "FaceQuery":
+        """Keeps the faces that `edge` bounds -- two for an ordinary edge of a solid.
+
+        A face is kept when the edge's start, middle and end points all measure within
+        `tolerance_mm` of the face itself (`Face.distance_to`), which is a distance to the
+        bounded face, not to its plane (probe 47l).
+
+        Args:
+            edge: An `Edge` of the solid, from a snapshot of the current model.
+            tolerance_mm: How far from a face a sample point may measure.
+
+        Returns:
+            A narrowed query.
+
+        Raises:
+            ParameterTypeError: If `edge` is not an `Edge`.
+            UnsupportedOperationError: If `edge` is a profile edge of a consumed sketch,
+                which bounds no face.
+            ValidationError: If `edge` belongs to another Part.
+            StaleSnapshotError: If `edge` or a face comes from an outdated snapshot.
+        """
+        if not isinstance(edge, Edge):
+            raise ParameterTypeError(
+                f"adjacent_to() takes an Edge from part.topology.edges(), not "
+                f"{type(edge).__name__}."
+            )
+        if edge.from_sketch:
+            raise UnsupportedOperationError(
+                "This edge is a profile edge of a consumed sketch, not an edge of the solid; "
+                "it bounds no face. Pick an edge of the solid (Edge.from_sketch is False)."
+            )
+        tolerance = _tolerance(tolerance_mm, "tolerance_mm")
+        for face in self._elements:
+            _require_same_part(face, edge)
+        return self._where(
+            lambda face: _bounds(face, edge, tolerance),
+            f"adjacent_to(edge: {edge.describe()})",
+        )
 
     def cylindrical(self) -> "FaceQuery":
         """Keeps cylindrical faces."""
@@ -381,13 +482,7 @@ class EdgeQuery(_Query):
         return geometry.mid_mm
 
     def _describe(self, element: Any) -> str:
-        geometry = element.geometry
-        radius = f" radius {geometry.radius_mm:.3f} mm" if geometry.radius_mm else ""
-        where = self._position(element)
-        return (
-            f"{geometry.curve_type} edge length {geometry.length_mm:.3f} mm{radius} at "
-            f"({where[0]:.3f}, {where[1]:.3f}, {where[2]:.3f})"
-        )
+        return str(element.describe())
 
     def of_type(self, curve_type: str) -> "EdgeQuery":
         """Keeps edges of one curve type (`geometry.facts.CURVE_*`)."""
@@ -398,6 +493,49 @@ class EdgeQuery(_Query):
     def lines(self) -> "EdgeQuery":
         """Keeps straight edges."""
         return self.of_type(CURVE_LINE)
+
+    def adjacent_to(
+        self, face: Face, tolerance_mm: float = DEFAULT_ADJACENCY_TOLERANCE_MM
+    ) -> "EdgeQuery":
+        """Keeps the edges that bound `face`: its outer boundary and any holes in it.
+
+        An edge is kept when its start, middle and end points all measure within
+        `tolerance_mm` of the face itself (`Face.distance_to`) -- the bounded face, not its
+        plane, so an edge of a neighbouring coplanar face is not kept, unlike
+        `on_plane_of`. Profile edges of consumed sketches are never kept
+        (`Edge.from_sketch`).
+
+        Args:
+            face: A `Face`, from a snapshot of the current model. Any surface type.
+            tolerance_mm: How far from the face a sample point may measure.
+
+        Returns:
+            A narrowed query.
+
+        Raises:
+            ParameterTypeError: If `face` is not a `Face`.
+            ValidationError: If `face` belongs to another Part.
+            StaleSnapshotError: If `face` or an edge comes from an outdated snapshot.
+        """
+        if not isinstance(face, Face):
+            raise ParameterTypeError(
+                f"adjacent_to() takes a Face from part.topology.faces(), not "
+                f"{type(face).__name__}."
+            )
+        tolerance = _tolerance(tolerance_mm, "tolerance_mm")
+        for edge in self._elements:
+            _require_same_part(face, edge)
+        return self._where(
+            lambda edge: _bounds(face, edge, tolerance),
+            f"adjacent_to(face: {face.describe()})",
+        )
+
+    def solid(self) -> "EdgeQuery":
+        """Drops the profile edges of consumed sketches, keeping the solid's own edges.
+
+        Edges whose owner could not be told (`Edge.from_sketch is None`) are kept.
+        """
+        return self._where(lambda edge: edge.from_sketch is not True, "solid()")
 
     def circular(self) -> "EdgeQuery":
         """Keeps full circles and circular arcs."""
@@ -465,10 +603,9 @@ class EdgeQuery(_Query):
         An edge is kept when its measured start, middle and end points are all within
         `tolerance_mm` of the face's plane. This is a geometric fact about the plane, NOT
         face adjacency: it does not claim the edge bounds that face, and an edge of another
-        coplanar face qualifies too. No verified adjacency route exists in this release (a
-        face-scoped selection search returned nothing, probe 46y), so this is the honest
-        tool for "the rim of the hole in the top face": combine it with `circular()` and
-        `radius_near()`.
+        coplanar face qualifies too, and so do the profile edges of a sketch drawn in that
+        plane. For "the edges of this face" use `adjacent_to(face)`, which measures
+        against the bounded face itself.
 
         Args:
             face: A planar `Face`, from a snapshot of the current model.

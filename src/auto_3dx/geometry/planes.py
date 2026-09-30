@@ -82,7 +82,8 @@ first instead of tracking the returned `Plane` object itself.
 """
 
 import math
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import Any, cast
 
 import pywintypes
 
@@ -90,13 +91,16 @@ from auto_3dx._generation import ModelGeneration
 from auto_3dx.errors import (
     AmbiguousNameError,
     Auto3dxError,
+    AutomationError,
     ParameterTypeError,
     PartialCreationError,
     PlaneNotFoundError,
     ReferenceInUseError,
     UnsupportedSupportError,
+    ValidationError,
 )
 from auto_3dx.geometry.deletion import delete_via_selection
+from auto_3dx.geometry.faces import Face
 from auto_3dx.geometry._frames import plane_frame
 from auto_3dx.geometry.sketch import (
     _AXIS_DATA_SEED,
@@ -313,6 +317,51 @@ class Plane:
             return self._com_object.Name
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+
+    @property
+    def origin(self) -> "tuple[float, float, float]":
+        """tuple[float, float, float]: The plane's origin in Part millimetres (`GetOrigin`).
+
+        Answers only once the plane has been built: live (probe 47n) `GetOrigin` on a new
+        offset plane failed before `Part.Update()` and read the offset point after it.
+
+        Raises:
+            AutomationError: If the plane reports no origin, most likely because the Part
+                has not been updated since the plane was created.
+        """
+        frame = plane_frame(self._com_object)
+        if frame is None:
+            raise AutomationError(
+                f"Plane {self.name!r} reports no origin yet. A new plane is built by "
+                "part.update(); read its origin after that."
+            )
+        return (float(frame[0]), float(frame[1]), float(frame[2]))
+
+    @property
+    def normal(self) -> "tuple[float, float, float]":
+        """tuple[float, float, float]: The unit normal of the plane's frame (first x second axis).
+
+        The sign follows CATIA's frame, not a material side. Like `origin`, it answers only
+        after the plane has been built.
+
+        Raises:
+            AutomationError: If the plane reports no frame yet.
+        """
+        frame = plane_frame(self._com_object)
+        if frame is None:
+            raise AutomationError(
+                f"Plane {self.name!r} reports no frame yet; call part.update() first."
+            )
+        first, second = frame[3:6], frame[6:9]
+        cross = (
+            first[1] * second[2] - first[2] * second[1],
+            first[2] * second[0] - first[0] * second[2],
+            first[0] * second[1] - first[1] * second[0],
+        )
+        length = math.sqrt(sum(value * value for value in cross))
+        if length == 0.0:
+            raise AutomationError(f"Plane {self.name!r} reports a degenerate frame.")
+        return (cross[0] / length, cross[1] / length, cross[2] / length)
 
     @property
     def base_display_name(self) -> str:
@@ -745,14 +794,17 @@ class PlaneCollection:
             name: The new plane's name. Must be non-empty, without
                 surrounding whitespace, and must not contain `"\\"`.
             support: The base plane: one of `SUPPORTED_SKETCH_SUPPORTS`
-                (`"XY"`/`"YZ"`/`"ZX"`), or a plane wrapper returned by this
-                class.
+                (`"XY"`/`"YZ"`/`"ZX"`), a plane wrapper returned by this
+                class, or a planar `Face` of the solid from a current snapshot.
             offset: The offset distance, in millimetres. May be negative or
                 zero.
             orientation: Passed through as `AddNewPlaneOffset`'s
-                `iOrientation`. Defaults to `False`. There is no verified
-                way to read this back meaningfully (see the module
-                docstring), so it is write-only here.
+                `iOrientation`. Defaults to `False`. For a `Face` support it picks
+                the side: live, on a block's top, bottom and +X faces, `False` put the
+                plane INTO the material every time and `True` out of it (probes 47e,
+                47o) -- it does not follow the face's measured plane normal, which reads
+                +Z for both the top and the bottom face. The side can be checked after
+                `part.update()` with `plane.origin`.
 
         Returns:
             The newly created `OffsetPlane`, already named and appended to
@@ -760,7 +812,10 @@ class PlaneCollection:
 
         Raises:
             ParameterNameError: If `name` is not usable as a name.
-            UnsupportedSupportError: If `support` is not a supported value.
+            UnsupportedSupportError: If `support` is not a supported value, or is a
+                `Face` that is not planar.
+            StaleSnapshotError: If a `Face` support comes from an outdated snapshot.
+            ValidationError: If a `Face` support belongs to another Part.
             ParameterTypeError: If `offset` is a `bool`, is not an
                 `int`/`float`, is not finite, or if `orientation` is not a
                 `bool`.
@@ -771,6 +826,8 @@ class PlaneCollection:
         validate_parameter_name(name)
         offset_value = _validate_finite_length(offset, "offset")
         orientation_value = _validate_orientation(orientation)
+        if isinstance(support, Face):
+            self._require_planar_face(support)
         base_plane = _resolve_support_plane(self._part_com_object, support)
         factory = self._factory()
 
@@ -786,6 +843,21 @@ class PlaneCollection:
                 raise _wrap_com_error(error) from error
             self._append(raw, name)
         return OffsetPlane(raw, self._generation)
+
+    def _require_planar_face(self, face: Face) -> None:
+        """Refuses a face support that is stale, of another Part, or not planar."""
+        if not face._belongs_to(self._generation):
+            raise ValidationError(
+                "This face belongs to another Part. Nothing was changed: take it from this "
+                "Part's part.topology.faces()."
+            )
+        self._generation.require_current(face.generation, "face", "part.topology.faces()")
+        facts = face.geometry
+        if facts.surface_type != "planar":
+            raise UnsupportedSupportError(
+                f"An offset plane needs a planar face; this face measures as "
+                f"{facts.surface_type!r}. Nothing was changed."
+            )
 
     def create_angle(
         self,
@@ -960,6 +1032,24 @@ class PlaneCollection:
                 "cannot safely pick one."
             )
         return matches[0]
+
+    def __len__(self) -> int:
+        """int: How many planes there are now, read from the live Part."""
+        return len(self.list())
+
+    def __iter__(self) -> "Iterator[Plane]":
+        """Iterates over the planes as `list()` returns them, read from the live Part."""
+        return iter(self.list())
+
+    def __contains__(self, name: object) -> bool:
+        """Whether a plane with that name exists now. A non-string is simply absent.
+
+        Existence is decided by enumeration, like `get`, so two planes sharing the name
+        still count as present.
+        """
+        if not isinstance(name, str):
+            return False
+        return name in cast(Sequence[str], self.names())
 
     def _all_sketches(self) -> "list[Any]":
         """Every sketch in every body of the Part, read from the model."""

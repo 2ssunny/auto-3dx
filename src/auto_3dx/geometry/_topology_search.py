@@ -126,26 +126,54 @@ class BodyIndex:
         """
         self._part = part_com_object
         self._bodies_by_name: "dict[str, list[Any]] | None" = None
+        self._sketch_names: "set[str]" = set()
+        self._shape_names: "set[str]" = set()
 
     def _build(self) -> "dict[str, list[Any]]":
         found: dict[str, list[Any]] = {}
+        sketches: set[str] = set()
+        shapes: set[str] = set()
         try:
             bodies = self._part.Bodies
             for body_index in range(_FIRST_COM_INDEX, int(bodies.Count) + _FIRST_COM_INDEX):
                 body = bodies.Item(body_index)
-                for collection in (body.Shapes, body.Sketches):
+                for collection, names in ((body.Shapes, shapes), (body.Sketches, sketches)):
                     if collection is None:
                         continue
                     for index in range(
                         _FIRST_COM_INDEX, int(collection.Count) + _FIRST_COM_INDEX
                     ):
                         name = str(collection.Item(index).Name)
+                        names.add(name)
                         holders = found.setdefault(name, [])
                         if not any(holder is body for holder in holders):
                             holders.append(body)
         except (pywintypes.com_error, AttributeError):
             return {}
+        self._sketch_names, self._shape_names = sketches, shapes
         return found
+
+    def is_sketch(self, feature_name: "str | None") -> "bool | None":
+        """Whether a reference's owner feature is a sketch rather than a solid feature.
+
+        A Part-wide edge search also returns the edges of every sketch a feature consumed
+        (probe 46y: a block's search returned 16 edges, its 12 plus the profile's 4), and
+        their `Reference.Parent` is the sketch (probe 42). They bound no face of the solid.
+
+        Returns:
+            `True` when only a body's `Sketches` holds that name, `False` when only a
+            body's `Shapes` does, and `None` when neither or both do, or the model could
+            not be read -- unknown rather than guessed.
+        """
+        if feature_name is None:
+            return None
+        if self._bodies_by_name is None:
+            self._bodies_by_name = self._build()
+        in_sketches = feature_name in self._sketch_names
+        in_shapes = feature_name in self._shape_names
+        if in_sketches == in_shapes:
+            return None
+        return in_sketches
 
     def __call__(self, feature_name: str) -> "tuple[Any, str | None]":
         """Returns `(body, body_name)` for the one body holding `feature_name`.

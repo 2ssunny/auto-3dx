@@ -9,10 +9,18 @@ say exactly what they create and never claim more:
                    (probe 46ad: all four created, statuses OK, update succeeded)
     "dimensioned"  + a length on the bottom (width) and on the left (height)
                    (probe 46ae: six constraints, statuses OK, update succeeded)
+    "fully"        a DIFFERENT drawing: the four sides share their corner points
+                   (`SketchEditor.polygon`), with horizontal x2, vertical x2, width,
+                   height, and the lower-left corner's distances to the sketch's V and H
+                   axes -- eight constraints for the four corners' eight degrees of
+                   freedom (probe 47i: statuses OK; driving the width 60 -> 70 grew the
+                   whole rectangle to the right and kept the corner in place)
 
-There is no "fully": the corners are not coincidence-constrained, because constraints on
-line end points have no live evidence. A "dimensioned" rectangle is therefore not fully
-constrained, and nothing here says it is.
+The first three draw four independent lines whose corners are not joined, so constraining
+one side moves only that side: they are not fully constrained, and nothing here says they
+are. "fully" is the only level whose width and height can be edited afterwards as the
+rectangle's width and height. It counts degrees of freedom; CATIA's own solver status for
+the sketch was not read.
 
 None of these rebuilds. Horizontal and vertical constraints read back as parallelism, as
 they always have (`docs/conventions.md` 1.2.4).
@@ -23,13 +31,19 @@ from typing import Any
 
 from auto_3dx.errors import ParameterTypeError
 from auto_3dx.geometry.constraint import Constraint
-from auto_3dx.geometry.sketch import Sketch, SketchElement
+from auto_3dx.geometry.sketch import (
+    SKETCH_AXIS_HORIZONTAL,
+    SKETCH_AXIS_VERTICAL,
+    Sketch,
+    SketchElement,
+)
 
 CONSTRAINTS_NONE: str = "none"
 CONSTRAINTS_ORIENTATION: str = "orientation"
 CONSTRAINTS_DIMENSIONED: str = "dimensioned"
+CONSTRAINTS_FULLY: str = "fully"
 SUPPORTED_RECTANGLE_CONSTRAINTS: "frozenset[str]" = frozenset(
-    {CONSTRAINTS_NONE, CONSTRAINTS_ORIENTATION, CONSTRAINTS_DIMENSIONED}
+    {CONSTRAINTS_NONE, CONSTRAINTS_ORIENTATION, CONSTRAINTS_DIMENSIONED, CONSTRAINTS_FULLY}
 )
 """The constraint levels `rectangle()` offers; see the module docstring."""
 
@@ -44,6 +58,11 @@ class RectangleProfile:
         top: The side from the upper-right corner along -X.
         left: The side from the upper-left corner along -Y.
         constraints: The constraints created, in creation order; empty for `"none"`.
+            For `"fully"`: horizontal bottom, horizontal top, vertical right, vertical
+            left, width (bottom length), height (left length), then the lower-left
+            corner's distance to the V axis and to the H axis.
+        corners: The shared corner points for `"fully"` (lower-left, lower-right,
+            upper-right, upper-left); empty for the other levels, whose lines share none.
     """
 
     bottom: SketchElement
@@ -51,11 +70,28 @@ class RectangleProfile:
     top: SketchElement
     left: SketchElement
     constraints: "tuple[Constraint, ...]"
+    corners: "tuple[SketchElement, ...]" = ()
+
+    @property
+    def width_constraint(self) -> "Constraint | None":
+        """Constraint | None: The width (bottom length) constraint, if one was made."""
+        return self.constraints[_WIDTH_INDEX] if len(self.constraints) > _WIDTH_INDEX else None
+
+    @property
+    def height_constraint(self) -> "Constraint | None":
+        """Constraint | None: The height (left length) constraint, if one was made."""
+        return (
+            self.constraints[_HEIGHT_INDEX] if len(self.constraints) > _HEIGHT_INDEX else None
+        )
 
     @property
     def lines(self) -> "tuple[SketchElement, ...]":
         """tuple[SketchElement, ...]: `bottom, right, top, left`, the closed loop in order."""
         return (self.bottom, self.right, self.top, self.left)
+
+
+_WIDTH_INDEX = 4
+_HEIGHT_INDEX = 5
 
 
 def _pair(value: Any, label: str) -> "tuple[float, float]":
@@ -93,7 +129,9 @@ def rectangle(
         width: The size along local X, in millimetres; positive.
         height: The size along local Y, in millimetres; positive.
         origin: The lower-left corner `(x, y)`.
-        constraints: `"none"`, `"orientation"` or `"dimensioned"` (module docstring).
+        constraints: `"none"`, `"orientation"`, `"dimensioned"` or `"fully"` (module
+            docstring). Only `"fully"` makes a rectangle whose width and height can be
+            driven afterwards (`profile.width_constraint.set_value(...)`).
 
     Returns:
         The `RectangleProfile`.
@@ -110,9 +148,10 @@ def rectangle(
     if constraints not in SUPPORTED_RECTANGLE_CONSTRAINTS:
         raise ParameterTypeError(
             f"constraints must be one of {sorted(SUPPORTED_RECTANGLE_CONSTRAINTS)}, not "
-            f"{constraints!r}. There is no fully constrained option: corner coincidence has "
-            "no live evidence."
+            f"{constraints!r}."
         )
+    if constraints == CONSTRAINTS_FULLY:
+        return _fully_constrained(sketch, width_value, height_value, corner)
     made: list[Constraint] = []
     with sketch.edit() as editor:
         bottom, right, top, left = editor.rectangle(
@@ -127,6 +166,29 @@ def rectangle(
             made.append(editor.length(bottom, width_value))
             made.append(editor.length(left, height_value))
     return RectangleProfile(bottom, right, top, left, tuple(made))
+
+
+def _fully_constrained(
+    sketch: Sketch, width: float, height: float, corner: "tuple[float, float]"
+) -> RectangleProfile:
+    """The `"fully"` rectangle: shared corners, eight constraints (probe 47i's sequence)."""
+    x0, y0 = corner
+    with sketch.edit() as editor:
+        points, lines = editor.polygon(
+            [(x0, y0), (x0 + width, y0), (x0 + width, y0 + height), (x0, y0 + height)]
+        )
+        bottom, right, top, left = lines
+        made = [
+            editor.horizontal(bottom),
+            editor.horizontal(top),
+            editor.vertical(right),
+            editor.vertical(left),
+            editor.length(bottom, width),
+            editor.length(left, height),
+            editor.distance_to_axis(points[0], SKETCH_AXIS_VERTICAL),
+            editor.distance_to_axis(points[0], SKETCH_AXIS_HORIZONTAL),
+        ]
+    return RectangleProfile(bottom, right, top, left, tuple(made), tuple(points))
 
 
 def centered_rectangle(
@@ -145,7 +207,9 @@ def centered_rectangle(
         width: The size along local X, in millimetres; positive.
         height: The size along local Y, in millimetres; positive.
         center: The centre `(x, y)`.
-        constraints: `"none"`, `"orientation"` or `"dimensioned"`.
+        constraints: `"none"`, `"orientation"`, `"dimensioned"` or `"fully"`. With
+            `"fully"` the LOWER-LEFT corner is what is anchored, so driving the width
+            later grows the rectangle to the right, not about its centre.
 
     Returns:
         The `RectangleProfile`.

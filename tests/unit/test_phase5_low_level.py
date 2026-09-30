@@ -359,7 +359,7 @@ def test_a_through_all_hole_takes_no_depth_and_sets_the_limit() -> None:
     ("kwargs", "error"),
     [
         ({}, ParameterTypeError),  # no depth
-        ({"depth": 5.0, "limit": "up_to_next"}, ParameterTypeError),
+        ({"depth": 5.0, "limit": "up_to_next"}, ParameterTypeError),  # takes no depth
         ({"depth": 5.0, "bottom": "cone"}, ParameterTypeError),
         ({"depth": 5.0, "diameter": 0.0}, ParameterTypeError),
         ({"depth": 5.0, "origin": (1.0, 2.0)}, ParameterTypeError),

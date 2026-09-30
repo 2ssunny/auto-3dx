@@ -63,7 +63,9 @@ from auto_3dx.parameters.parameter import ParameterInfo
 
 if TYPE_CHECKING:
     from auto_3dx.core.part import Part
+    from auto_3dx.geometry.sketch_geometry import SketchGeometry
     from auto_3dx.highlevel.facts import PartFacts
+    from auto_3dx.inspect.targeted import FeatureDetails
 
 _T = TypeVar("_T")
 _FIRST_COM_INDEX = 1
@@ -605,6 +607,53 @@ class Inspector:
         from auto_3dx.highlevel.facts import read_facts
 
         return read_facts(self._part, names)
+
+    def feature(self, name: str, body: "str | None" = None) -> "FeatureDetails":
+        """Reads ONE named feature: kind, body, rebuild state, activity, dimensions.
+
+        Only that feature is read -- no topology search and no walk of the other features'
+        properties (names are enumerated to find it and to refuse a duplicate). Its
+        dimensions come from the same wrappers `part.part_design` returns, for example
+        `{"diameter": 6.0, "depth": 8.0, "limit": "blind", ...}` for a hole. A kind the SDK
+        does not wrap is still reported, with empty `parameters`.
+
+        Args:
+            name: The feature's name.
+            body: The body to look in; `None` looks in every body.
+
+        Returns:
+            A `FeatureDetails`.
+
+        Raises:
+            FeatureNotFoundError: If no feature has that name.
+            AmbiguousNameError: If several do; pass `body=` to choose.
+            AutomationError: If a read fails.
+        """
+        from auto_3dx.inspect.targeted import feature_details
+
+        return feature_details(self._part, name, body)
+
+    def sketch(self, name: str, body: "str | None" = None) -> "SketchGeometry":
+        """Reads ONE named sketch as plain values: elements, constraints and frame.
+
+        The same result as `part.sketches.get(name).geometry()`, but found in any body.
+
+        Args:
+            name: The sketch's name.
+            body: The body to look in; `None` looks in every body.
+
+        Returns:
+            A `SketchGeometry`.
+
+        Raises:
+            SketchNotFoundError: If no sketch has that name.
+            AmbiguousNameError: If several do; pass `body=` to choose.
+            ValidationError: If the sketch is open for editing through this SDK.
+            AutomationError: If a read fails.
+        """
+        from auto_3dx.inspect.targeted import sketch_geometry
+
+        return sketch_geometry(self._part, name, body)
 
     def update_issues(self) -> "tuple[UpdateIssue, ...]":
         """Lists the features CATIA reports as not up to date or suppressed.

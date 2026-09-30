@@ -23,6 +23,7 @@ from auto_3dx.errors import ParameterTypeError
 from auto_3dx.geometry.edges import Edge
 from auto_3dx.geometry.faces import Face
 from auto_3dx.geometry.facts import CURVE_ARC, CURVE_CIRCLE, CURVE_LINE
+from auto_3dx.geometry.planes import OffsetPlane
 from auto_3dx.geometry.query import (
     DEFAULT_ANGLE_TOLERANCE_DEG,
     DEFAULT_LENGTH_TOLERANCE_MM,
@@ -30,6 +31,7 @@ from auto_3dx.geometry.query import (
     FaceQuery,
 )
 from auto_3dx.geometry.topology import WORK_BODY
+from auto_3dx.highlevel.directions import INTO_MATERIAL, OUT_OF_MATERIAL
 
 if TYPE_CHECKING:
     from auto_3dx.core.part import Part
@@ -50,6 +52,9 @@ EDGE_KIND_CIRCULAR: str = "circular"
 _EDGE_KINDS: "frozenset[str]" = frozenset(
     {EDGE_KIND_LINE, EDGE_KIND_CIRCLE, EDGE_KIND_ARC, EDGE_KIND_CIRCULAR}
 )
+
+_PLANE_SIDES: "dict[str, bool]" = {INTO_MATERIAL: False, OUT_OF_MATERIAL: True}
+"""Side -> `AddNewPlaneOffset` orientation for a face support (probes 47e, 47o)."""
 
 
 def axis_vector(axis: Any) -> "tuple[float, float, float]":
@@ -98,8 +103,21 @@ class PartGeometry:
         return self._part.topology.faces(body=body).query()
 
     def edges(self, body: Any = WORK_BODY) -> EdgeQuery:
-        """A query over a fresh edge snapshot, for chains no finder below covers."""
-        return self._part.topology.edges(body=body).query()
+        """A query over the solid's edges in a fresh snapshot, for chains no finder covers.
+
+        Profile edges of consumed sketches, which the search also returns, are dropped
+        (`EdgeQuery.solid()`): they coincide with the solid's own edges and bound no face.
+        `part.topology.edges(body).query()` keeps them.
+        """
+        return self._part.topology.edges(body=body).query().solid()
+
+    def edges_of(self, face: Face) -> EdgeQuery:
+        """The edges that bound `face`, measured (`part.topology.edges_of`)."""
+        return self._part.topology.edges_of(face)
+
+    def faces_of(self, edge: Edge) -> FaceQuery:
+        """The faces `edge` bounds -- normally two -- measured (`part.topology.faces_of`)."""
+        return self._part.topology.faces_of(edge)
 
     def top_face(self, axis: Any = "Z", body: Any = WORK_BODY) -> Face:
         """The planar face perpendicular to `axis` whose centre lies furthest along it.
@@ -195,6 +213,7 @@ class PartGeometry:
         extreme: Any = None,
         body: Any = WORK_BODY,
         tolerance_mm: float = DEFAULT_LENGTH_TOLERANCE_MM,
+        adjacent_to: "Face | None" = None,
     ) -> Edge:
         """Finds exactly one edge by type, size, orientation and position.
 
@@ -204,6 +223,8 @@ class PartGeometry:
             parallel: Keep straight edges along this axis.
             on_plane_of: Keep edges lying in this planar face's plane (a plane fact, not
                 adjacency; see `EdgeQuery.on_plane_of`).
+            adjacent_to: Keep edges that bound this face (measured adjacency; see
+                `EdgeQuery.adjacent_to`).
             nearest: Keep the edge(s) closest to `(x, y, z)` (a circle's centre, otherwise
                 the midpoint).
             extreme: Keep the edge(s) furthest along a direction, as for faces.
@@ -231,11 +252,56 @@ class PartGeometry:
             query = query.parallel(axis_vector(parallel))
         if on_plane_of is not None:
             query = query.on_plane_of(on_plane_of, tolerance_mm)
+        if adjacent_to is not None:
+            query = query.adjacent_to(adjacent_to)
         if extreme is not None:
             query = query.extreme(_extreme_vector(extreme))
         if nearest is not None:
             query = query.nearest(nearest)
         return query.one()
+
+    def offset_plane(
+        self, name: str, *, face: Face, distance: float, side: str = OUT_OF_MATERIAL
+    ) -> OffsetPlane:
+        """Creates a reference plane parallel to a planar face, on a chosen side of it.
+
+        `part.planes.create_offset(name, face, distance, orientation)` with the orientation
+        that puts the plane on `side`: live, on a block's top, bottom and +X faces,
+        orientation False went into the material and True out of it (probes 47e, 47o).
+        The side is a material side, not the sign of the face's measured normal. Not
+        rebuilt: after `part.update()`, `plane.origin` confirms where it went.
+
+        Args:
+            name: The plane's name.
+            face: A planar `Face` of the solid, from a current snapshot.
+            distance: How far from the face, in millimetres; positive.
+            side: `"out_of_material"` (the default: above a top face) or
+                `"into_material"`.
+
+        Returns:
+            The new `OffsetPlane`; sketch on it with `part.sketches.create(..., support=plane)`.
+
+        Raises:
+            ParameterTypeError: If `distance` is not positive or `side` is unknown.
+            UnsupportedSupportError: If `face` is not planar.
+            StaleSnapshotError: If `face` comes from an outdated snapshot.
+            Auto3dxError: Whatever `part.planes.create_offset` raises.
+        """
+        if side not in _PLANE_SIDES:
+            raise ParameterTypeError(
+                f"side must be {OUT_OF_MATERIAL!r} or {INTO_MATERIAL!r}, not {side!r}."
+            )
+        if isinstance(distance, bool) or not isinstance(distance, (int, float)) or not (
+            distance > 0
+        ):
+            raise ParameterTypeError(f"distance must be a positive number, not {distance!r}.")
+        if not isinstance(face, Face):
+            raise ParameterTypeError(
+                f"face must be a Face from part.topology.faces(), not {type(face).__name__}."
+            )
+        return self._part.planes.create_offset(
+            name, face, float(distance), _PLANE_SIDES[side]
+        )
 
     def __repr__(self) -> str:
         """str: Debug representation; does not contact CATIA."""

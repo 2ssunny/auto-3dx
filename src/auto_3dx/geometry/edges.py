@@ -159,6 +159,7 @@ class Edge:
         owner_feature_name: "str | None" = None,
         measurer: Any = None,
         model_generation: Any = None,
+        from_sketch: "bool | None" = None,
     ) -> None:
         """Initializes the handle.
 
@@ -183,7 +184,10 @@ class Edge:
             owner_feature_name: The feature the reference came from (a `Pad`
                 for a solid edge, the `Sketch` for an edge of a consumed
                 sketch), for error messages.
+            from_sketch: Whether that owner is a sketch, read from the model at
+                snapshot time; `None` when it could not be told.
         """
+        self._from_sketch = from_sketch
         self._reference = reference
         self._index = index
         self._generation = generation
@@ -249,6 +253,19 @@ class Edge:
         return self._geometry
 
     @property
+    def from_sketch(self) -> "bool | None":
+        """bool | None: Whether this is an edge of a consumed sketch, not of the solid.
+
+        A Part-wide or body edge search returns the edges of the solid AND the profile
+        edges of every sketch a feature consumed (probe 46y: 16 edges for a block, its 12
+        plus the sketch's 4); a profile edge's owner is the sketch (probe 42). Such an edge
+        bounds no face, so adjacency queries skip it. Read at snapshot time from the
+        owner's name: `True` when a body's `Sketches` holds it, `False` when a body's
+        `Shapes` does, `None` when that could not be told.
+        """
+        return self._from_sketch
+
+    @property
     def owner_feature_name(self) -> "str | None":
         """str | None: The feature CATIA currently attributes this edge to, if known.
 
@@ -262,6 +279,32 @@ class Edge:
     def generation(self) -> int:
         """int: The model generation this edge's snapshot was taken at."""
         return self._generation
+
+    def describe(self) -> str:
+        """One line of measured facts about this edge, for messages, logs and agents.
+
+        For example ``"line edge, length 60.000 mm, from (-30.000, 20.000, 20.000) to
+        (30.000, 20.000, 20.000), owner 'Pad.1' in body 'PartBody'"``, or for a circle its
+        radius and centre. The owner is CATIA's current owner, not provenance. It contains
+        no index and no BRep name.
+
+        Returns:
+            The description.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the edge cannot be measured.
+        """
+        facts = self.geometry
+        kind = "sketch profile edge" if self._from_sketch else "edge"
+        parts = [f"{facts.curve_type} {kind}", f"length {facts.length_mm:.3f} mm"]
+        if facts.radius_mm is not None and facts.center_mm is not None:
+            parts.append(f"radius {facts.radius_mm:.3f} mm")
+            parts.append(f"centre {_point_text(facts.center_mm)}")
+        else:
+            parts.append(f"from {_point_text(facts.start_mm)} to {_point_text(facts.end_mm)}")
+        parts.append(_owner_text(self._owner_feature_name, self._owner_body_name))
+        return ", ".join(part for part in parts if part)
 
     def _belongs_to(self, generation: Any) -> bool:
         """Whether this edge came from the Part that owns `generation`.
@@ -503,6 +546,23 @@ def take_edge_snapshot(
                 owner_feature_name,
                 measurer,
                 model_generation,
+                index.is_sketch(owner_feature_name) if index is not None else None,
             )
         )
     return EdgeSnapshot(edges, generation)
+
+
+def _point_text(point: "tuple[float, float, float]") -> str:
+    """Renders a point or direction with three decimals, for descriptions."""
+    return "(" + ", ".join(f"{value:.3f}" for value in point) + ")"
+
+
+def _owner_text(feature: "str | None", body: "str | None") -> str:
+    """Renders what CATIA reported as the owner, or nothing when it reported nothing."""
+    if feature and body:
+        return f"owner {feature!r} in body {body!r}"
+    if feature:
+        return f"owner {feature!r}"
+    if body:
+        return f"in body {body!r}"
+    return ""
