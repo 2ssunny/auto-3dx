@@ -12,9 +12,12 @@ the end points are read again. A connected, anchored rectangle keeps (-30, -20) 
 to x = 40 on BOTH the bottom and the top line.
 
     $env:AUTO3DX_LIVE_PART = "<disposable Part>"
-    python -u scripts/probes/47i_connected_rectangle.py
+    python -u scripts/probes/47i_connected_rectangle.py [x0 y0]
+
+With `0 0` the corner sits on both sketch axes, so both anchors are distance-0 constraints.
 """
 
+import sys
 from typing import Any
 
 from _micro import delete, marker, require_blank_target, step, sweep, update_if_needed, verify_blank
@@ -40,7 +43,9 @@ def main() -> None:
         constraints = step("Sketch.Constraints", lambda: sketch.Constraints)
         axis = step("Sketch.AbsoluteAxis", lambda: sketch.AbsoluteAxis)
         factory = step("Sketch.OpenEdition", sketch.OpenEdition)
-        corners = [(-30.0, -20.0), (30.0, -20.0), (30.0, 20.0), (-30.0, 20.0)]
+        x0, y0 = (float(value) for value in sys.argv[1:3]) if len(sys.argv) == 3 else (-30.0, -20.0)
+        marker(f"[INFO] lower-left corner ({x0}, {y0})")
+        corners = [(x0, y0), (x0 + 60.0, y0), (x0 + 60.0, y0 + 40.0), (x0, y0 + 40.0)]
         points = [
             step(f"CreatePoint{corner}", lambda corner=corner: factory.CreatePoint(*corner))
             for corner in corners
