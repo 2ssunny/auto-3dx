@@ -80,12 +80,13 @@ selection -- lives once in `geometry._topology_search.search_references`,
 which both snapshot functions call.
 """
 
+import math
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import pywintypes
 
-from auto_3dx.errors import AutomationError
+from auto_3dx.errors import AutomationError, ParameterTypeError
 from auto_3dx.geometry._topology_search import (
     BodyIndex,
     owner_of,
@@ -181,6 +182,7 @@ class Face:
         self._measurer = measurer
         self._model_generation = model_generation
         self._geometry: Any = None
+        self._point_distance: Any = None
 
     @property
     def owner_body(self) -> Any:
@@ -279,6 +281,39 @@ class Face:
             parts.append(f"radius {facts.radius_mm:.3f} mm")
         parts.append(_owner_text(self._owner_feature_name, self._owner_body_name))
         return ", ".join(part for part in parts if part)
+
+    def distance_to(self, point: Any) -> float:
+        """The shortest distance from a point to this face, in millimetres.
+
+        Measured by CATIA (`MeasurableBetween.DistanceMinToPoint`) to the face as it is
+        bounded, not to its plane or cylinder: live (probe 47l) a point in a block's top
+        plane 10 mm beyond its edge measured 10, not 0. It is what `adjacent_to` in
+        `geometry.query` is built on.
+
+        Args:
+            point: `(x, y, z)` in Part millimetres.
+
+        Returns:
+            The distance; 0 for a point on the face.
+
+        Raises:
+            ParameterTypeError: If `point` is not three finite numbers.
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the face cannot be measured.
+        """
+        target = _point3(point, "point")
+        if self._model_generation is not None:
+            self._model_generation.require_current(
+                self._generation, "face", "part.topology.faces()"
+            )
+        if self._measurer is None:
+            raise AutomationError(
+                "This face has no measurer. Take it through part.topology.faces(), which "
+                "measures through the Part's own editor."
+            )
+        if self._point_distance is None:
+            self._point_distance = self._measurer.point_distance(self._reference)
+        return float(self._point_distance(target))
 
     def _belongs_to(self, generation: Any) -> bool:
         """Whether this face came from the Part that owns `generation`.
@@ -512,6 +547,17 @@ def take_face_snapshot(
             )
         )
     return FaceSnapshot(faces, generation)
+
+
+def _point3(value: Any, label: str) -> "tuple[float, float, float]":
+    """Validates an `(x, y, z)` point of finite numbers, before any COM call."""
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ParameterTypeError(f"{label} must be three numbers (x, y, z), not {value!r}.")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value):
+        raise ParameterTypeError(f"{label} must hold numbers, not {value!r}.")
+    if not all(math.isfinite(item) for item in value):
+        raise ParameterTypeError(f"{label} must be finite, not {value!r}.")
+    return (float(value[0]), float(value[1]), float(value[2]))
 
 
 def _point_text(point: "tuple[float, float, float]") -> str:

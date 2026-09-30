@@ -36,6 +36,11 @@ What the live run established, and what this module therefore does:
   `(origin, u, v)`; `u x v` pointed +Z for BOTH the top and the bottom face of a block. The
   normal is therefore exposed as an axis whose sign is not guaranteed, and queries compare
   it sign-insensitively.
+* **Point-to-face distance measures the BOUNDED face.** `GetMeasurable(face, 1)` is a
+  `MeasurableBetween`, and `DistanceMinToPoint(x, y, z)` returns `(distance, x, y, z)` of
+  the closest point (probe 47l): 0 on the face, 5 for a point 5 mm above it, and 10 for a
+  point in the face's plane 10 mm beyond its edge -- the face, not its plane. That is what
+  makes true face/edge adjacency measurable (`geometry.query`).
 * **`MeasureService.GetMeasureItem` is not used.** Its `GetMeasureSurfaceType` and
   `GetMeasureEdgeType` returned "unknown" for every face and edge tried.
 
@@ -57,6 +62,7 @@ from auto_3dx.errors import AutomationError
 MEASURABLE_SERVICE_NAME: str = "MeasurableService"
 """The `Editor.GetService` name that answers `GetMeasurable`."""
 
+_MEASURABLE_BETWEEN = 1
 _MEASURABLE_CIRCLE = 2
 _MEASURABLE_CONE = 3
 _MEASURABLE_CURVE = 4
@@ -352,6 +358,41 @@ class GeometryMeasurer:
             direction = _unit((end[0] - start[0], end[1] - start[1], end[2] - start[2]))
             return EdgeGeometry(CURVE_LINE, length, start, mid, end, direction=direction)
         return EdgeGeometry(CURVE_UNKNOWN, length, start, mid, end)
+
+    def point_distance(self, reference: Any) -> "Callable[[Point], float]":
+        """Returns a function measuring the shortest distance from a point to one face.
+
+        The face is measured once (`GetMeasurable(reference, 1)` as `MeasurableBetween`);
+        each call of the returned function is one `DistanceMinToPoint`. Live (probe 47l)
+        the distance is to the bounded face, not to its underlying surface.
+
+        Args:
+            reference: The face's raw `Reference`, from a `FaceSnapshot`.
+
+        Returns:
+            `distance(point) -> float`, in millimetres, for a point in Part millimetres.
+
+        Raises:
+            AutomationError: If the face cannot be measured (now, or when the function
+                is called).
+        """
+        between = self._measurable(reference, _MEASURABLE_BETWEEN, "MeasurableBetween")
+
+        def distance(point: Point) -> float:
+            try:
+                answer = between.DistanceMinToPoint(
+                    float(point[0]), float(point[1]), float(point[2])
+                )
+            except pywintypes.com_error as error:
+                raise automation_error(error, "measuring a point-to-face distance") from error
+            try:
+                return float(answer[0])
+            except (TypeError, IndexError, ValueError) as error:
+                raise AutomationError(
+                    "MeasurableBetween.DistanceMinToPoint returned no usable distance."
+                ) from error
+
+        return distance
 
     def __repr__(self) -> str:
         """str: Debug representation; does not contact CATIA."""

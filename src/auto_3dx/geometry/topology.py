@@ -22,8 +22,10 @@ the snapshot is still returned and `SelectionNotRestoredWarning` is emitted.
 from typing import Any
 
 from auto_3dx._generation import ModelGeneration
-from auto_3dx.geometry.edges import EdgeSnapshot, take_edge_snapshot
-from auto_3dx.geometry.faces import FaceSnapshot, take_face_snapshot
+from auto_3dx.errors import ParameterTypeError
+from auto_3dx.geometry.edges import Edge, EdgeSnapshot, take_edge_snapshot
+from auto_3dx.geometry.faces import Face, FaceSnapshot, take_face_snapshot
+from auto_3dx.geometry.query import EdgeQuery, FaceQuery
 
 
 class _WorkBody:
@@ -185,6 +187,60 @@ class Topology:
             self._measurer,
             self._generation,
         )
+
+    def edges_of(self, face: Face) -> EdgeQuery:
+        """The edges that bound one face, as a query to narrow further.
+
+        Takes a fresh edge snapshot of the face's body (the whole Part when its body is
+        unknown) and keeps the edges that measure on the face
+        (`EdgeQuery.adjacent_to`): `part.topology.edges_of(top).lines().all()`.
+        Read-only, like `edges`.
+
+        Args:
+            face: A `Face` from a snapshot of the current model.
+
+        Returns:
+            An `EdgeQuery` over the bounding edges.
+
+        Raises:
+            ParameterTypeError: If `face` is not a `Face`.
+            StaleSnapshotError: If `face` comes from an outdated snapshot.
+            ValidationError: If `face` belongs to another Part.
+            AutomationError: If the search or a measurement fails.
+        """
+        if not isinstance(face, Face):
+            raise ParameterTypeError(
+                f"edges_of() takes a Face from part.topology.faces(), not {type(face).__name__}."
+            )
+        self._generation.require_current(face.generation, "face", "part.topology.faces()")
+        return self.edges(body=face.owner_body).query().adjacent_to(face)
+
+    def faces_of(self, edge: Edge) -> FaceQuery:
+        """The faces one edge bounds -- normally two -- as a query to narrow further.
+
+        Takes a fresh face snapshot of the edge's body (the whole Part when its body is
+        unknown) and keeps the faces the edge measures on (`FaceQuery.adjacent_to`).
+        Read-only, like `faces`.
+
+        Args:
+            edge: An `Edge` of the solid from a snapshot of the current model.
+
+        Returns:
+            A `FaceQuery` over the adjacent faces.
+
+        Raises:
+            ParameterTypeError: If `edge` is not an `Edge`.
+            UnsupportedOperationError: If `edge` is a profile edge of a consumed sketch.
+            StaleSnapshotError: If `edge` comes from an outdated snapshot.
+            ValidationError: If `edge` belongs to another Part.
+            AutomationError: If the search or a measurement fails.
+        """
+        if not isinstance(edge, Edge):
+            raise ParameterTypeError(
+                f"faces_of() takes an Edge from part.topology.edges(), not {type(edge).__name__}."
+            )
+        self._generation.require_current(edge.generation, "edge", "part.topology.edges()")
+        return self.faces(body=edge.owner_body).query().adjacent_to(edge)
 
     def __repr__(self) -> str:
         """str: Debug representation; does not contact CATIA."""
