@@ -426,6 +426,60 @@ class AmbiguousNameError(ConflictError):
     """
 
 
+class SelectionCountError(ConflictError):
+    """Raised when the CATIA selection holds a different number of items than asked for.
+
+    `part.selection.one_edge()` and its siblings need exactly one selected item; nothing
+    selected, or several, is refused rather than guessed. Nothing was changed.
+
+    Attributes:
+        count: How many items were selected.
+    """
+
+    def __init__(self, message: str, count: int = 0) -> None:
+        """Initializes the error.
+
+        Args:
+            message: The human-readable description.
+            count: How many items were selected.
+        """
+        super().__init__(message)
+        self.count = count
+
+
+class SelectionTypeError(ConflictError):
+    """Raised when a selected item is not the kind asked for -- a face where an edge was
+    expected, or a kind the SDK does not wrap (a vertex, a product).
+
+    Attributes:
+        expected: The kind that was asked for, such as ``"edge"``.
+        actual: The kinds that were found, one per selected item.
+    """
+
+    def __init__(
+        self, message: str, expected: str = "", actual: "tuple[str, ...]" = ()
+    ) -> None:
+        """Initializes the error.
+
+        Args:
+            message: The human-readable description.
+            expected: The kind that was asked for.
+            actual: The kinds that were found.
+        """
+        super().__init__(message)
+        self.expected = expected
+        self.actual = actual
+
+
+class SelectionOutsidePartError(ConflictError):
+    """Raised when a selected item does not belong to this Part, or that cannot be proven.
+
+    The selection belongs to an editor, and an editor can show more than one Part. An
+    item is attributed to this Part only when one of this Part's bodies provably holds it
+    (COM identity); an item whose owner cannot be established is refused, not assumed.
+    """
+
+
 # --- Automation --------------------------------------------------------------------
 
 

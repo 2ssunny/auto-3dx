@@ -36,6 +36,7 @@ from auto_3dx.geometry.part_design import (
 )
 from auto_3dx.geometry.part_design import PartDesign
 from auto_3dx.geometry.planes import PlaneCollection
+from auto_3dx.geometry.selection import PartSelection
 from auto_3dx.geometry.sketch import SketchCollection
 from auto_3dx.geometry.topology import Topology
 from auto_3dx.highlevel.finders import PartGeometry
@@ -84,6 +85,8 @@ class Part:
         # call, and each must see the others' mutations.
         self._generation = shared_generation(com_object)
         self._topology: Topology | None = None
+        self._measurer: GeometryMeasurer | None = None
+        self._part_selection: PartSelection | None = None
         self._parameters: ParameterCollection | None = None
         self._sketches: SketchCollection | None = None
         self._part_design: PartDesign | None = None
@@ -203,9 +206,31 @@ class Part:
                 self._com_object,
                 self._target_body,
                 self._resolve_topology_body,
-                GeometryMeasurer(self._editor) if self._editor is not None else None,
+                self._geometry_measurer(),
             )
         return self._topology
+
+    def _geometry_measurer(self) -> "GeometryMeasurer | None":
+        """The one measurer every edge and face of this Part measures with, if any."""
+        if self._measurer is None and self._editor is not None:
+            self._measurer = GeometryMeasurer(self._editor)
+        return self._measurer
+
+    @property
+    def selection(self) -> PartSelection:
+        """PartSelection: What the user selected in CATIA, and highlighting.
+
+        ``part.selection.one_edge()`` reads the one selected edge as an ordinary `Edge`;
+        ``part.selection.set(edge)`` highlights an element for the user. Reading never
+        changes the selection or the model; highlighting changes only the UI selection
+        (`auto_3dx.geometry.selection`). Built on first access and cached; it holds no
+        state of its own.
+        """
+        if self._part_selection is None:
+            self._part_selection = PartSelection(
+                self, self._selection, self._geometry_measurer()
+            )
+        return self._part_selection
 
     def _resolve_topology_body(self, body: Any) -> Any:
         """Turns a `body` argument of `part.topology` into a raw CATIA body.

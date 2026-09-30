@@ -94,6 +94,18 @@ from auto_3dx.geometry.part_design import (
     Thickness,
 )
 from auto_3dx.geometry.planes import AnglePlane, OffsetPlane, Plane, PlaneCollection
+from auto_3dx.geometry.selection import (
+    SELECTED_BODY,
+    SELECTED_EDGE,
+    SELECTED_FACE,
+    SELECTED_FEATURE,
+    SELECTED_OTHER,
+    SELECTED_PART,
+    SELECTED_SKETCH,
+    SELECTED_VERTEX,
+    PartSelection,
+    SelectedItem,
+)
 from auto_3dx.geometry.topology import Topology
 from auto_3dx.geometry.sketch import (
     AXIS_TOLERANCE,
@@ -189,6 +201,16 @@ __all__ = [
     "OffsetPlane",
     "AnglePlane",
     "PlaneCollection",
+    "PartSelection",
+    "SelectedItem",
+    "SELECTED_EDGE",
+    "SELECTED_FACE",
+    "SELECTED_VERTEX",
+    "SELECTED_FEATURE",
+    "SELECTED_SKETCH",
+    "SELECTED_BODY",
+    "SELECTED_PART",
+    "SELECTED_OTHER",
     "CONSTRAINT_HORIZONTAL",
     "CONSTRAINT_VERTICAL",
     "CONSTRAINT_LENGTH",
