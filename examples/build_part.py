@@ -63,4 +63,4 @@ if __name__ == "__main__":
     try:
         main()
     except Auto3dxError as error:
-        raise SystemExit(f"{type(error).__name__}: {error}")
+        raise SystemExit(f"{error!r}")

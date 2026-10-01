@@ -11,7 +11,7 @@ Every call here resolves to Level 2 calls a script could make itself -- `create_
 `sketches.create`, `topology.faces().query()...one()`, `measurement.measure()` -- inside
 `part.work_in(body)` where a body is involved. This package imports no COM library and
 never reads a wrapper's `com_object`; `tests/unit/test_highlevel_boundary.py` enforces it.
-Nothing here rebuilds: `part.update()` stays explicit (`docs/phase5-api-design.md`).
+Nothing here rebuilds: `part.update()` stays explicit (`docs/api-design.md` section 20).
 """
 
 from auto_3dx.highlevel.directions import (

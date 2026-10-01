@@ -4,6 +4,9 @@ This document is the architectural contract for `auto-3dx`. New public API, and 
 existing public API, are judged against it. Where the code and this document disagree, one of
 them is a bug: fix the code, or change this document in the same commit with the reason.
 
+This is a contributor document. The user-facing guide to the 1.0.0 API is
+`docs/v1.0.0.md`; where the two describe the same behaviour they must agree.
+
 It supersedes the older layering, error-hierarchy and root-export sections of
 `docs/conventions.md` (sections 3, 5 and 6.7). The measured CATIA facts in
 `docs/conventions.md` section 1 remain the ground truth this contract is built on.
@@ -277,8 +280,9 @@ unsaved-change detector: a standalone parameter change does not make it return `
 
 ## 7. Topology references
 
-Status: Implemented. `part.part_design.snapshot_edges()` and `snapshot_faces()` remain as
-deprecated aliases that warn and share the same generation; they will be removed before 1.0.
+Status: Implemented. `part.part_design.snapshot_edges()` and `snapshot_faces()` remain in
+1.0.0 as deprecated aliases that warn and share the same generation; removing them is a
+breaking change for a later major version.
 
 ```python
 edges = part.topology.edges()            # every body's edges, in one flat list
@@ -316,8 +320,12 @@ that:
   When CATIA reports no owner, the guard allows the call: refusing on a missing answer would
   break valid work. That is the one gap in this guard.
 
-A body's edges include the wire edges of the sketches its features consumed, which a fillet
-cannot use; `owner_feature_name` tells them apart.
+A body's edges include the profile edges of the sketches its features consumed (a block's search
+returns its 12 edges plus the 4 of its sketch, probe 46y), which bound no face and which a
+fillet cannot use. `Edge.from_sketch` tells them apart (read at snapshot time from whether a
+body's `Sketches` or `Shapes` holds the owner's name; `None` when neither or both do);
+`EdgeQuery.solid()` drops them; `part.geometry.edges()`/`find_edge` and adjacency (section 21)
+never return them.
 
 **`owner_feature_name` is not provenance.** It is the feature CATIA currently reports as the
 reference's owner, which for a solid is the *last* feature that produced the result: after a
@@ -345,6 +353,10 @@ visibility, therefore checks `Part.Application.ActiveEditor.ActiveObject == Part
 CATIA and raises `InactivePartError` (a `SessionError`) otherwise. The guard stays until a
 per-editor path is verified. Parameters, formulas, creation and measurement do not use the
 selection and are not guarded.
+
+**The user's selection is a public read (section 21).** `part.selection` reads what the user
+selected into ordinary `Edge`/`Face`/feature/`Sketch`/`Body` wrappers and highlights SDK
+elements; it is a Selection-based operation and has the same active-Part guard.
 
 **Persistent semantic identity is not solved.** Section 19 chooses an edge or face by measured
 properties inside one snapshot, and the same query re-run on a fresh snapshot finds the element
@@ -1013,22 +1025,21 @@ change; the recovery rule of section 6 (undo the edit, then update) is unchanged
 
 ### 19.6 Not covered
 
-- Cone, sphere, torus, spline and B-surface facts; outward normals; face adjacency (Phase 5
-  tried two routes and both failed live; `EdgeQuery.on_plane_of` is a plane fact instead).
+- Cone, sphere, torus, spline and B-surface facts; outward normals.
 - A persistent topology identity, or provenance (which feature *created* an edge).
 - Direction for Shaft, Groove and Rib.
-- A fully constrained rectangle. `SketchEditor.rectangle()` still draws four lines and no
-  constraints; the Phase 5 `Sketch.rectangle(constraints=...)` adds orientation and dimension
-  constraints but never corner coincidence (section 20).
+
+Face/edge adjacency and a fully constrained rectangle, once listed here, are implemented in
+section 21.
 
 ---
 
-## 20. The intent layer (Phase 5)
+## 20. The intent layer
 
 Status: Implemented, pinned by `tests/unit/test_phase5_highlevel.py`,
 `tests/unit/test_highlevel_boundary.py`, `test_phase5_low_level.py`,
-`test_phase5_sketch_reads.py`, and live by `tests/integration/test_phase5_live.py`.
-Design, audit and evidence ledger: `docs/phase5-api-design.md`.
+`test_phase5_sketch_reads.py`, and live by `tests/integration/test_phase5_live.py` and
+`tests/integration/test_v1_live.py`. Evidence: Appendix A.
 
 ### 20.1 Three levels
 
@@ -1057,24 +1068,90 @@ reaches into another object's private state, or calls `update()`/`summary()`.
 - **Targeted reads.** `part.inspect.facts(...)` reads only what is named and never searches
   topology; a fact the model state does not allow is reported, not raised.
 - **Honest primitives.** `Sketch.rectangle(constraints=)` offers `"none"`, `"orientation"`,
-  `"dimensioned"`; no option claims full constraint.
+  `"dimensioned"` (four independent lines, never claimed to be fully constrained) and
+  `"fully"` (shared corners, section 21), which counts degrees of freedom and does not read
+  CATIA's solver status.
 - `Body.features` is still the `FeatureInfo` tuple (a subclass carrying the builders).
 
 ### 20.3 Session state that leaks between holes
 
 CATIA gives a new hole the previous hole's settings: bottom type, limit mode and diameter
-(probe 46q; live, a legacy `create_hole(face, 5)` came out through-all after a through-all hole).
-`create_hole` therefore always writes the limit (a depth means blind), and the intent layer
-writes diameter, bottom and limit. Diameter and bottom of a Level 2 call without them remain
+(probe 46q; live, a legacy `create_hole(face, 5)` came out through-all after a through-all hole),
+and its type (probe 47h). `create_hole` therefore always writes the limit (a depth means blind)
+and the type (simple unless `head=` says otherwise), and the intent layer writes diameter,
+bottom and limit too. Diameter and bottom of a Level 2 call without them remain
 whatever the session carries. The live Phase 5 module ends by leaving the session's hole
 settings at a fresh session's (12 mm, V, blind).
 
 ### 20.4 Evidence discipline
 
-The first Phase 5 probe batched many unknown calls and left CATIA unresponsive, so every
-Phase 5 capability was established by a micro-probe answering one question with flushed
+An early monolithic probe batched many unknown calls and left CATIA unresponsive, so every
+capability since has been established by a micro-probe answering one question with flushed
 markers around each Automation call (`scripts/probes/_micro.py`). A member present in the type
-library is not evidence; see the ledger in `docs/phase5-api-design.md` section 3.
+library is not evidence; see the ledger in Appendix A.
+
+---
+
+## 21. User selection, adjacency and placement checks
+
+Status: Implemented, pinned by `tests/unit/test_v1_selection.py`, `test_v1_adjacency.py`,
+`test_v1_holes.py`, `test_v1_sketch_rectangle.py`, `test_v1_reference_planes.py`,
+`test_v1_inspection_and_collections.py`, and live by `tests/integration/test_v1_live.py`
+(including a human clicking an edge). Evidence: Appendix A, probes 47a-47o.
+
+### 21.1 The user's selection
+
+`part.selection` (`geometry.selection.PartSelection`) turns `Selection.Item(i)` into SDK
+wrappers. The kind comes from `SelectedElement.Type` (a name ending in `Edge` or `Face`, a
+feature type, `Sketch`, `Body`, `Part`); edges and faces are wrapped from `Reference`, a
+sketch from `Value` (its `Reference` fails, probe 47a). A selected edge or face is stamped
+with the current generation, so it is an ordinary handle that goes stale.
+
+- **Ownership is proved, not assumed.** An item is attributed to the Part only when one of
+  the Part's bodies holds it by COM identity: through the `Parent` chain, or by finding the
+  object in a body's `Shapes`/`Sketches` and comparing identity. A matching name alone is
+  never enough. Otherwise `SelectionOutsidePartError`.
+- **Cardinality and kind are explicit.** `one_*` refuses zero or several items
+  (`SelectionCountError`) and a wrong or unwrapped kind (`SelectionTypeError`); nothing is
+  coerced.
+- **Reading is a read.** It neither changes the selection nor advances the generation.
+- **Highlighting changes only the UI selection.** `set`/`add`/`clear` validate every element
+  first (stale, other Part, wrong type) and read the count back, because CATIA was seen to
+  drop an item silently (then `AutomationError`). They do not advance the generation; live,
+  the model was unchanged (probe 47b).
+
+### 21.2 Measured adjacency
+
+`GetMeasurable(face, 1)` is a `MeasurableBetween` whose `DistanceMinToPoint(x, y, z)` measures
+to the **bounded** face, not its plane (probe 47l: a point in the plane 10 mm past the edge
+measured 10). An edge bounds a face when its start, middle and end points all measure within
+a tolerance (default 0.001 mm) of the face. `Face.distance_to`, `EdgeQuery.adjacent_to`,
+`FaceQuery.adjacent_to` and `part.topology.edges_of`/`faces_of` are built on that; no BRep
+name is parsed and no candidate is picked by position. Three samples cannot see an edge that
+leaves the face between them; no such edge has been seen on the solids tested.
+
+### 21.3 Positioned holes are read back
+
+On a face bounded by a single circle CATIA snaps a positioned hole to the circle's centre
+without an error (probe 47d). `create_hole(origin=...)` reads `GetOrigin` before returning;
+when it differs it calls `SetOrigin` once (probe 47m: the correction holds through the rebuild)
+and reads again, and raises `HolePlacementMismatchError` (a `PartialCreationError`, with
+`requested` and `actual`) if it still differs. The hole is never deleted behind the caller's
+back. Heads (`Counterbore`, `Countersink` in depth-and-angle mode) and `up_to_next` are
+verified by exact volumes (probes 47f, 47h); a reversed hole removes nothing (probe 47g) and
+stays refused.
+
+### 21.4 Shared-corner sketches and face offset planes
+
+`SketchEditor.polygon` sets each line's `StartPoint`/`EndPoint` to shared `Point2D` corners,
+and `distance_to_axis` constrains a point against the sketch's `AbsoluteAxis` (read before
+`OpenEdition`). With horizontal/vertical, width, height and two anchors, a rectangle drawn
+this way grew as a whole when its width was driven (probe 47i); that is `constraints="fully"`.
+
+`AddNewPlaneOffset(face, d, orientation)` puts the plane into the material for `False` and out
+of it for `True` on the faces tried, independently of the measured normal's sign (probes 47e,
+47o), which is what `part.geometry.offset_plane(side=...)` maps. A new plane reports no origin
+before `Part.Update()` (probe 47n).
 
 ---
 
@@ -1139,4 +1216,84 @@ library is not evidence; see the ledger in `docs/phase5-api-design.md` section 3
 | `EdgeQuery.on_plane_of` | 19, 20 | Done; a plane fact, not adjacency |
 | Property setters on feature and plane dimensions | 17, 20 | Done; each calls its `set_*` |
 | `auto_3dx.highlevel`: `BodyFeatures`, profiles, `PartGeometry`, `inspect.facts` | 20 | Done; AST-enforced Level 2 only |
-| Face/edge adjacency | 19 | Not available: two routes failed live |
+| Face/edge adjacency | 21 | Done: measured point-to-face distance (two earlier routes failed) |
+| Profile edges of consumed sketches told apart (`Edge.from_sketch`, `EdgeQuery.solid()`) | 7, 21 | Done |
+| `part.selection`: read the user's selection, highlight elements | 21 | Done; ownership by COM identity |
+| Positioned hole origin read back and corrected, `HolePlacementMismatchError` | 21 | Done |
+| Hole `up_to_next`, counterbore and countersink heads; type always written | 21 | Done; countersink depth-and-angle mode only |
+| `constraints="fully"` rectangle, `SketchEditor.polygon`/`distance_to_axis` | 21 | Done; solver status not read |
+| Offset plane from a face on a material side; `Plane.origin`/`normal` | 21 | Done; frame readable after an update |
+| `inspect.feature()` / `inspect.sketch()`, `describe()` on faces and edges | 11, 21 | Done |
+| Circular pattern `full_circle`; `len`/iteration/`in` on bodies and planes | 4, 18 | Done |
+
+---
+
+## Appendix A. Live evidence ledger
+
+The first, monolithic probe 46 left 3DEXPERIENCE busy and unresponsive during its first
+stage (sketch geometry reads, several of them **inside an open edition**, plus several
+constraints on one rectangle). Output was buffered, so the call was not identified; the
+session had to be restarted by the user and nothing leaked into the target Part.
+
+From then on every question was a micro-probe (`scripts/probes/46*_*.py` and `47*_*.py`, shared scaffolding in
+`scripts/probes/_micro.py`): exact target check, blank-baseline check, one uncertain capability,
+a flushed `BEFORE`/`AFTER` marker around every Automation call, run unbuffered, cleanup, and a
+re-verified blank baseline. No micro-probe hung; CATIA answered after every one.
+
+Classification: **VERIFIED_LIVE**, **TYPELIB_ONLY** (declared, never called), **FAILED_LIVE**,
+**HANGS_CATIA**, **UNKNOWN**.
+
+| Probe | Automation call(s) | Result | Class |
+|---|---|---|---|
+| 46 (stage 1) | many sketch reads during an open edition + rectangle constraints | CATIA unresponsive; call not identified | HANGS_CATIA (unattributed) |
+| 46a | `Line2D.GetEndPoints(seed4)` after `CloseEdition` | `(10, 5, 40, 25)` (1e-14 noise) | VERIFIED_LIVE |
+| 46b | `Circle2D.GetCenter(seed2)`, `Radius` after close | `(20, 15)`, `4.0` (probe 43 omitted the seed) | VERIFIED_LIVE |
+| 46c | arc `GetCenter`, `Radius`, `GetEndPoints` | end points `(-14,-10)`,`(-20,-4)`: arc parameters are **radians** | VERIFIED_LIVE |
+| 46ab | closed circle `GetEndPoints` | start == end: a closed circle is told from an arc | VERIFIED_LIVE |
+| 46d | `Constraint.Name/Type/Mode/Status/Dimension.Value` after close | `Length.1`, 5, **0 = driving**, 0 = OK, 30.0 | VERIFIED_LIVE |
+| 46e | `GetConstraintElement(1).DisplayName` | the constrained element's name, `Line.1` | VERIFIED_LIVE |
+| 46ac | `GetConstraintElement(1)` and `(2)` on a perpendicularity | `Line.1`, `Line.2` | VERIFIED_LIVE |
+| 46f | `Construction` read after close | `False` / `True` as written | VERIFIED_LIVE |
+| 46g | `Point2D.GetCoordinates(seed2)` after close | `(-5, 7.5)` | VERIFIED_LIVE |
+| 46h | element fetched by `GeometricElements.Item(name)` in a fresh attach, then reads | same values; collection holds `AbsoluteAxis` (`Axis2D`) first | VERIFIED_LIVE |
+| — | any geometry read **while the edition is open** | not repeated on purpose | UNKNOWN (suspected in the hang) |
+| 46i | `Sketches.Add(<top planar face Reference>)`, `GetAbsoluteAxisData`, `Part.Update` | sketch created; frame `(0,0,20 | X | Y)`; update ok | VERIFIED_LIVE |
+| 46j | same on the bottom and +X side faces | frames `(0,0,0 | X | -Y)`, `(30,-20,0 | Y | Z)`: normal **outward** both times; origin is not the face centre | VERIFIED_LIVE |
+| 46aa | same on a pocket floor (recessed face) | normal `+Z`, outward | VERIFIED_LIVE |
+| 46k | circle on a top-face sketch + `AddNewPocket(sketch, 4)` default direction | `DirectionOrientation` 1; removed exactly 113.097 mm3 at (10, 5, 18): cuts **into** the material; local (u, v) maps through the frame | VERIFIED_LIVE |
+| 46l | pad height 20 -> 30, update | face sketch origin moved to z = 30, pocket followed | VERIFIED_LIVE |
+| — | `Sketches.Add(<cylindrical face>)` | not attempted; the SDK refuses non-planar faces before COM | UNKNOWN |
+| 46m | `AddNewHoleFromPoint(10, 5, 20, top, 8)`, `GetOrigin(seed3)` | placed at (10, 5, 20); default diameter 12, depth 8 | VERIFIED_LIVE |
+| 46n | `BottomLimit.LimitMode = 2` (`catUpToLastLimit`) | removed exactly the through volume; CATIA **rewrote the depth** to 20, and switching back to blind kept 20 | VERIFIED_LIVE |
+| 46o | `BottomType = 0` | flat bottom, exact cylinder volume; default was V (1), 120 degrees | VERIFIED_LIVE |
+| 46q | new hole, no writes | inherited `BottomType` 0 from 46o: **hole defaults are carried over from the last hole** | VERIFIED_LIVE |
+| 46r | `BottomType = 1`, `BottomAngle.Value` | V, 120, exact 46m volume (and the session default restored) | VERIFIED_LIVE |
+| 46q | `BottomAngle.Value` on a flat hole | E_FAIL | FAILED_LIVE |
+| 46s | `Diameter`, `BottomType`, `LimitMode` all written **before** the first update | exact through volume, origin kept | VERIFIED_LIVE |
+| 46p | hole on the +X side face, `GetDirection(seed3)` | `(-1, 0, 0)`: into the material; origin kept | VERIFIED_LIVE |
+| — | `SetDirection`, threads | not attempted | TYPELIB_ONLY |
+| 46t | `AddNewCircPattern(... PlaneYZ/ZX/XY as centre and axis ...)` | YZ -> X axis, ZX -> Y axis, XY -> Z axis (COG-identified) | VERIFIED_LIVE |
+| 46u | cylindrical face Reference as centre and axis | rotation about the cylinder axis (exact volume and COG) | VERIFIED_LIVE |
+| 46v | linear edge Reference as centre and axis | rotation about the edge (exact volume and COG) | VERIFIED_LIVE |
+| 46w | `CircularPatternParameters = 1` (complete crown) | write accepted and read back, **geometry unchanged**; reading the default fails | FAILED_LIVE |
+| 46x | `iIsReversedRotationAxis` False / True about Z | False: clockwise seen from +Z; True: counter-clockwise | VERIFIED_LIVE (Z only) |
+| 46y | face selected + `Search("Topology.Edge,sel")` | 0 hits | FAILED_LIVE |
+| 46z, 46z2 | `DistanceMinToPoint` on a measurable requested as a plane (type 7) | "Invalid number of parameters" (wrong measurable type; see 47l) | FAILED_LIVE |
+| 46ad | four H/V constraints on one rectangle | created; normalised to `Parallelism` (type 8); update ok | VERIFIED_LIVE |
+| 46ae | the same plus two length constraints with values | 6 constraints, all OK; update ok | VERIFIED_LIVE |
+| 46u (cleanup) | delete a pad whose face had served as a pattern axis | its sketch **was not** cascade-deleted | VERIFIED_LIVE (recorded) |
+| 47a | `Selection.Item(1).Type`, `.Value`, `.Reference` for search-selected edges, faces, a pad and a sketch | `RectilinearTriDimFeatEdge`, `PlanarFace`, `Pad`, `Sketch`; `Reference` works except for the sketch (E_FAIL) | VERIFIED_LIVE |
+| 47b | `Selection.Add(edge Reference)` and `Add(Value)` | each selected exactly that edge; model unchanged | VERIFIED_LIVE |
+| 47c | face selected by `Value` + `Search("Topology.Edge,sel")`, and edge -> faces | 0 hits both ways | FAILED_LIVE |
+| 47d | `AddNewHoleFromPoint(8, 0, 10)` on a disc's top face (bounded by one circle) | origin **snapped** to (0, 0, 10) with no error; bore at the centre | VERIFIED_LIVE (defect found) |
+| 47e | `AddNewPlaneOffset(top face Reference, 5, False / True)`, origin after update | z = 15 / z = 25 | VERIFIED_LIVE |
+| 47f | `BottomLimit.LimitMode = 1` (up to next) | removed exactly the first plate; mode 2 went through both | VERIFIED_LIVE |
+| 47g | `Hole.Reverse()` | direction flipped, update ok, **0 mm3 removed** | VERIFIED_LIVE (zero effect) |
+| 47h | `Type = 2` + `HeadDiameter`/`HeadDepth`; `Type = 3` + `CounterSunkMode = 0` + `HeadDepth`/`HeadAngle` | exact counterbore and countersink volumes; `Type` carried over between holes; `HeadAngle` read fails on a counterbore | VERIFIED_LIVE |
+| 47i | rectangle with shared `Point2D` corners, H/V, width, height, two `AbsoluteAxis` distance anchors; width 60 -> 70 | all statuses OK; whole rectangle grew, corner fixed | VERIFIED_LIVE |
+| 47j / V12 | a human selects one edge in the 3D view (the raw probe 47j timed out twice with no click; verified through `part.selection` in live stage V12) | read as an ordinary `Edge`; filleted; stale after the update | VERIFIED_LIVE |
+| 47k | suspected dirtying reads on an empty Part | none reproduced the "not up to date" state | UNKNOWN (unattributed) |
+| 47l | `GetMeasurable(face, 1)` -> `MeasurableBetween.DistanceMinToPoint(x, y, z)` | 0 on the face, 5 above it, 10 for an in-plane point 10 mm outside: the **bounded** face | VERIFIED_LIVE |
+| 47m | `Hole.SetOrigin(8, 0, 10)` on the snapped hole of 47d | origin and bore moved to (8, 0); held through the rebuild | VERIFIED_LIVE |
+| 47n | offset plane `GetOrigin` before and after `Part.Update()` | E_FAIL before; (0, 0, 15) after | VERIFIED_LIVE |
+| 47o | offset plane from the bottom and +X faces, orientation False | both into the material, against the measured normal on one and with it on the other | VERIFIED_LIVE |

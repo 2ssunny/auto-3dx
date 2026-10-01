@@ -7,7 +7,7 @@ its CATIA work, so a hang can be attributed (run with `-s` and `python -u`):
 
     python -u -m pytest tests/integration/test_phase5_live.py -m integration -s -k <stage>
 
-The expected numbers are the micro-probes' (`docs/phase5-api-design.md` section 3).
+The expected numbers are the micro-probes' (`docs/api-design.md` Appendix A).
 
 CATIA gives a new hole the settings of the previous one (probe 46q), including in the UI.
 These stages make flat and through-all holes, so the module ends by making one hole with

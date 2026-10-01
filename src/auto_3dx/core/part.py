@@ -292,8 +292,8 @@ class Part:
         measurement services are reached through ``Editor.GetService``.
 
         Measuring is how a caller checks that geometry did what was asked, since
-        ``Update()`` succeeding only means a feature rebuilt (``docs/status.md``
-        2.6). ``part.measurement.measure()`` measures the Part's main body; pass a
+        ``Update()`` succeeding only means a feature rebuilt (``docs/api-design.md``
+        section 6). ``part.measurement.measure()`` measures the Part's main body; pass a
         raw item to measure something else.
 
         Raises:
