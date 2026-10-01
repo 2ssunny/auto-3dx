@@ -1,0 +1,174 @@
+# Release: publishes to PyPI when -- and only when -- a GitHub Release is published.
+#
+# Pushing a tag does not trigger this workflow, and neither does saving a draft release.
+# Only clicking "Publish release" does. The jobs then run in order and stop at the first
+# failure, before anything reaches PyPI:
+#
+#   validate-release  the tag is exactly vX.Y.Z, equals [project].version in the tagged
+#                     pyproject.toml, is not marked pre-release, and its commit is
+#                     reachable from main
+#   build             builds the sdist and wheel from that exact validated commit, runs
+#                     `twine check --strict`, checks the metadata inside both artifacts,
+#                     smoke-installs the wheel into a clean environment, and uploads the
+#                     artifacts
+#   publish           uploads exactly those artifacts to PyPI through Trusted Publishing
+#                     (GitHub OIDC; no API token or password is stored anywhere)
+#
+# The workflow never writes a version: the tagged source must already declare it. PyPI
+# versions are immutable, so a broken release is fixed by a new version (1.0.1), never by
+# re-uploading 1.0.0; `skip-existing` is deliberately off, so a re-used version fails.
+#
+# Deliberately not done here: no live 3DEXPERIENCE tests (hosted runners have none; they
+# stay local and opt-in), and no wheel/sdist upload to the GitHub Release page, which would
+# need `contents: write`. Both can be added later without changing the PyPI path.
+#
+# Required one-time setup (outside this file): a PyPI Trusted Publisher for owner 2ssunny,
+# repository auto-3dx, workflow release.yml, environment pypi; and a GitHub Environment
+# named `pypi`, ideally with required reviewers.
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    name: validate-release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.commit.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          # Full history and every branch, so the tag's ancestry can be checked.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Check the tag against the declared package version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/release/validate_release_tag.py --tag "$TAG" --pyproject pyproject.toml
+
+      - name: Refuse a release marked as pre-release
+        env:
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "::error::The release is marked pre-release, but its vX.Y.Z tag would publish a final version to PyPI."
+            exit 1
+          fi
+
+      - name: Check that the tagged commit is on main
+        id: commit
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          if [ "$(git rev-parse HEAD)" != "$commit" ]; then
+            echo "::error::The checkout is not the tagged commit $commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::Tag $TAG points to $commit, which is not reachable from main. Release only from main."
+            exit 1
+          fi
+          echo "Tag $TAG -> $commit, reachable from main."
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: validate-release
+    runs-on: windows-latest
+    env:
+      PACKAGE_VERSION: ${{ needs.validate-release.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.validate-release.outputs.commit }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit validated above, not the tag name: a tag moved after validation
+          # cannot change what is built.
+          ref: ${{ needs.validate-release.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install the packaging tools
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip build twine trove-classifiers
+
+      - name: Build the sdist and the wheel from the release commit
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $head = git rev-parse HEAD
+          if ($head -ne $env:RELEASE_COMMIT) { throw "Checked out $head, expected $env:RELEASE_COMMIT." }
+          python -m build
+
+      - name: Check the distribution metadata
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m twine check --strict dist/*
+
+      - name: Check the artifacts against the release version
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python scripts/release/check_dist.py --dist dist --expected-version $env:PACKAGE_VERSION
+
+      - name: Install the wheel into a clean environment and import it
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $venv = Join-Path $env:RUNNER_TEMP "smoke"
+          python -m venv $venv
+          $python = Join-Path $venv "Scripts\python.exe"
+          & $python -m pip install --upgrade pip
+          & $python -m pip install "dist\auto_3dx-$env:PACKAGE_VERSION-py3-none-any.whl"
+          Set-Location $env:RUNNER_TEMP
+          & $python (Join-Path $env:GITHUB_WORKSPACE "scripts\release\smoke_installed.py") `
+            --expected-version $env:PACKAGE_VERSION --forbid-path $env:GITHUB_WORKSPACE
+
+      - name: Keep the validated artifacts for publishing
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: [validate-release, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/auto-3dx
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Fetch exactly the artifacts that passed the build checks
+        uses: actions/download-artifact@v8
+        with:
+          name: python-dist
+          path: dist/
+
+      - name: Publish to PyPI through Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

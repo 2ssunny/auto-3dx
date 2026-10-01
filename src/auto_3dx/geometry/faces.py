@@ -80,13 +80,23 @@ selection -- lives once in `geometry._topology_search.search_references`,
 which both snapshot functions call.
 """
 
+import math
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pywintypes
 
-from auto_3dx.geometry._topology_search import search_references
+from auto_3dx.errors import AutomationError, ParameterTypeError
+from auto_3dx.geometry._topology_search import (
+    BodyIndex,
+    owner_of,
+    search_references,
+)
+from auto_3dx.geometry.facts import FaceGeometry
 from auto_3dx.geometry.sketch import _wrap_com_error
+
+if TYPE_CHECKING:
+    from auto_3dx.geometry.query import FaceQuery
 
 FACE_SEARCH_QUERY: str = "Topology.Face,all"
 """The only verified `Selection.Search` query that enumerates solid faces.
@@ -95,7 +105,16 @@ FACE_SEARCH_QUERY: str = "Topology.Face,all"
 it does for edges; `Search("Topology.Edge,all")` returns edges, which are the
 wrong kind of reference for `AddNewShell`/`AddNewThickness`/`AddNewHole`.
 This is the one string this module ever passes to `Search`
-(`docs/conventions.md` section 1.2.2.2, probe 37).
+(`docs/conventions.md` section 1.2.2.2, probe 37) when the search covers the whole
+Part.
+"""
+
+FACE_SEARCH_QUERY_IN_SELECTION: str = "Topology.Face,sel"
+"""The same search, restricted to whatever is selected when it runs.
+
+Selecting one body and running this returned that body's faces only (probe 42, live
+2026-09-18), which is how `part.topology.faces(body=...)` scopes a snapshot. A body
+whose features have not been rebuilt reports no faces at all rather than failing.
 """
 
 
@@ -120,7 +139,17 @@ class Face:
     `descriptor` again.
     """
 
-    def __init__(self, reference: Any, index: int, generation: int = 0) -> None:
+    def __init__(
+        self,
+        reference: Any,
+        index: int,
+        generation: int = 0,
+        owner_body: Any = None,
+        owner_body_name: "str | None" = None,
+        owner_feature_name: "str | None" = None,
+        measurer: Any = None,
+        model_generation: Any = None,
+    ) -> None:
         """Initializes the handle.
 
         Args:
@@ -131,15 +160,170 @@ class Face:
             generation: The model generation the snapshot was taken at, so a
                 later change can mark this handle stale. Defaults to 0 for a
                 `Face` built directly in a test, with no owning `PartDesign`.
+            owner_body: The raw `Body` COM object this face was found in, read
+                from the reference's owner chain at snapshot time. `None` when
+                CATIA did not report one, which leaves the ownership guard in
+                `PartDesign` unable to refuse this face.
+            owner_body_name: That body's name, for error messages.
+            measurer: The `GeometryMeasurer` that measures this face on demand, from
+                the Part's editor. `None` for a handle built directly, which then cannot
+                report `geometry`.
+            model_generation: The owning Part's `ModelGeneration`, checked before
+                `geometry` is read so a stale handle is refused.
+            owner_feature_name: The feature the reference came from, for error
+                messages.
         """
         self._reference = reference
         self._index = index
         self._generation = generation
+        self._owner_body = owner_body
+        self._owner_body_name = owner_body_name
+        self._owner_feature_name = owner_feature_name
+        self._measurer = measurer
+        self._model_generation = model_generation
+        self._geometry: Any = None
+        self._point_distance: Any = None
+
+    @property
+    def owner_body(self) -> Any:
+        """Any: The raw `Body` this face belongs to, or `None` if CATIA did not say.
+
+        Read from the model when the snapshot was taken (`Reference.Parent` up to the
+        owning `Body`, probe 42), never remembered between processes. A feature refuses
+        a face whose owner is a different body from the one it builds in
+        (`CrossBodyReferenceError`).
+        """
+        return self._owner_body
+
+    @property
+    def owner_body_name(self) -> "str | None":
+        """str | None: The name of the body this face belongs to, if known."""
+        return self._owner_body_name
+
+    @property
+    def current_owner_feature_name(self) -> "str | None":
+        """str | None: The feature CATIA currently attributes this face to.
+
+        Same value as `owner_feature_name`, under a name that says what it is. It is read
+        from `Reference.Parent`, which names the feature whose RESULT carries the face
+        now -- usually the latest solid feature in the body. It is NOT the feature that
+        first created the face: live, after one fillet every edge of a block reported the
+        fillet as its owner (probe 45). Use it to scope a query to "what the current solid
+        is made of", never as history.
+        """
+        return self._owner_feature_name
+
+    @property
+    def geometry(self) -> FaceGeometry:
+        """FaceGeometry: What this face is, measured through `MeasurableService`.
+
+        Measured on first access and kept for the life of this handle, which is safe only
+        because a handle belongs to one model generation: once anything changes the model,
+        reading it raises `StaleSnapshotError` instead of returning numbers about geometry
+        that may no longer exist.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If this face was not taken through `part.topology` (there is
+                nothing to measure it with), or CATIA cannot measure it.
+        """
+        if self._model_generation is not None:
+            self._model_generation.require_current(self._generation, "face", "part.topology.faces()")
+        if self._measurer is None:
+            raise AutomationError(
+                "This face has no measurer. Take it through part.topology.faces(), which measures "
+                "through the Part's own editor."
+            )
+        if self._geometry is None:
+            self._geometry = self._measurer.face(self._reference)
+        return self._geometry
+
+    @property
+    def owner_feature_name(self) -> "str | None":
+        """str | None: The feature CATIA currently attributes this face to, if known.
+
+        Read from `Reference.Parent`: the feature whose result carries the face now,
+        usually the latest solid feature in the body. Not historical provenance --
+        see `current_owner_feature_name`.
+        """
+        return self._owner_feature_name
 
     @property
     def generation(self) -> int:
         """int: The model generation this face's snapshot was taken at."""
         return self._generation
+
+    def describe(self) -> str:
+        """One line of measured facts about this face, for messages, logs and agents.
+
+        Built from `geometry` (measured once, lazily) and the owner read at snapshot time,
+        for example ``"planar face, area 2400.000 mm2, centre (0.000, 0.000, 20.000),
+        normal axis (0.000, 0.000, 1.000), owner 'Pad.1' in body 'PartBody'"``. The owner
+        is CATIA's current owner, not the feature that created the face. It contains no
+        index and no BRep name: neither identifies the face beyond this snapshot.
+
+        Returns:
+            The description.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the face cannot be measured.
+        """
+        facts = self.geometry
+        parts = [
+            f"{facts.surface_type} face",
+            f"area {facts.area_mm2:.3f} mm2",
+            f"centre {_point_text(facts.center_mm)}",
+        ]
+        if facts.normal is not None:
+            parts.append(f"normal axis {_point_text(facts.normal)}")
+        if facts.radius_mm is not None:
+            parts.append(f"radius {facts.radius_mm:.3f} mm")
+        parts.append(_owner_text(self._owner_feature_name, self._owner_body_name))
+        return ", ".join(part for part in parts if part)
+
+    def distance_to(self, point: Any) -> float:
+        """The shortest distance from a point to this face, in millimetres.
+
+        Measured by CATIA (`MeasurableBetween.DistanceMinToPoint`) to the face as it is
+        bounded, not to its plane or cylinder: live (probe 47l) a point in a block's top
+        plane 10 mm beyond its edge measured 10, not 0. It is what `adjacent_to` in
+        `geometry.query` is built on.
+
+        Args:
+            point: `(x, y, z)` in Part millimetres.
+
+        Returns:
+            The distance; 0 for a point on the face.
+
+        Raises:
+            ParameterTypeError: If `point` is not three finite numbers.
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the face cannot be measured.
+        """
+        target = _point3(point, "point")
+        if self._model_generation is not None:
+            self._model_generation.require_current(
+                self._generation, "face", "part.topology.faces()"
+            )
+        if self._measurer is None:
+            raise AutomationError(
+                "This face has no measurer. Take it through part.topology.faces(), which "
+                "measures through the Part's own editor."
+            )
+        if self._point_distance is None:
+            self._point_distance = self._measurer.point_distance(self._reference)
+        return float(self._point_distance(target))
+
+    def _belongs_to(self, generation: Any) -> bool:
+        """Whether this face came from the Part that owns `generation`.
+
+        Every wrapper of one CATIA Part shares one `ModelGeneration` object
+        (`docs/api-design.md` 5.1), so identity of that object is identity of the Part.
+        A handle built directly, without one, cannot say and is let through, the same
+        policy as an unknown owner body.
+        """
+        return self._model_generation is None or self._model_generation is generation
 
     @property
     def com_object(self) -> Any:
@@ -241,6 +425,19 @@ class FaceSnapshot:
         """int: The model generation this snapshot was taken at."""
         return self._generation
 
+    def query(self) -> "FaceQuery":
+        """Starts a geometry query over this snapshot's faces.
+
+        The query is bound to this snapshot, so it inherits its staleness: once the model
+        changes, reading any face's geometry raises `StaleSnapshotError`.
+
+        Returns:
+            A `FaceQuery` over every face in this snapshot.
+        """
+        from auto_3dx.geometry.query import FaceQuery
+
+        return FaceQuery(list(self._faces))
+
     def __len__(self) -> int:
         """Returns how many faces this snapshot found.
 
@@ -285,7 +482,14 @@ class FaceSnapshot:
         return f"FaceSnapshot(count={len(self._faces)}, generation={self._generation})"
 
 
-def take_face_snapshot(selection: Any, generation: int = 0) -> FaceSnapshot:
+def take_face_snapshot(
+    selection: Any,
+    generation: int = 0,
+    part_com_object: Any = None,
+    body: Any = None,
+    measurer: Any = None,
+    model_generation: Any = None,
+) -> FaceSnapshot:
     """Runs the one verified face search and returns a fresh `FaceSnapshot`.
 
     This is the face counterpart of `geometry.edges.take_edge_snapshot`,
@@ -303,6 +507,12 @@ def take_face_snapshot(selection: Any, generation: int = 0) -> FaceSnapshot:
         generation: The model generation to stamp the snapshot with, so a
             later change can mark it stale. Defaults to 0 for a snapshot with
             no owning `PartDesign`.
+        part_com_object: The raw Part being searched; the search is refused unless it
+            is the active Part.
+        body: The raw `Body` COM object to search inside. `None` searches the whole
+            Part, as `Topology.Face,all` has always done. Passing a body selects it and
+            searches `Topology.Face,sel`, which live returned that body's faces only
+            (probe 42). Either way each `Face` carries the body it was found in.
 
     Returns:
         A fresh `FaceSnapshot` describing every face of the solid as it
@@ -318,9 +528,49 @@ def take_face_snapshot(selection: Any, generation: int = 0) -> FaceSnapshot:
         SelectionNotRestoredWarning: If the selection did not fully come back.
             The snapshot is still valid.
     """
-    references = search_references(selection, FACE_SEARCH_QUERY)
-    faces = [
-        Face(reference, position, generation)
-        for position, reference in enumerate(references, start=1)
-    ]
+    query = FACE_SEARCH_QUERY if body is None else FACE_SEARCH_QUERY_IN_SELECTION
+    references = search_references(selection, query, part_com_object, body)
+    index = BodyIndex(part_com_object) if part_com_object is not None else None
+    faces = []
+    for position, reference in enumerate(references, start=1):
+        owner_body, owner_body_name, owner_feature_name = owner_of(reference, index)
+        faces.append(
+            Face(
+                reference,
+                position,
+                generation,
+                owner_body,
+                owner_body_name,
+                owner_feature_name,
+                measurer,
+                model_generation,
+            )
+        )
     return FaceSnapshot(faces, generation)
+
+
+def _point3(value: Any, label: str) -> "tuple[float, float, float]":
+    """Validates an `(x, y, z)` point of finite numbers, before any COM call."""
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ParameterTypeError(f"{label} must be three numbers (x, y, z), not {value!r}.")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value):
+        raise ParameterTypeError(f"{label} must hold numbers, not {value!r}.")
+    if not all(math.isfinite(item) for item in value):
+        raise ParameterTypeError(f"{label} must be finite, not {value!r}.")
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
+def _point_text(point: "tuple[float, float, float]") -> str:
+    """Renders a point or direction with three decimals, for descriptions."""
+    return "(" + ", ".join(f"{value:.3f}" for value in point) + ")"
+
+
+def _owner_text(feature: "str | None", body: "str | None") -> str:
+    """Renders what CATIA reported as the owner, or nothing when it reported nothing."""
+    if feature and body:
+        return f"owner {feature!r} in body {body!r}"
+    if feature:
+        return f"owner {feature!r}"
+    if body:
+        return f"in body {body!r}"
+    return ""

@@ -19,6 +19,7 @@ CATEGORIES = {
         "CatiaConnectionError",
         "NoActiveEditorError",
         "NoActivePartError",
+        "InactivePartError",
     },
     "ValidationError": {
         "ParameterNameError",
@@ -27,6 +28,10 @@ CATEGORIES = {
         "UnsupportedMagnitudeError",
         "UnsupportedSupportError",
         "StaleSnapshotError",
+        "CrossBodyReferenceError",
+        "SupportNotUpdatedError",
+        "UnsupportedOperationError",
+        "UnknownFactError",
     },
     "NotFoundError": {
         "ParameterNotFoundError",
@@ -34,6 +39,10 @@ CATEGORIES = {
         "FeatureNotFoundError",
         "FormulaNotFoundError",
         "ConstraintNotFoundError",
+        "PlaneNotFoundError",
+        "BodyNotFoundError",
+        "SketchElementNotFoundError",
+        "TopologyQueryNoMatchError",
     },
     "ConflictError": {
         "ParameterAlreadyExistsError",
@@ -42,12 +51,27 @@ CATEGORIES = {
         "FeatureConflictError",
         "SketchSupportMismatchError",
         "AmbiguousNameError",
+        "SelectionCountError",
+        "SelectionTypeError",
+        "SelectionOutsidePartError",
+        "BodyAlreadyExistsError",
+        "BodyRemovalError",
+        "TargetNotUpToDateError",
+        "ParameterInUseError",
+        "BooleanOperationError",
+        "TopologyQueryAmbiguousError",
+        "ReferenceInUseError",
+        "FactUnavailableError",
     },
     "AutomationError": {
         "PartUpdateError",
         "PartialCreationError",
+        "HolePlacementMismatchError",
     },
 }
+NESTED = {"HolePlacementMismatchError": "PartialCreationError"}
+"""Members whose direct parent is another member: a misplaced hole is also a creation
+that left an object behind, so `except PartialCreationError` still catches it."""
 HRESULT_EXCEPTION_OCCURRED = -2147352567
 
 
@@ -86,7 +110,9 @@ def test_the_base_derives_from_exception() -> None:
 )
 def test_each_error_belongs_to_its_documented_category(category: str, member: str) -> None:
     """A class moving between categories changes what callers catch."""
-    assert getattr(errors, member).__bases__ == (getattr(errors, category),)
+    parent = NESTED.get(member, category)
+    assert getattr(errors, member).__bases__ == (getattr(errors, parent),)
+    assert issubclass(getattr(errors, member), getattr(errors, category))
 
 
 def test_every_error_class_is_accounted_for() -> None:

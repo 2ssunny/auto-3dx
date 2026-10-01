@@ -99,6 +99,8 @@ def _identified_baseline_volume(part: Any) -> float | None:
 def test_measurement_reports_coherent_values_and_safe_unit_conversion(part: Any) -> None:
     """Measure the active solid and verify units without assuming its identity."""
     body = part.com_object.MainBody
+    if int(body.Shapes.Count) == 0:
+        pytest.skip("The main body is empty; CATIA cannot measure it.")
     measurement = part.measurement
 
     properties = measurement.measure(body)

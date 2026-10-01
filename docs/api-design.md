@@ -4,6 +4,9 @@ This document is the architectural contract for `auto-3dx`. New public API, and 
 existing public API, are judged against it. Where the code and this document disagree, one of
 them is a bug: fix the code, or change this document in the same commit with the reason.
 
+This is a contributor document. The user-facing guide to the 1.0.0 API is
+`docs/v1.0.0.md`; where the two describe the same behaviour they must agree.
+
 It supersedes the older layering, error-hierarchy and root-export sections of
 `docs/conventions.md` (sections 3, 5 and 6.7). The measured CATIA facts in
 `docs/conventions.md` section 1 remain the ground truth this contract is built on.
@@ -50,10 +53,16 @@ Catia                                    one attached session
     ├── part_design   PartDesign            solid features (Pad, Pocket, Hole, ...)
     ├── topology      Topology              edges() and faces() snapshots
     ├── measurement   SolidMeasurement      volume, area, mass, centre of gravity
-    ├── inspect       Inspector             structured read-only model summary
+    ├── inspect       Inspector             structured read-only model summary; facts(...)
+    ├── bodies        BodyCollection        Body -> features (BodyFeatures), sketches
+    ├── geometry      PartGeometry          semantic finders (section 20)
     ├── is_up_to_date()                     CATIA rebuild status
     └── update()                            the only call that rebuilds the model
 ```
+
+`bodies`, `geometry`, `inspect.facts`, `body.features.*` builders and the `Sketch.rectangle`/
+`centered_rectangle`/`circle` primitives form the intent layer (Level 3, section 20). Everything
+else above is Level 2.
 
 Rules:
 
@@ -91,7 +100,7 @@ Conversion from CATIA's internal SI units happens at the boundary, never in call
 
 ## 4. Collection conventions
 
-Status: Implemented for parameters, sketches, formulas and constraints. Planes, patterns and
+Status: Implemented for parameters, sketches, formulas, constraints and planes. Patterns and
 topology are documented exceptions.
 
 A collection holding **one kind** of named object offers, where live evidence supports it:
@@ -118,7 +127,9 @@ Rules that apply everywhere:
 
 1. **An operation exists only with live evidence.** If enumerating a CATIA collection has never
    been driven end to end, the wrapper does not offer `list()` or `get()` for it, and the gap is
-   documented. `PlaneCollection` has no `list()` for this reason.
+   documented. `PlaneCollection` had no `list()` for this reason until probe 38 drove
+   `HybridBodies` and `HybridShapes` end to end; it now offers `list`/`names`/`get`, and still no
+   `ensure_*`: that is a deliberate scope choice, not a missing capability.
 2. **Names are not unique in CATIA.** `get` enumerates and counts matches. Two matches raise
    `AmbiguousNameError`; it never silently picks the first.
 3. **Existence is decided by enumeration**, never by catching a COM failure from a name lookup.
@@ -210,16 +221,28 @@ raises `StaleSnapshotError` on mismatch. The model is untouched when this is rai
 ## 6. Update policy
 
 Status: Enforced. `tests/unit/test_update_policy.py` parses the package source and fails if
-anything other than `Part.update()` calls `Update()`, or if anything calls `Save()` or
-`PLMPropagate()`. `update()` advancing the generation is pinned by the generation tests.
+anything other than `Part.update()` or `Body.update()` calls `Update()`/`UpdateObject()`, or if
+anything calls `Save()` or `PLMPropagate()`. `update()` advancing the generation is pinned by the
+generation tests.
 
-**`part.update()` is the only method that rebuilds the model.** No constructor, setter, `ensure`
-or removal calls `Part.Update()`.
+**`part.update()` and `body.update()` are the only methods that rebuild the model.** No
+constructor, setter, `ensure` or removal rebuilds.
 
 ```python
 pad = part.part_design.create_pad("Base", sketch, 20.0)
-part.update()
+part.update()                       # Part.Update(): everything
+
+with part.work_in(tray):
+    part.part_design.create_pad("TrayFloor", tray_sketch, 3.0)
+tray.update()                       # Part.UpdateObject(tray): that body alone
+part.update(tray)                   # the same call, spelled from the Part
 ```
+
+**A body created or edited inside `work_in` is not rebuilt by leaving the block.** Until
+something rebuilds it, `body.is_up_to_date` is `False`, CATIA has no valid solid for it, and
+measuring it fails inside the inertia service, which is why measurement refuses it first
+(section 12). `body.update()` rebuilds one body without touching the rest of the Part and
+without moving the In-Work Object (live, probe 42).
 
 Why explicit:
 
@@ -231,12 +254,24 @@ Why explicit:
 - Several mutations often form one valid state only together, such as a sketch and the pad
   built on it. Batching them before one rebuild avoids rebuilding invalid intermediate states.
 
-After `part.update()` raises `PartUpdateError`:
+After a rebuild raises `PartUpdateError`, **repair the model; deletion is the last step, not
+the first.** Nothing was rolled back and nothing was deleted, and every later update fails while
+the model stays invalid.
 
-1. The feature that caused it is still in the model.
-2. Remove it with the matching `remove_*` method before doing anything else.
-3. Do not retry blindly. The SDK does not roll back automatically, because removing a pad
-   cascades to its sketch, which makes automatic rollback more dangerous than reporting.
+1. Identify what the failure followed.
+2. If it followed an edit to something that already worked -- a dimension, a parameter, a formula
+   -- put the old value back and update again. Live (probe 42): a pad taken from 30 mm to 1 mm
+   broke a 5 mm fillet that depended on it; `part.update()` raised, the fillet stayed in the
+   tree, and restoring 30 mm rebuilt the Part with the fillet intact and the same volume as
+   before.
+3. Confirm the repair with `part.is_up_to_date()`.
+4. Only if there is nothing to roll back -- a newly created feature that never built, or an
+   edit whose previous value is unknown -- remove the offending feature with the matching
+   `remove_*` method.
+
+The SDK does not roll back automatically. It cannot know which change the caller meant to keep,
+and removing a pad cascades to its sketch, so an automatic rollback would destroy more than it
+repairs. Do not retry blindly.
 
 `part.is_up_to_date()` reports CATIA's rebuild status. It is a rebuild-status query, not an
 unsaved-change detector: a standalone parameter change does not make it return `False`.
@@ -245,19 +280,61 @@ unsaved-change detector: a standalone parameter change does not make it return `
 
 ## 7. Topology references
 
-Status: Implemented. `part.part_design.snapshot_edges()` and `snapshot_faces()` remain as
-deprecated aliases that warn and share the same generation; they will be removed before 1.0.
+Status: Implemented. `part.part_design.snapshot_edges()` and `snapshot_faces()` remain in
+1.0.0 as deprecated aliases that warn and share the same generation; removing them is a
+breaking change for a later major version.
 
 ```python
-edges = part.topology.edges()          # EdgeSnapshot of the whole solid
-fillet = part.part_design.create_edge_fillet("F1", edges[0], 1.0)
+edges = part.topology.edges()            # every body's edges, in one flat list
+edges = part.topology.edges(body=tray)   # that body's edges only
+edges = part.topology.edges(body=None)   # the whole Part, even inside work_in
+
+edge = edges.query().lines().parallel((0, 0, 1)).nearest((40, 25, 5)).one()   # section 19
+fillet = part.part_design.create_edge_fillet("F1", edge, 1.0)
 part.update()
 
-faces = part.topology.faces()          # a NEW snapshot: the model changed
-part.part_design.create_shell("S1", faces[0], 2.0, 0.0)
+faces = part.topology.faces(body=tray)   # a NEW snapshot: the model changed
+top = faces.query().planar().normal_parallel((0, 0, 1)).extreme((0, 0, 1)).one()
+part.part_design.create_shell("S1", top, 2.0, 0.0)
 ```
 
-- A snapshot covers the whole solid. No verified search scopes it to one feature.
+**A Part-wide snapshot mixes bodies, so topology is scoped and owned.** `Topology.Edge,all`
+returns the edges of every body in the Part together, and CATIA will happily build a feature in
+one body from another body's edge, failing only at the next `Part.Update()`. Two things prevent
+that:
+
+- **Scoping.** `edges(body=...)`/`faces(body=...)` select that body and search
+  `Topology.Edge,sel`, which live returned only that body's topology and followed the selection,
+  not the In-Work Object (probe 42). Inside `part.work_in(body)` a snapshot follows the work
+  body by default, like sketches and features; `body=None` still asks for the whole Part.
+  Outside a work context, and with no `body` argument, the search is Part-wide exactly as before.
+- **Ownership.** Every `Edge`/`Face` carries `owner_body`, `owner_body_name` and
+  `owner_feature_name`, read at snapshot time by walking `Reference.Parent` up to the owning
+  `Body`. `PartDesign` compares that body with the one it is building in and raises
+  `CrossBodyReferenceError` before calling `ShapeFactory`, so the model is untouched. Ownership
+  is re-read from the model on every snapshot, never remembered between calls or processes.
+  When the `Parent` walk does not reach a body (live, 2026-09-21: a consumed sketch's chain
+  was generic `AnyObject` wrappers after a session restart), the owner is looked up by name
+  among every body's `Shapes` and `Sketches`, and attributed only when exactly one body holds
+  that name.
+  When CATIA reports no owner, the guard allows the call: refusing on a missing answer would
+  break valid work. That is the one gap in this guard.
+
+A body's edges include the profile edges of the sketches its features consumed (a block's search
+returns its 12 edges plus the 4 of its sketch, probe 46y), which bound no face and which a
+fillet cannot use. `Edge.from_sketch` tells them apart (read at snapshot time from whether a
+body's `Sketches` or `Shapes` holds the owner's name; `None` when neither or both do);
+`EdgeQuery.solid()` drops them; `part.geometry.edges()`/`find_edge` and adjacency (section 21)
+never return them.
+
+**`owner_feature_name` is not provenance.** It is the feature CATIA currently reports as the
+reference's owner, which for a solid is the *last* feature that produced the result: after a
+fillet, every edge of the solid (live, probe 45), including the untouched ones, reports the
+fillet. It does not say which feature created an edge. `current_owner_feature_name` is an alias
+whose name says so; new code should prefer it, and should select by geometry (section 19)
+rather than by owner.
+
+- A snapshot covers one body or the whole Part. No verified search scopes it to one feature.
 - `Edge.index` is a position in one snapshot, not an identity.
 - `Edge.descriptor` is CATIA's BRep string, for logging and comparison only. It cannot be stored
   and resolved later: `CreateReferenceFromBRepName` failed in every context tried.
@@ -269,9 +346,22 @@ part.part_design.create_shell("S1", faces[0], 2.0, 0.0)
   snapshot is still returned and `SelectionNotRestoredWarning` is emitted: the selection is
   already lost by then, so raising would only discard a valid snapshot.
 
-**Persistent semantic identity is not solved.** A future selector may choose an edge or face by
-measurable properties such as geometry type, normal, radius, area or position. No such selector
-is public until the properties it depends on are live-verified and the choice is deterministic.
+**Only the active Part.** `Selection.Search` through a non-active Part's editor searched the
+active Part (live, 2026-09-17: five open Parts all reported the active Part's counts). Every
+Selection-based operation, which is topology search, deletion through `remove_*` and body
+visibility, therefore checks `Part.Application.ActiveEditor.ActiveObject == Part` before touching
+CATIA and raises `InactivePartError` (a `SessionError`) otherwise. The guard stays until a
+per-editor path is verified. Parameters, formulas, creation and measurement do not use the
+selection and are not guarded.
+
+**The user's selection is a public read (section 21).** `part.selection` reads what the user
+selected into ordinary `Edge`/`Face`/feature/`Sketch`/`Body` wrappers and highlights SDK
+elements; it is a Selection-based operation and has the same active-Part guard.
+
+**Persistent semantic identity is not solved.** Section 19 chooses an edge or face by measured
+properties inside one snapshot, and the same query re-run on a fresh snapshot finds the element
+again. That is re-identification by description, not a stored identity: nothing survives a
+mutation, and a description that matches two elements is refused rather than guessed.
 
 ---
 
@@ -300,6 +390,8 @@ Auto3dxError
 │   ├── UnsupportedUnitError
 │   ├── UnsupportedMagnitudeError
 │   ├── UnsupportedSupportError
+│   ├── UnsupportedOperationError   the SDK has no evidence for doing this safely
+│   ├── UnknownFactError            inspect.facts() was asked for an unknown fact
 │   └── StaleSnapshotError
 ├── NotFoundError            no object with that name exists
 │   ├── ParameterNotFoundError
@@ -313,6 +405,7 @@ Auto3dxError
 │   ├── FormulaAlreadyExistsError
 │   ├── FeatureConflictError
 │   ├── SketchSupportMismatchError
+│   ├── FactUnavailableError        a requested fact cannot be read in this model state
 │   └── AmbiguousNameError
 └── AutomationError          CATIA rejected or failed a call
     ├── PartUpdateError
@@ -371,8 +464,10 @@ A wrapper can carry facts a raw object cannot. A `SketchElement` records the ske
 drawn in, so passing an element from one sketch into another sketch's constraint or centre line
 is refused with `ValidationError` before any COM call. Sketches are compared with COM `==`, which
 is live-verified for sketches, not Python `is`. A raw object carries no owner and is not checked.
-`SketchElement` deliberately exposes no geometry reads such as radius or coordinates: their live
-evidence varies by property, so those stay behind `com_object` until each is verified.
+Since Phase 5 a `SketchElement` reads its geometry -- `geometry()` for lines, circles/arcs and
+points, `is_construction` -- because each read was verified one at a time with the edition
+closed (probes 46a-46h, 46ab). The reads are refused while the owning sketch's edition is open:
+the only run that read during an open edition left CATIA unresponsive (section 20).
 
 ---
 
@@ -422,10 +517,14 @@ interface that the SDK does not wrap; `supported` says whether `part.part_design
 that kind. Nothing in the model is hidden because the SDK cannot create it.
 
 `bodies` includes the main body, recognised by COM identity rather than by name. A feature in
-any other body has `supported=False`, because `part.part_design` works on the main body only.
+any body reports `supported` by its kind alone, because `part.work_in(body)` lets
+`part.part_design` create and find features in any body (section 16). The top-level
+`features` and `sketches` fields still describe the main body only; each `BodyInfo` carries its
+own, and `render()` lists every body's features.
 `geometrical_sets` lists the sets directly under the Part with their elements' names and kinds.
 `topology` counts come from `part.topology`, so the user's selection is restored (section 7)
-and the generation does not advance.
+and the generation does not advance. It is `None` for a Part that is not the active one, whose
+search would count the active Part instead (section 7).
 
 `in_work_object` reports where CATIA puts the next feature: its `name`, its `kind` (the CATIA
 wrapper type name) and `is_main_body` (COM identity with `MainBody`, not a name comparison).
@@ -445,6 +544,14 @@ geometrical set.
 ## 12. Measurement, export and persistence
 
 Status: measurement Implemented. Export probed live (probe 39) and not available: see below.
+
+**Measurement refuses a target CATIA has not rebuilt.** A body whose features have not been
+rebuilt has no valid solid: the inertia service accepts it and then fails at `GetArea` with a
+bare `E_FAIL` (live, probe 42). `part.measurement.measure()` checks `Part.IsUpToDate(item)`
+first and raises `TargetNotUpToDateError`, naming the body and saying to call `part.update()` or
+`body.update()`. It never rebuilds anything itself: measurement stays read-only, so a measured
+number never hides a model change. When the status cannot be read, the measurement goes ahead
+and CATIA decides.
 
 **Measurement** is a verification layer. A capability is exposed only when it is backed by
 reproducible live evidence. An inertia bounding box once returned correct values and later
@@ -530,10 +637,521 @@ Status: Enforced by review.
 
 - Never save the test document.
 - Every live mutation runs in `try/finally` and removes what it created.
-- After a deliberately broken feature, remove it before continuing: a failed update poisons every
-  later update.
+- After a deliberately broken update, repair the model before continuing: roll the edit back and
+  update again, and remove the feature only when it never built (section 6). A test that leaves
+  the model invalid makes every later test fail.
 - Restore the In-Work Object and the selection when a test changes them.
+- Run only against a disposable Part named by `AUTO3DX_LIVE_PART`. The integration session
+  refuses to start otherwise, and probes select the Part by that name. Remove only what the
+  test created: never a whole shared container such as the `auto_3dx_Planes` set when it
+  existed before the test (conventions 1.8 records the incident that made this a rule).
 - Verify cleanup by counting what remains, not by trusting that removal did not throw.
+- Acceptance scripts use public API only, including the target check:
+  `catia.active_window_title` gives the document title that `Part.Name` does not.
+- `AUTO3DX_LIVE_PART` matches the active Part's `Part.Name` or its 3DEXPERIENCE title, which
+  Automation exposes only as the active window caption (`Part.Name` of a titled Part is still
+  `3D Shape…`).
+- A test that makes a plane records whether `auto_3dx_Planes` existed and removes the set
+  only if the test created it and it is empty again.
+
+---
+
+## 16. Bodies and the In-Work Body
+
+Status: Implemented, pinned by `tests/unit/test_multi_body.py`, live by
+`tests/integration/test_multi_body_live.py` and the two `scripts/acceptance/multi_body_*`
+scripts (conventions 1.9).
+
+```python
+housing = part.bodies.create("OuterHousing")   # the In-Work Object is put back afterwards
+part.bodies.names()                            # ["PartBody", "OuterHousing"]
+part.bodies.get("OuterHousing")                # Body; BodyNotFoundError / AmbiguousNameError
+part.bodies.main                               # the main body, by COM identity
+
+with part.work_in(housing):                    # or part.work_in("OuterHousing")
+    sketch = part.sketches.create("SHELL_SKETCH", support="XY")
+    ...
+    part.part_design.create_pad("SHELL_PAD", sketch, 40)
+part.update()
+
+housing.features                               # FeatureInfo tuple, tree order
+housing.sketch_names
+housing.hide(); housing.is_visible             # False
+housing.show()
+part.bodies.remove("OuterHousing", delete_contents=True)
+```
+
+- **Bodies are found in the model, never remembered.** A new process finds the same bodies by
+  name. `Body.is_main` is COM identity with `MainBody`, not the name `PartBody`.
+- **A body has its own rebuild.** Leaving a `work_in` block does not rebuild anything;
+  `body.is_up_to_date` reports that, `body.update()` rebuilds that body alone (section 6), and
+  measurement refuses a body that has not been rebuilt (section 12). A snapshot taken inside a
+  work context covers that body (section 7).
+- **`work_in` is the only way to model in another body.** Inside the block, `part.sketches`
+  adds to the body's own `Sketches`, `part.part_design` creates and looks up features in that
+  body, and the body is made the In-Work Object immediately before every factory call,
+  because a new feature takes the In-Work Object over. A plane made inside the block hands the
+  In-Work Object back to the work body, not the main body. Outside any block nothing touches
+  the In-Work Object, exactly as before.
+- **Restoration is guaranteed on every exit.** The previous In-Work Object is put back and
+  read back whether the block ends normally or raises. A failed restore after an exception is
+  added to that exception as a note rather than replacing it; after a clean block it raises
+  `AutomationError`. Blocks nest and restore in order. The target stack is transient and is
+  empty after the block.
+- **No silent fallback.** Something that is not a `Body` or a name, or a body of another Part,
+  raises `ParameterTypeError`; a body not in the Part raises `BodyNotFoundError`. Nothing ever
+  falls back to the main body.
+- **`create` leaves the In-Work Object where it was.** `Bodies.Add` moves it to the new body;
+  `create` puts it back, including when naming fails (`PartialCreationError`).
+- **Visibility goes through `Selection.VisProperties`**, so it follows the selection rules of
+  section 7: the user's selection is restored, and the Part must be active. `is_visible` is
+  exposed because `GetShow` read-back was verified live; an unknown state raises
+  `AutomationError` rather than being guessed. Hiding or showing advances the generation.
+- **Removal is guarded.** The main body is never removed (`BodyRemovalError`). A body with
+  features, sketches or geometrical sets is removed only with `delete_contents=True`, and everything in it goes
+  with it. If the In-Work Object was inside the removed body it becomes the main body;
+  otherwise it is kept. A hidden or empty body cannot be measured (CATIA E_FAIL).
+
+Boolean operations (Add, Remove, Intersect, Assemble) were added after this section;
+see section 18. Still not supported: renaming or reordering bodies, geometrical sets
+inside a body, a public In-Work Object setter outside `work_in`, Products and assemblies,
+and any Selection-based operation on a non-active Part.
+
+---
+
+## 17. Editing an existing model
+
+Status: Implemented, pinned by `tests/unit/test_editing.py`, live by
+`tests/integration/test_editing_live.py` and `scripts/acceptance/phase2_editing.py`
+(conventions 1.11).
+
+Creating geometry is only half the job: an agent that reconnects to a model it did not
+build has to be able to change it. Four things make that possible, and each one reads the
+model rather than remembering anything in Python.
+
+**Feature dimensions are edited in place.**
+
+```python
+fillet = part.part_design.get_edge_fillet("F1")
+previous = fillet.radius
+fillet.set_radius(8.0)          # no rebuild happens here
+part.update()
+```
+
+Editing beats deleting and recreating, which would re-resolve the edges or faces the
+feature consumes. Only dimensions verified end to end are exposed -- read, written,
+rebuilt, geometry changed, and read back by a fresh wrapper: `ConstRadEdgeFillet.radius`,
+`Chamfer.length1`/`angle`, `Hole.diameter`/`depth`, `Shell.internal_thickness`/
+`external_thickness`, `Thickness.offset`, alongside the `Pad`/`Pocket` depth and the
+`Shaft`/`Groove` angles that already existed. Conventions 1.11 holds the full matrix,
+including what was deliberately left out: `Chamfer.Length2`, which CATIA refused to write
+in the mode this SDK creates, and the rectangular pattern's dimensions, which are
+unverified.
+
+A setter validates like every other setter (unit, finite positive value), advances the
+generation, and does not rebuild -- so several edits batch into one `part.update()`. After
+a failed update, put the old value back and update again (section 6): live, a fillet taken
+from 4 mm to 8 mm and back returned the exact original volume.
+
+**Sketch elements are found again by name.**
+
+```python
+sketch = part.sketches.get("PROFILE")     # drawn by another process
+sketch.element_names()                    # ['AbsoluteAxis', 'Line.1', 'Line.2', 'Circle.1']
+line = sketch.get_element("Line.1")
+with sketch.edit() as editor:
+    editor.parallel(line, sketch.get_element("Line.2"))
+```
+
+The name CATIA gives an element is its durable identity; a collection index is not. A
+rediscovered `SketchElement` carries its `name`, its `kind` and its owning sketch, so it
+goes straight back into the constraint methods, which still require `edit()`. Reading does
+not. `radius` is exposed for circles because it reads live. Line coordinates were once
+believed unavailable (probe 43 found no coordinate member); `Line2D.GetEndPoints(seed)` reads
+them, and `SketchElement.geometry()` exposes them since Phase 5 (conventions 1.14). A missing name raises `SketchElementNotFoundError` listing what the sketch does
+hold.
+
+**`work_at(feature)` chooses the history position.**
+
+```python
+with part.work_at(part.part_design.get_pad("BASE")):
+    part.part_design.create_pad("RIB", sketch, 6.0)   # lands right after BASE
+part.update()
+```
+
+`work_in(body)` chooses which body to model in; `work_at(feature)` chooses where in that
+body's history the next feature goes. Observed live: with a tree of `PAD, FILLET`, working
+at `PAD` and creating a pad produced `PAD, NEW, FILLET` -- CATIA inserts immediately after
+the In-Work feature, and the downstream fillet stays downstream. It is not tree
+reordering: no existing feature moves.
+
+It takes a feature wrapper from `part.part_design`, never a raw COM object and never a
+body (`work_in` is for bodies), refuses a feature belonging to another Part, and restores
+the exact previous In-Work Object on every exit, including after an exception. The two
+contexts nest and the innermost one decides.
+
+**A parameter a formula reads cannot be removed by accident.**
+
+```python
+part.parameters.dependents("L_box")       # [Formula(name='DriveL')]
+part.parameters.remove("L_box")           # ParameterInUseError; nothing changed
+part.formulas.remove("DriveL")
+part.parameters.remove("L_box")           # now it is safe
+```
+
+CATIA removes such a parameter silently and rewrites the formula body to
+`deleted_L_box * 2`, leaving an orphaned relation and a Part that is no longer up to date
+(live). The guard asks each formula for its own inputs through `Formula.GetInParameter`,
+so the answer comes from the model and works in any process; formula bodies are never
+parsed. `force=True` accepts the orphan deliberately.
+
+**Verified limitation.** Only formulas are covered. `Relations` can also hold rules,
+checks, laws, programs and design tables, none of which expose a verified input list, so a
+parameter used only by one of those is not reported as in use.
+
+---
+
+## 18. Patterns, booleans, constraint removal and suppression
+
+Status: Implemented, pinned by `tests/unit/test_phase3.py`, live by
+`tests/integration/test_phase3_live.py` and `scripts/acceptance/phase3_operations.py`
+(conventions 1.12).
+
+**Circular pattern.** One bolt hole becomes a bolt circle.
+
+```python
+seed = part.part_design.get_pocket("BOLT_HOLE")
+pattern = part.part_design.create_circular_pattern("BOLT_CIRCLE", seed, 6, 60.0)
+part.update()
+pattern.set_angular_instances(8)      # no rebuild here either
+part.update()
+```
+
+The axis is `"X"`, `"Y"`, `"Z"`, a cylindrical `Face` or a linear `Edge` (Phase 5). An origin
+plane passed as both rotation centre and rotation axis turns the pattern about its normal:
+probe 46t identified YZ -> X, ZX -> Y and XY -> Z by centre of gravity, correcting the Phase 3
+conclusion that YZ/ZX could not be identified. A cylindrical face turns it about the cylinder's
+axis (46u) and a linear edge about the edge (46v); both get the staleness, same-Part and
+same-body checks of any topology handle and are measured first. `reverse=True` flips the sense
+(46x: about Z the default is clockwise seen from +Z). Anything else is refused
+(`UnsupportedSupportError`). Complete-crown mode was accepted by CATIA and ignored (46w), so it
+is not offered. The angular row's
+`angular_instances` and `angular_spacing_deg` are readable and writable; `radial_instances`
+is read-only, because this SDK always creates one radial row. The seed feature must belong
+to the body being patterned in, checked with the same ownership machinery as topology
+references (`CrossBodyReferenceError`).
+
+**Multi-body booleans.** All four were verified with exact volumes:
+
+```python
+with part.work_in(housing):                       # the target is the body in work
+    cut = part.part_design.create_boolean_remove("CUT_CORE", core_body)
+part.update()
+cut.tool_body_name                                # 'core_body', read from the model
+```
+
+`create_boolean_remove`, `create_boolean_add`, `create_boolean_intersect` and
+`create_boolean_assemble` each take one tool body, by wrapper or by name. A tool body that
+is the target itself, belongs to another Part, or has already been consumed is refused with
+`BooleanOperationError` before CATIA is called.
+
+**The tool body is consumed, and removal is destructive.** After the operation the tool body
+reports `InBooleanOperation` and disappears from `part.bodies`; `BooleanOperation.tool_body_name`
+is how its name is still readable, in any process. Deleting the boolean deletes that body
+with it -- live, it did not come back and its name could no longer be found -- so
+`remove_boolean(name, delete_consumed_body=True)` makes the caller say so. This is the one
+place in the SDK where removing a feature destroys something else, and the asymmetry is
+deliberate.
+
+**Constraint removal.**
+
+```python
+sketch.constraints.remove("Parallelism.1")        # or a Constraint from the collection
+part.update()
+```
+
+`Constraints.Remove` takes an index, and removing one renumbers the rest, so the collection
+is enumerated and matched by the constraint or its name -- never by an index a caller holds.
+The removal runs inside a sketch edition, which is how every other constraint operation
+already works; inside an open `with sketch.edit()` block that session is reused rather than
+nested, and the edition is always closed in a `finally`.
+
+**Feature suppression.**
+
+```python
+fillet.deactivate()
+part.update()                    # the fillet's material comes back; the feature stays
+fillet.activate()
+part.update()                    # and the filleted volume returns exactly
+```
+
+`is_active`, `activate()` and `deactivate()` are on every Part Design feature wrapper. CATIA
+keeps the state in a `BoolParam` called `Activity` inside `Part.Parameters`, not on the
+feature, so the wrapper walks its own `Parent` chain to the Part and reads it there. Like
+every other setter, these do not rebuild.
+
+Suppression can change the whole solid, so it advances the model generation: topology
+snapshots taken before it are refused with `StaleSnapshotError` (section 7).
+
+**Verified limitation.** Suppressing a feature that later features depend on makes the next
+`Part.Update()` fail: live, suppressing a pad under a fillet did exactly that, leaving the
+Part not up to date with everything still in the tree. The repair is the one from section 6
+-- activate it again and update -- and the SDK does not try to predict which suppressions
+are safe.
+
+---
+
+## 19. Geometry facts, semantic queries and safe modification
+
+Status: Implemented (Phase 4). Evidence: probe 45 and `docs/conventions.md` section 1.13.
+
+Phase 4's principle: an agent must be able to say *which* geometry a command acts on before
+it gets more commands. Every selection below is made from measured facts, never from an index
+or a descriptor string.
+
+### 19.1 Measured facts
+
+```python
+face.geometry.surface_type    # "planar" | "cylindrical" | "unknown"
+face.geometry.area_mm2        # mm2 (CATIA answers in m2; converted)
+face.geometry.center_mm       # centre of gravity, mm
+face.geometry.perimeter_mm
+face.geometry.normal          # planar only: unit plane normal, SIGN NOT OUTWARD
+face.geometry.radius_mm       # cylindrical only
+
+edge.geometry.curve_type      # "line" | "circle" | "arc" | "unknown"
+edge.geometry.length_mm, start_mm, mid_mm, end_mm
+edge.geometry.direction       # line only: unit vector start -> end
+edge.geometry.radius_mm, center_mm, angle_deg    # circle / arc only
+```
+
+- `geometry` is **lazy** and measured **once** per handle (`FaceGeometry`/`EdgeGeometry` are
+  frozen dataclasses). It uses the editor's `MeasurableService`, only reads, and does not
+  advance the generation.
+- A stale handle refuses with `StaleSnapshotError` before measuring. A handle built without a
+  measurer (a hand-made wrapper) raises `AutomationError` pointing at `part.topology`.
+- Classification follows which typed getter CATIA answers (conventions 1.13). Anything else is
+  `"unknown"`, never guessed: cones, spheres, splines and B-surfaces are unknown here.
+- **The plane normal's sign is not the outward direction.** Live, the top and the bottom face
+  of a block both reported +Z. Treat it as an axis only.
+
+### 19.2 Queries
+
+```python
+faces = part.topology.faces(body="PartBody")
+top  = faces.query().planar().normal_parallel((0, 0, 1)).extreme((0, 0, 1)).one()
+bore = faces.query().cylindrical().radius_near(6.0, 0.01).one()
+
+edges = part.topology.edges(body="PartBody")
+rim = (edges.query().circular().radius_near(6.0, 0.01)
+       .nearest((30.0, 0.0, 25.0)).one())
+corner = (edges.query().lines().parallel((0, 0, 1))
+          .nearest((40.0, 25.0, 5.0)).one())
+```
+
+| Step | Faces | Edges |
+|---|---|---|
+| type | `of_type`, `planar`, `cylindrical` | `of_type`, `lines`, `circular` (circle or arc) |
+| orientation | `normal_parallel(axis, tolerance_deg=1.0)` (either sign) | `parallel(axis, tolerance_deg=1.0)` |
+| size | `radius_near`, `area_between`, `largest`, `smallest` | `radius_near`, `length_between`, `longest`, `shortest` |
+| position | `nearest(point)`, `extreme(direction)` | same; a circle's position is its centre, other edges their midpoint |
+| owner | `owned_by(feature_name)` (current owner, not provenance) | same |
+| result | `one()`, `first()`, `all()`, `count()`, `len()` | same |
+
+- Queries are immutable: every step returns a new query, so a partial query can be reused.
+- Tolerances are explicit parameters with documented defaults (1 degree, 1e-3 mm, 1e-3 mm2).
+  Rankings keep every element **tied within the tolerance**, so a symmetric part yields a tie
+  instead of an arbitrary winner.
+- `one()` raises `TopologyQueryNoMatchError` (a `NotFoundError`) on zero matches and
+  `TopologyQueryAmbiguousError` (a `ConflictError`) on more than one. Both messages list the
+  query steps and the measured facts of the candidates. `first()` is an explicit decision to
+  accept the first of several.
+- A query holds its snapshot's handles and goes stale with them. After a mutation, take a new
+  snapshot and run the same query again: that is how an element is found again, in the same
+  process or in another one.
+
+### 19.3 Pad and Pocket direction
+
+```python
+from auto_3dx.geometry.part_design import (
+    DIRECTION_ALONG_SKETCH_NORMAL, DIRECTION_AGAINST_SKETCH_NORMAL,
+)
+hole = part.part_design.create_pocket("HOLE", sketch, 20.0,
+                                      direction=DIRECTION_ALONG_SKETCH_NORMAL)
+hole.direction                 # read back from DirectionOrientation
+hole.set_direction(DIRECTION_AGAINST_SKETCH_NORMAL)
+hole.reverse_direction()       # neither rebuilds, like every setter
+```
+
+`direction=None` keeps CATIA's default: **along** the sketch normal for a Pad and **against**
+it for a Pocket. That default is the zero-effect pocket trap. A pocket sketched on XY under a
+block cuts downward into nothing, and `part.update()` still succeeds with the volume unchanged
+(live: 0 mm3 removed; with `ALONG`, exactly the expected 502.655 mm3). Verify every cut by
+volume.
+
+### 19.4 Editable reference planes
+
+```python
+plane = part.planes.get("BOSS_PLANE")
+plane.set_offset(8.0)           # OffsetPlane; AnglePlane has set_angle(degrees)
+part.update()                   # the sketch on it and every feature on that sketch follow
+
+part.planes.dependents(plane)   # ['BOSS_SK'] -- sketches whose frame is this plane
+part.planes.remove(plane)       # ReferenceInUseError while a sketch uses it
+part.planes.remove(plane, force=True)   # explicit; the dependants will fail to update
+```
+
+Deleting a plane that a sketch uses succeeds in CATIA, but orphans the sketch and every feature
+on it, and the next `update()` fails. Sketches expose no support member, so the dependency is
+found by comparing each sketch's frame with the plane's frame. A sketch on a *different* plane
+with an identical frame counts too, which errs on the side of refusing. The same guard covers
+`remove_geometrical_set()`.
+
+### 19.5 Update diagnostics
+
+```python
+part.inspect.update_issues()   # tuple[UpdateIssue]: name, kind, body_name, up_to_date, active
+try:
+    part.update()
+except PartUpdateError as error:
+    error.issues               # the same, read right after the failure; () if unreadable
+```
+
+This asks `Part.IsUpToDate(feature)` and `Part.IsInactive(feature)` for every feature in every
+body. **It lists symptoms, not the cause.** Live, an invalid boss height flagged the fillet and
+the pocket downstream of the boss, not the boss itself. Suppressing a base pad flagged the pad
+as inactive and its dependants as not up to date. Diagnostics say where to look, not what to
+change; the recovery rule of section 6 (undo the edit, then update) is unchanged.
+
+### 19.6 Not covered
+
+- Cone, sphere, torus, spline and B-surface facts; outward normals.
+- A persistent topology identity, or provenance (which feature *created* an edge).
+- Direction for Shaft, Groove and Rib.
+
+Face/edge adjacency and a fully constrained rectangle, once listed here, are implemented in
+section 21.
+
+---
+
+## 20. The intent layer
+
+Status: Implemented, pinned by `tests/unit/test_phase5_highlevel.py`,
+`tests/unit/test_highlevel_boundary.py`, `test_phase5_low_level.py`,
+`test_phase5_sketch_reads.py`, and live by `tests/integration/test_phase5_live.py` and
+`tests/integration/test_v1_live.py`. Evidence: Appendix A.
+
+### 20.1 Three levels
+
+```text
+Level 3  auto_3dx.highlevel   body.features.pad(...), sketch.rectangle(...),
+                              part.geometry.top_face(), part.inspect.facts(...)
+Level 2  public SDK           everything in sections 2-19
+Level 1  internals            private helpers, _com, _generation, transport
+```
+
+**Level 3 composes Level 2 and nothing else.** Every intent method resolves to Level 2 calls a
+script could write -- `create_pad` inside `part.work_in(body)`, `topology.faces().query()...
+one()`, one `measurement.measure()` -- so validation, staleness, cross-body checks, naming and
+errors are Level 2's, not a copy. `tests/unit/test_highlevel_boundary.py` parses the package
+and fails if it imports a COM library, reads `com_object`, touches a CATIA-style member,
+reaches into another object's private state, or calls `update()`/`summary()`.
+
+### 20.2 Rules the intent layer keeps
+
+- **No rebuild.** `part.update()` stays explicit (section 6).
+- **No guessing.** A direction it cannot determine (`"into_material"` on a sketch not created
+  on a face, `"+X"` on a sketch whose normal is not X) raises `UnsupportedOperationError`.
+  `"forward"`/`"reverse"` are not accepted. A hole only drills into the material.
+- **Finders are queries.** `part.geometry` takes one fresh snapshot per call and returns
+  `one()`; "top" is planar + normal parallel to the axis + extreme centre (section 19).
+- **Targeted reads.** `part.inspect.facts(...)` reads only what is named and never searches
+  topology; a fact the model state does not allow is reported, not raised.
+- **Honest primitives.** `Sketch.rectangle(constraints=)` offers `"none"`, `"orientation"`,
+  `"dimensioned"` (four independent lines, never claimed to be fully constrained) and
+  `"fully"` (shared corners, section 21), which counts degrees of freedom and does not read
+  CATIA's solver status.
+- `Body.features` is still the `FeatureInfo` tuple (a subclass carrying the builders).
+
+### 20.3 Session state that leaks between holes
+
+CATIA gives a new hole the previous hole's settings: bottom type, limit mode and diameter
+(probe 46q; live, a legacy `create_hole(face, 5)` came out through-all after a through-all hole),
+and its type (probe 47h). `create_hole` therefore always writes the limit (a depth means blind)
+and the type (simple unless `head=` says otherwise), and the intent layer writes diameter,
+bottom and limit too. Diameter and bottom of a Level 2 call without them remain
+whatever the session carries. The live Phase 5 module ends by leaving the session's hole
+settings at a fresh session's (12 mm, V, blind).
+
+### 20.4 Evidence discipline
+
+An early monolithic probe batched many unknown calls and left CATIA unresponsive, so every
+capability since has been established by a micro-probe answering one question with flushed
+markers around each Automation call (`scripts/probes/_micro.py`). A member present in the type
+library is not evidence; see the ledger in Appendix A.
+
+---
+
+## 21. User selection, adjacency and placement checks
+
+Status: Implemented, pinned by `tests/unit/test_v1_selection.py`, `test_v1_adjacency.py`,
+`test_v1_holes.py`, `test_v1_sketch_rectangle.py`, `test_v1_reference_planes.py`,
+`test_v1_inspection_and_collections.py`, and live by `tests/integration/test_v1_live.py`
+(including a human clicking an edge). Evidence: Appendix A, probes 47a-47o.
+
+### 21.1 The user's selection
+
+`part.selection` (`geometry.selection.PartSelection`) turns `Selection.Item(i)` into SDK
+wrappers. The kind comes from `SelectedElement.Type` (a name ending in `Edge` or `Face`, a
+feature type, `Sketch`, `Body`, `Part`); edges and faces are wrapped from `Reference`, a
+sketch from `Value` (its `Reference` fails, probe 47a). A selected edge or face is stamped
+with the current generation, so it is an ordinary handle that goes stale.
+
+- **Ownership is proved, not assumed.** An item is attributed to the Part only when one of
+  the Part's bodies holds it by COM identity: through the `Parent` chain, or by finding the
+  object in a body's `Shapes`/`Sketches` and comparing identity. A matching name alone is
+  never enough. Otherwise `SelectionOutsidePartError`.
+- **Cardinality and kind are explicit.** `one_*` refuses zero or several items
+  (`SelectionCountError`) and a wrong or unwrapped kind (`SelectionTypeError`); nothing is
+  coerced.
+- **Reading is a read.** It neither changes the selection nor advances the generation.
+- **Highlighting changes only the UI selection.** `set`/`add`/`clear` validate every element
+  first (stale, other Part, wrong type) and read the count back, because CATIA was seen to
+  drop an item silently (then `AutomationError`). They do not advance the generation; live,
+  the model was unchanged (probe 47b).
+
+### 21.2 Measured adjacency
+
+`GetMeasurable(face, 1)` is a `MeasurableBetween` whose `DistanceMinToPoint(x, y, z)` measures
+to the **bounded** face, not its plane (probe 47l: a point in the plane 10 mm past the edge
+measured 10). An edge bounds a face when its start, middle and end points all measure within
+a tolerance (default 0.001 mm) of the face. `Face.distance_to`, `EdgeQuery.adjacent_to`,
+`FaceQuery.adjacent_to` and `part.topology.edges_of`/`faces_of` are built on that; no BRep
+name is parsed and no candidate is picked by position. Three samples cannot see an edge that
+leaves the face between them; no such edge has been seen on the solids tested.
+
+### 21.3 Positioned holes are read back
+
+On a face bounded by a single circle CATIA snaps a positioned hole to the circle's centre
+without an error (probe 47d). `create_hole(origin=...)` reads `GetOrigin` before returning;
+when it differs it calls `SetOrigin` once (probe 47m: the correction holds through the rebuild)
+and reads again, and raises `HolePlacementMismatchError` (a `PartialCreationError`, with
+`requested` and `actual`) if it still differs. The hole is never deleted behind the caller's
+back. Heads (`Counterbore`, `Countersink` in depth-and-angle mode) and `up_to_next` are
+verified by exact volumes (probes 47f, 47h); a reversed hole removes nothing (probe 47g) and
+stays refused.
+
+### 21.4 Shared-corner sketches and face offset planes
+
+`SketchEditor.polygon` sets each line's `StartPoint`/`EndPoint` to shared `Point2D` corners,
+and `distance_to_axis` constrains a point against the sketch's `AbsoluteAxis` (read before
+`OpenEdition`). With horizontal/vertical, width, height and two anchors, a rectangle drawn
+this way grew as a whole when its width was driven (probe 47i); that is `constraints="fully"`.
+
+`AddNewPlaneOffset(face, d, orientation)` puts the plane into the material for `False` and out
+of it for `True` on the faces tried, independently of the measured normal's sign (probes 47e,
+47o), which is what `part.geometry.offset_plane(side=...)` maps. A new plane reports no origin
+before `Part.Update()` (probe 47n).
 
 ---
 
@@ -556,4 +1174,126 @@ Status: Enforced by review.
 | `part.inspect`: name, rebuild status, features, sketches, user parameters | 11 | Done |
 | `part.inspect`: bodies, geometrical sets, topology counts | 11 | Done |
 | `part.inspect`: In-Work Object (`InWorkObjectInfo`) | 11 | Done |
+| `part.planes`: `list`/`names`/`get`, and cleanup without in-memory state | 4 | Done |
+| `sketch.support()` resolving user-defined planes, not only origin planes | 4 | Done |
+| `part_design`: Multi-sections Solid (`MultiSectionSolid`, sections only) | 4 | Done; builds live for corner-free sections, no closing-point support |
+| `part.topology.edges(body=...)`/`faces(body=...)`, implicit inside `work_in` | 7 | Done |
+| `Edge`/`Face` ownership and `CrossBodyReferenceError` | 7 | Done; unknown owner is allowed through |
+| `body.update()` / `part.update(body)` for a non-main body | 6 | Done |
+| Measurement refuses a target that is not up to date | 12 | Done |
+| `Parameter.value` reads an `EnumParam` through `ValueAsString()` | 4 | Done; writing unverified |
+| Sketch support refuses a plane that was never rebuilt | 4 | Done |
+| `PartUpdateError` recovery: roll the edit back before deleting | 6 | Done (documentation and guidance) |
+| Topology ownership across processes | 7 | Re-read per snapshot; nothing persists, by design |
+| Feature dimension editing (fillet, chamfer, hole, shell, thickness) | 17 | Done; per-dimension evidence in conventions 1.11 |
+| `sketch.get_element(name)` / `elements()`, `SketchElement.name`/`radius` | 17 | Done; line coordinates were thought unavailable, then exposed in Phase 5 (row below) |
+| `part.work_at(feature)` | 17 | Done; CATIA inserts after the In-Work feature |
+| `part.parameters.dependents()` and the removal guard | 17 | Done for formulas; rules/checks/laws not covered |
+| Circular pattern (`create_circular_pattern`, editable angular row) | 18 | Done (Phase 3: Z only; Phase 5 added X/Y, face and edge axes) |
+| Multi-body booleans: remove, add, intersect, assemble | 18 | Done; tool body is consumed |
+| `remove_boolean(..., delete_consumed_body=True)` | 18 | Done; deletion destroys the consumed body |
+| `sketch.constraints.remove()` | 18 | Done; runs inside a sketch edition |
+| Feature suppression (`is_active`/`activate`/`deactivate`) | 18 | Done; advances the generation |
+| `catia.active_window_title` | 15 | Done; the only window read, so acceptance needs no raw COM |
+| `inspect.summary()` classifies CircPattern and the four boolean kinds | 11 | Done |
+| `Face.geometry` / `Edge.geometry` measured facts | 19 | Done; planar/cylindrical, line/circle/arc |
+| `snapshot.query()` semantic selection, `one()` refuses zero or several | 19 | Done |
+| `current_owner_feature_name`; `owner_feature_name` documented as not provenance | 7 | Done |
+| Owner resolution by body membership when the `Parent` walk fails | 7 | Done |
+| Pad/Pocket `direction` at creation and afterwards | 19 | Done; Pocket default cuts against the sketch normal |
+| `OffsetPlane.set_offset` / `AnglePlane.set_angle` | 19 | Done |
+| Plane removal guard and `planes.dependents()` | 19 | Done; frame equality |
+| `inspect.update_issues()` and `PartUpdateError.issues` | 19 | Done; symptoms, not the cause |
+| `part.bodies`: `list`/`names`/`get`/`main`/`create`/guarded `remove` | 16 | Done |
+| `part.work_in(body)`: sketches and Part Design in a chosen body, In-Work Object restored | 16 | Done |
+| `Body.hide()`/`show()`/`is_visible` via `Selection.VisProperties` | 16 | Done |
+| Selection-based operations refuse a non-active Part (`InactivePartError`) | 7 | Done; per-editor search unsolved |
 | File export | 12 | Probed: unavailable for PLM-backed documents |
+| Sketch element geometry, `Sketch.frame()`/`geometry()`, `Constraint.mode`/`element_name` | 9, 20 | Done; refused inside an open edition |
+| Sketch on a planar face (`sketches.create(support=face)`), `body.sketches` | 20 | Done; planar faces of the target body only |
+| Hole origin, diameter, flat/V bottom, blind/through-all | 20 | Done; the limit is always written |
+| Circular pattern about X, Y, Z, a cylindrical face or a linear edge; `reverse` | 18 | Done; crown mode not offered |
+| `EdgeQuery.on_plane_of` | 19, 20 | Done; a plane fact, not adjacency |
+| Property setters on feature and plane dimensions | 17, 20 | Done; each calls its `set_*` |
+| `auto_3dx.highlevel`: `BodyFeatures`, profiles, `PartGeometry`, `inspect.facts` | 20 | Done; AST-enforced Level 2 only |
+| Face/edge adjacency | 21 | Done: measured point-to-face distance (two earlier routes failed) |
+| Profile edges of consumed sketches told apart (`Edge.from_sketch`, `EdgeQuery.solid()`) | 7, 21 | Done |
+| `part.selection`: read the user's selection, highlight elements | 21 | Done; ownership by COM identity |
+| Positioned hole origin read back and corrected, `HolePlacementMismatchError` | 21 | Done |
+| Hole `up_to_next`, counterbore and countersink heads; type always written | 21 | Done; countersink depth-and-angle mode only |
+| `constraints="fully"` rectangle, `SketchEditor.polygon`/`distance_to_axis` | 21 | Done; solver status not read |
+| Offset plane from a face on a material side; `Plane.origin`/`normal` | 21 | Done; frame readable after an update |
+| `inspect.feature()` / `inspect.sketch()`, `describe()` on faces and edges | 11, 21 | Done |
+| Circular pattern `full_circle`; `len`/iteration/`in` on bodies and planes | 4, 18 | Done |
+
+---
+
+## Appendix A. Live evidence ledger
+
+The first, monolithic probe 46 left 3DEXPERIENCE busy and unresponsive during its first
+stage (sketch geometry reads, several of them **inside an open edition**, plus several
+constraints on one rectangle). Output was buffered, so the call was not identified; the
+session had to be restarted by the user and nothing leaked into the target Part.
+
+From then on every question was a micro-probe (`scripts/probes/46*_*.py` and `47*_*.py`, shared scaffolding in
+`scripts/probes/_micro.py`): exact target check, blank-baseline check, one uncertain capability,
+a flushed `BEFORE`/`AFTER` marker around every Automation call, run unbuffered, cleanup, and a
+re-verified blank baseline. No micro-probe hung; CATIA answered after every one.
+
+Classification: **VERIFIED_LIVE**, **TYPELIB_ONLY** (declared, never called), **FAILED_LIVE**,
+**HANGS_CATIA**, **UNKNOWN**.
+
+| Probe | Automation call(s) | Result | Class |
+|---|---|---|---|
+| 46 (stage 1) | many sketch reads during an open edition + rectangle constraints | CATIA unresponsive; call not identified | HANGS_CATIA (unattributed) |
+| 46a | `Line2D.GetEndPoints(seed4)` after `CloseEdition` | `(10, 5, 40, 25)` (1e-14 noise) | VERIFIED_LIVE |
+| 46b | `Circle2D.GetCenter(seed2)`, `Radius` after close | `(20, 15)`, `4.0` (probe 43 omitted the seed) | VERIFIED_LIVE |
+| 46c | arc `GetCenter`, `Radius`, `GetEndPoints` | end points `(-14,-10)`,`(-20,-4)`: arc parameters are **radians** | VERIFIED_LIVE |
+| 46ab | closed circle `GetEndPoints` | start == end: a closed circle is told from an arc | VERIFIED_LIVE |
+| 46d | `Constraint.Name/Type/Mode/Status/Dimension.Value` after close | `Length.1`, 5, **0 = driving**, 0 = OK, 30.0 | VERIFIED_LIVE |
+| 46e | `GetConstraintElement(1).DisplayName` | the constrained element's name, `Line.1` | VERIFIED_LIVE |
+| 46ac | `GetConstraintElement(1)` and `(2)` on a perpendicularity | `Line.1`, `Line.2` | VERIFIED_LIVE |
+| 46f | `Construction` read after close | `False` / `True` as written | VERIFIED_LIVE |
+| 46g | `Point2D.GetCoordinates(seed2)` after close | `(-5, 7.5)` | VERIFIED_LIVE |
+| 46h | element fetched by `GeometricElements.Item(name)` in a fresh attach, then reads | same values; collection holds `AbsoluteAxis` (`Axis2D`) first | VERIFIED_LIVE |
+| — | any geometry read **while the edition is open** | not repeated on purpose | UNKNOWN (suspected in the hang) |
+| 46i | `Sketches.Add(<top planar face Reference>)`, `GetAbsoluteAxisData`, `Part.Update` | sketch created; frame `(0,0,20 | X | Y)`; update ok | VERIFIED_LIVE |
+| 46j | same on the bottom and +X side faces | frames `(0,0,0 | X | -Y)`, `(30,-20,0 | Y | Z)`: normal **outward** both times; origin is not the face centre | VERIFIED_LIVE |
+| 46aa | same on a pocket floor (recessed face) | normal `+Z`, outward | VERIFIED_LIVE |
+| 46k | circle on a top-face sketch + `AddNewPocket(sketch, 4)` default direction | `DirectionOrientation` 1; removed exactly 113.097 mm3 at (10, 5, 18): cuts **into** the material; local (u, v) maps through the frame | VERIFIED_LIVE |
+| 46l | pad height 20 -> 30, update | face sketch origin moved to z = 30, pocket followed | VERIFIED_LIVE |
+| — | `Sketches.Add(<cylindrical face>)` | not attempted; the SDK refuses non-planar faces before COM | UNKNOWN |
+| 46m | `AddNewHoleFromPoint(10, 5, 20, top, 8)`, `GetOrigin(seed3)` | placed at (10, 5, 20); default diameter 12, depth 8 | VERIFIED_LIVE |
+| 46n | `BottomLimit.LimitMode = 2` (`catUpToLastLimit`) | removed exactly the through volume; CATIA **rewrote the depth** to 20, and switching back to blind kept 20 | VERIFIED_LIVE |
+| 46o | `BottomType = 0` | flat bottom, exact cylinder volume; default was V (1), 120 degrees | VERIFIED_LIVE |
+| 46q | new hole, no writes | inherited `BottomType` 0 from 46o: **hole defaults are carried over from the last hole** | VERIFIED_LIVE |
+| 46r | `BottomType = 1`, `BottomAngle.Value` | V, 120, exact 46m volume (and the session default restored) | VERIFIED_LIVE |
+| 46q | `BottomAngle.Value` on a flat hole | E_FAIL | FAILED_LIVE |
+| 46s | `Diameter`, `BottomType`, `LimitMode` all written **before** the first update | exact through volume, origin kept | VERIFIED_LIVE |
+| 46p | hole on the +X side face, `GetDirection(seed3)` | `(-1, 0, 0)`: into the material; origin kept | VERIFIED_LIVE |
+| — | `SetDirection`, threads | not attempted | TYPELIB_ONLY |
+| 46t | `AddNewCircPattern(... PlaneYZ/ZX/XY as centre and axis ...)` | YZ -> X axis, ZX -> Y axis, XY -> Z axis (COG-identified) | VERIFIED_LIVE |
+| 46u | cylindrical face Reference as centre and axis | rotation about the cylinder axis (exact volume and COG) | VERIFIED_LIVE |
+| 46v | linear edge Reference as centre and axis | rotation about the edge (exact volume and COG) | VERIFIED_LIVE |
+| 46w | `CircularPatternParameters = 1` (complete crown) | write accepted and read back, **geometry unchanged**; reading the default fails | FAILED_LIVE |
+| 46x | `iIsReversedRotationAxis` False / True about Z | False: clockwise seen from +Z; True: counter-clockwise | VERIFIED_LIVE (Z only) |
+| 46y | face selected + `Search("Topology.Edge,sel")` | 0 hits | FAILED_LIVE |
+| 46z, 46z2 | `DistanceMinToPoint` on a measurable requested as a plane (type 7) | "Invalid number of parameters" (wrong measurable type; see 47l) | FAILED_LIVE |
+| 46ad | four H/V constraints on one rectangle | created; normalised to `Parallelism` (type 8); update ok | VERIFIED_LIVE |
+| 46ae | the same plus two length constraints with values | 6 constraints, all OK; update ok | VERIFIED_LIVE |
+| 46u (cleanup) | delete a pad whose face had served as a pattern axis | its sketch **was not** cascade-deleted | VERIFIED_LIVE (recorded) |
+| 47a | `Selection.Item(1).Type`, `.Value`, `.Reference` for search-selected edges, faces, a pad and a sketch | `RectilinearTriDimFeatEdge`, `PlanarFace`, `Pad`, `Sketch`; `Reference` works except for the sketch (E_FAIL) | VERIFIED_LIVE |
+| 47b | `Selection.Add(edge Reference)` and `Add(Value)` | each selected exactly that edge; model unchanged | VERIFIED_LIVE |
+| 47c | face selected by `Value` + `Search("Topology.Edge,sel")`, and edge -> faces | 0 hits both ways | FAILED_LIVE |
+| 47d | `AddNewHoleFromPoint(8, 0, 10)` on a disc's top face (bounded by one circle) | origin **snapped** to (0, 0, 10) with no error; bore at the centre | VERIFIED_LIVE (defect found) |
+| 47e | `AddNewPlaneOffset(top face Reference, 5, False / True)`, origin after update | z = 15 / z = 25 | VERIFIED_LIVE |
+| 47f | `BottomLimit.LimitMode = 1` (up to next) | removed exactly the first plate; mode 2 went through both | VERIFIED_LIVE |
+| 47g | `Hole.Reverse()` | direction flipped, update ok, **0 mm3 removed** | VERIFIED_LIVE (zero effect) |
+| 47h | `Type = 2` + `HeadDiameter`/`HeadDepth`; `Type = 3` + `CounterSunkMode = 0` + `HeadDepth`/`HeadAngle` | exact counterbore and countersink volumes; `Type` carried over between holes; `HeadAngle` read fails on a counterbore | VERIFIED_LIVE |
+| 47i | rectangle with shared `Point2D` corners, H/V, width, height, two `AbsoluteAxis` distance anchors; width 60 -> 70 | all statuses OK; whole rectangle grew, corner fixed | VERIFIED_LIVE |
+| 47j / V12 | a human selects one edge in the 3D view (the raw probe 47j timed out twice with no click; verified through `part.selection` in live stage V12) | read as an ordinary `Edge`; filleted; stale after the update | VERIFIED_LIVE |
+| 47k | suspected dirtying reads on an empty Part | none reproduced the "not up to date" state | UNKNOWN (unattributed) |
+| 47l | `GetMeasurable(face, 1)` -> `MeasurableBetween.DistanceMinToPoint(x, y, z)` | 0 on the face, 5 above it, 10 for an in-plane point 10 mm outside: the **bounded** face | VERIFIED_LIVE |
+| 47m | `Hole.SetOrigin(8, 0, 10)` on the snapped hole of 47d | origin and bore moved to (8, 0); held through the rebuild | VERIFIED_LIVE |
+| 47n | offset plane `GetOrigin` before and after `Part.Update()` | E_FAIL before; (0, 0, 15) after | VERIFIED_LIVE |
+| 47o | offset plane from the bottom and +X faces, orientation False | both into the material, against the measured normal on one and with it on the other | VERIFIED_LIVE |

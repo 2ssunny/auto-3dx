@@ -49,14 +49,25 @@ where it matters, not just here:
    selector: a caller cannot store a name or an index and look the same edge
    up again later. `Edge.descriptor` exists only for logging and equality
    comparison within one snapshot, never for storage.
-4. There is no way to scope the search to one feature. Every scoped syntax
-   tried (`Topology.Edge,in,<name>`, `Topology.Edge,sel`, a name filter
-   composed with `&`, ...) either raised a COM error or returned the whole
-   solid (probe 35). `MeasurableService` exposed no length for an edge
-   either, so an edge cannot be picked by measured geometry. A caller who
-   needs "the edges of this pad" has to filter `EdgeSnapshot` results by
-   whatever weaker signal is available to them (e.g. count, or manual
-   inspection), not by anything this module can offer.
+4. The search can be scoped to a BODY, but not to a feature. Selecting one
+   body first and searching `Topology.Edge,sel` returns that body's edges
+   only, and follows the selection rather than the In-Work Object (probe 42,
+   live 2026-09-18); that is what `part.topology.edges(body=...)` does.
+   Scoping to one feature is still unsolved: `Topology.Edge,in,<name>`, a
+   name filter composed with `&` and the rest raised or returned the whole
+   Part (probe 35). What each edge DOES carry is its owner: `owner_body`,
+   `owner_body_name` and `owner_feature_name` come from walking
+   `Reference.Parent` in the model at snapshot time, so `PartDesign` can
+   refuse an edge belonging to another body before CATIA is called. The
+   owner feature is the one whose result carries the edge NOW (after a
+   fillet every edge of a block named the fillet, probe 45), never history.
+
+   An edge CAN now be picked by measured geometry. Probe 31 concluded it could
+   not, but it had passed an item-type code to `MeasurableService.GetMeasurable`
+   whose second argument is a `CATMeasurableType`; with the right codes an edge
+   reports its length, end points, and radius/centre when circular (probe 45).
+   `Edge.geometry` and `EdgeSnapshot.query()` are built on that
+   (`geometry.facts`, `geometry.query`).
 
 WHY THERE IS NO `ensure_edge_fillet`/`ensure_chamfer`. `PartDesign.ensure_pad`
 (`geometry/part_design.py`) reuses an existing feature by comparing its
@@ -77,12 +88,21 @@ than one that silently reuses the wrong geometry.
 """
 
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pywintypes
 
-from auto_3dx.geometry._topology_search import search_references
+from auto_3dx.errors import AutomationError
+from auto_3dx.geometry._topology_search import (
+    BodyIndex,
+    owner_of,
+    search_references,
+)
+from auto_3dx.geometry.facts import EdgeGeometry
 from auto_3dx.geometry.sketch import _wrap_com_error
+
+if TYPE_CHECKING:
+    from auto_3dx.geometry.query import EdgeQuery
 
 EDGE_SEARCH_QUERY: str = "Topology.Edge,all"
 """The only verified `Selection.Search` query that enumerates solid edges.
@@ -91,7 +111,16 @@ EDGE_SEARCH_QUERY: str = "Topology.Edge,all"
 `Search("Topology.Face,all")` returns faces, which are rejected by both
 `AddNewEdgeFilletWithConstantRadius` and `AddNewChamfer`. This is the one
 string this module ever passes to `Search` (`docs/conventions.md` section
-1.2.2.2).
+1.2.2.2) when the search covers the whole Part.
+"""
+
+EDGE_SEARCH_QUERY_IN_SELECTION: str = "Topology.Edge,sel"
+"""The same search, restricted to whatever is selected when it runs.
+
+Selecting one body and running this returned that body's edges only, and it followed
+the selection rather than the In-Work Object (probe 42, live 2026-09-18). It is how
+`part.topology.edges(body=...)` scopes a snapshot to one body. `",in"` was also tried
+and returned the whole Part.
 """
 
 
@@ -120,7 +149,18 @@ class Edge:
     `descriptor` again.
     """
 
-    def __init__(self, reference: Any, index: int, generation: int = 0) -> None:
+    def __init__(
+        self,
+        reference: Any,
+        index: int,
+        generation: int = 0,
+        owner_body: Any = None,
+        owner_body_name: "str | None" = None,
+        owner_feature_name: "str | None" = None,
+        measurer: Any = None,
+        model_generation: Any = None,
+        from_sketch: "bool | None" = None,
+    ) -> None:
         """Initializes the handle.
 
         Args:
@@ -131,15 +171,150 @@ class Edge:
             generation: The model generation the snapshot was taken at, so a
                 later change can mark this handle stale. Defaults to 0 for an
                 `Edge` built directly in a test, with no owning `PartDesign`.
+            owner_body: The raw `Body` COM object this edge was found in, read
+                from the reference's owner chain at snapshot time. `None` when
+                CATIA did not report one, which leaves the ownership guard in
+                `PartDesign` unable to refuse this edge.
+            owner_body_name: That body's name, for error messages.
+            measurer: The `GeometryMeasurer` that measures this edge on demand, from
+                the Part's editor. `None` for a handle built directly, which then cannot
+                report `geometry`.
+            model_generation: The owning Part's `ModelGeneration`, checked before
+                `geometry` is read so a stale handle is refused.
+            owner_feature_name: The feature the reference came from (a `Pad`
+                for a solid edge, the `Sketch` for an edge of a consumed
+                sketch), for error messages.
+            from_sketch: Whether that owner is a sketch, read from the model at
+                snapshot time; `None` when it could not be told.
         """
+        self._from_sketch = from_sketch
         self._reference = reference
         self._index = index
         self._generation = generation
+        self._owner_body = owner_body
+        self._owner_body_name = owner_body_name
+        self._owner_feature_name = owner_feature_name
+        self._measurer = measurer
+        self._model_generation = model_generation
+        self._geometry: Any = None
+
+    @property
+    def owner_body(self) -> Any:
+        """Any: The raw `Body` this edge belongs to, or `None` if CATIA did not say.
+
+        Read from the model when the snapshot was taken (`Reference.Parent` up to the
+        owning `Body`, probe 42), never remembered between processes. A feature refuses
+        an edge whose owner is a different body from the one it builds in
+        (`CrossBodyReferenceError`).
+        """
+        return self._owner_body
+
+    @property
+    def owner_body_name(self) -> "str | None":
+        """str | None: The name of the body this edge belongs to, if known."""
+        return self._owner_body_name
+
+    @property
+    def current_owner_feature_name(self) -> "str | None":
+        """str | None: The feature CATIA currently attributes this edge to.
+
+        Same value as `owner_feature_name`, under a name that says what it is. It is read
+        from `Reference.Parent`, which names the feature whose RESULT carries the edge
+        now -- usually the latest solid feature in the body. It is NOT the feature that
+        first created the edge: live, after one fillet every edge of a block reported the
+        fillet as its owner (probe 45). Use it to scope a query to "what the current solid
+        is made of", never as history.
+        """
+        return self._owner_feature_name
+
+    @property
+    def geometry(self) -> EdgeGeometry:
+        """EdgeGeometry: What this edge is, measured through `MeasurableService`.
+
+        Measured on first access and kept for the life of this handle, which is safe only
+        because a handle belongs to one model generation: once anything changes the model,
+        reading it raises `StaleSnapshotError` instead of returning numbers about geometry
+        that may no longer exist.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If this edge was not taken through `part.topology` (there is
+                nothing to measure it with), or CATIA cannot measure it.
+        """
+        if self._model_generation is not None:
+            self._model_generation.require_current(self._generation, "edge", "part.topology.edges()")
+        if self._measurer is None:
+            raise AutomationError(
+                "This edge has no measurer. Take it through part.topology.edges(), which measures "
+                "through the Part's own editor."
+            )
+        if self._geometry is None:
+            self._geometry = self._measurer.edge(self._reference)
+        return self._geometry
+
+    @property
+    def from_sketch(self) -> "bool | None":
+        """bool | None: Whether this is an edge of a consumed sketch, not of the solid.
+
+        A Part-wide or body edge search returns the edges of the solid AND the profile
+        edges of every sketch a feature consumed (probe 46y: 16 edges for a block, its 12
+        plus the sketch's 4); a profile edge's owner is the sketch (probe 42). Such an edge
+        bounds no face, so adjacency queries skip it. Read at snapshot time from the
+        owner's name: `True` when a body's `Sketches` holds it, `False` when a body's
+        `Shapes` does, `None` when that could not be told.
+        """
+        return self._from_sketch
+
+    @property
+    def owner_feature_name(self) -> "str | None":
+        """str | None: The feature CATIA currently attributes this edge to, if known.
+
+        Read from `Reference.Parent`: the feature whose result carries the edge now,
+        usually the latest solid feature in the body. Not historical provenance --
+        see `current_owner_feature_name`.
+        """
+        return self._owner_feature_name
 
     @property
     def generation(self) -> int:
         """int: The model generation this edge's snapshot was taken at."""
         return self._generation
+
+    def describe(self) -> str:
+        """One line of measured facts about this edge, for messages, logs and agents.
+
+        For example ``"line edge, length 60.000 mm, from (-30.000, 20.000, 20.000) to
+        (30.000, 20.000, 20.000), owner 'Pad.1' in body 'PartBody'"``, or for a circle its
+        radius and centre. The owner is CATIA's current owner, not provenance. It contains
+        no index and no BRep name.
+
+        Returns:
+            The description.
+
+        Raises:
+            StaleSnapshotError: If the model changed since the snapshot was taken.
+            AutomationError: If the edge cannot be measured.
+        """
+        facts = self.geometry
+        kind = "sketch profile edge" if self._from_sketch else "edge"
+        parts = [f"{facts.curve_type} {kind}", f"length {facts.length_mm:.3f} mm"]
+        if facts.radius_mm is not None and facts.center_mm is not None:
+            parts.append(f"radius {facts.radius_mm:.3f} mm")
+            parts.append(f"centre {_point_text(facts.center_mm)}")
+        else:
+            parts.append(f"from {_point_text(facts.start_mm)} to {_point_text(facts.end_mm)}")
+        parts.append(_owner_text(self._owner_feature_name, self._owner_body_name))
+        return ", ".join(part for part in parts if part)
+
+    def _belongs_to(self, generation: Any) -> bool:
+        """Whether this edge came from the Part that owns `generation`.
+
+        Every wrapper of one CATIA Part shares one `ModelGeneration` object
+        (`docs/api-design.md` 5.1), so identity of that object is identity of the Part.
+        A handle built directly, without one, cannot say and is let through, the same
+        policy as an unknown owner body.
+        """
+        return self._model_generation is None or self._model_generation is generation
 
     @property
     def com_object(self) -> Any:
@@ -251,6 +426,19 @@ class EdgeSnapshot:
         """int: The model generation this snapshot was taken at."""
         return self._generation
 
+    def query(self) -> "EdgeQuery":
+        """Starts a geometry query over this snapshot's edges.
+
+        The query is bound to this snapshot, so it inherits its staleness: once the model
+        changes, reading any edge's geometry raises `StaleSnapshotError`.
+
+        Returns:
+            A `EdgeQuery` over every edge in this snapshot.
+        """
+        from auto_3dx.geometry.query import EdgeQuery
+
+        return EdgeQuery(list(self._edges))
+
     def __len__(self) -> int:
         """Returns how many edges this snapshot found.
 
@@ -295,7 +483,14 @@ class EdgeSnapshot:
         return f"EdgeSnapshot(count={len(self._edges)}, generation={self._generation})"
 
 
-def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
+def take_edge_snapshot(
+    selection: Any,
+    generation: int = 0,
+    part_com_object: Any = None,
+    body: Any = None,
+    measurer: Any = None,
+    model_generation: Any = None,
+) -> EdgeSnapshot:
     """Runs the one verified edge search and returns a fresh `EdgeSnapshot`.
 
     This is the only verified route from CATIA topology to a feature-usable
@@ -313,6 +508,13 @@ def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
         generation: The model generation to stamp the snapshot with, so a
             later change can mark it stale. Defaults to 0 for a snapshot with
             no owning `PartDesign`.
+        part_com_object: The raw Part being searched; the search is refused unless it
+            is the active Part.
+        body: The raw `Body` COM object to search inside. `None` searches the whole
+            Part, which is what `Topology.Edge,all` has always returned: the edges of
+            every body in one flat list. Passing a body selects it and searches
+            `Topology.Edge,sel` instead, which live returned that body's edges only
+            (probe 42). Either way each `Edge` carries the body it was found in.
 
     Returns:
         A fresh `EdgeSnapshot` describing every edge of the solid as it
@@ -328,9 +530,39 @@ def take_edge_snapshot(selection: Any, generation: int = 0) -> EdgeSnapshot:
         SelectionNotRestoredWarning: If the selection did not fully come back.
             The snapshot is still valid.
     """
-    references = search_references(selection, EDGE_SEARCH_QUERY)
-    edges = [
-        Edge(reference, position, generation)
-        for position, reference in enumerate(references, start=1)
-    ]
+    query = EDGE_SEARCH_QUERY if body is None else EDGE_SEARCH_QUERY_IN_SELECTION
+    references = search_references(selection, query, part_com_object, body)
+    index = BodyIndex(part_com_object) if part_com_object is not None else None
+    edges = []
+    for position, reference in enumerate(references, start=1):
+        owner_body, owner_body_name, owner_feature_name = owner_of(reference, index)
+        edges.append(
+            Edge(
+                reference,
+                position,
+                generation,
+                owner_body,
+                owner_body_name,
+                owner_feature_name,
+                measurer,
+                model_generation,
+                index.is_sketch(owner_feature_name) if index is not None else None,
+            )
+        )
     return EdgeSnapshot(edges, generation)
+
+
+def _point_text(point: "tuple[float, float, float]") -> str:
+    """Renders a point or direction with three decimals, for descriptions."""
+    return "(" + ", ".join(f"{value:.3f}" for value in point) + ")"
+
+
+def _owner_text(feature: "str | None", body: "str | None") -> str:
+    """Renders what CATIA reported as the owner, or nothing when it reported nothing."""
+    if feature and body:
+        return f"owner {feature!r} in body {body!r}"
+    if feature:
+        return f"owner {feature!r}"
+    if body:
+        return f"in body {body!r}"
+    return ""

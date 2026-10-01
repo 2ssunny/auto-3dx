@@ -35,7 +35,9 @@ from auto_3dx.errors import (  # noqa: E402
     CatiaConnectionError,
     NoActiveEditorError,
     NoActivePartError,
+    PlaneNotFoundError,
 )
+from auto_3dx.geometry.planes import GEOMETRICAL_SET_NAME, OffsetPlane  # noqa: E402
 
 PLANE_OFFSET = 30.0
 PLANE_ANGLE = 30.0
@@ -87,8 +89,19 @@ def _cleanup(part: Any, pad_names: "list[str]", sketch_names: "list[str]") -> No
     part.update()
 
 
+def _skip_if_sdk_set_exists(part: Any) -> None:
+    """Skips when the SDK geometrical set already exists.
+
+    Cleanup here removes that whole set, so running against a Part where it already holds
+    planes, points or lines would delete work this test did not create.
+    """
+    if GEOMETRICAL_SET_NAME in [item.name for item in part.inspect.geometrical_sets()]:
+        pytest.skip(f"The Part already has a {GEOMETRICAL_SET_NAME!r} set; not ours to remove.")
+
+
 def test_offset_and_angled_planes_carry_a_sketch_and_a_pad(part: Any) -> None:
     """Both plane families work end to end, which is what the in-work fix buys."""
+    _skip_if_sdk_set_exists(part)
     token = uuid.uuid4().hex[:8].upper()
     offset_sketch = f"AUTO3DX_IT_OFFSET_SKETCH_{token}"
     offset_pad = f"AUTO3DX_IT_OFFSET_PAD_{token}"
@@ -158,3 +171,107 @@ def test_origin_plane_strings_still_work(part: Any) -> None:
         part.update()
 
     assert int(body.Sketches.Count) == sketches_before
+
+
+def test_a_fresh_collection_finds_and_removes_an_existing_plane(part: Any) -> None:
+    """The lifecycle gap: planes must be findable after the collection that made them.
+
+    A second `Part` wrapper stands in for a later process here (a real second
+    process is exercised by the scratch validation): it shares nothing in memory
+    with the first collection, so everything it finds it found in the model.
+    """
+    _skip_if_sdk_set_exists(part)
+    token = uuid.uuid4().hex[:8].upper()
+    plane_name = f"AUTO3DX_IT_LIFECYCLE_{token}"
+
+    try:
+        part.planes.create_offset(plane_name, "XY", PLANE_OFFSET)
+        part.update()
+
+        fresh = Catia.attach().active_part()
+        assert fresh.planes is not part.planes
+        assert plane_name in fresh.planes.names()
+
+        found = fresh.planes.get(plane_name)
+        assert found.offset == PLANE_OFFSET
+        assert found.base_display_name
+
+        # A fresh collection appends to the existing set instead of adding a second.
+        second_name = f"{plane_name}_B"
+        fresh.planes.create_offset(second_name, "XY", PLANE_OFFSET * 2)
+        fresh.update()
+        sets = [item.name for item in fresh.inspect.geometrical_sets()]
+        assert sets.count(GEOMETRICAL_SET_NAME) == 1
+        assert fresh.planes.names() == [plane_name, second_name]
+
+        with pytest.raises(PlaneNotFoundError):
+            fresh.planes.get(f"{plane_name}_MISSING")
+
+        # Cleanup through the collection that never created any of it.
+        fresh.planes.remove_geometrical_set()
+        fresh.update()
+        assert fresh.planes.names() == []
+        assert GEOMETRICAL_SET_NAME not in [
+            item.name for item in fresh.inspect.geometrical_sets()
+        ]
+    finally:
+        try:
+            part.planes.remove_geometrical_set()
+        except Auto3dxError:
+            pass
+        part.update()
+
+    assert part.planes.names() == []
+    assert part.is_up_to_date()
+
+
+def test_a_rediscovered_sketch_reports_its_user_plane_support(part: Any) -> None:
+    """The acceptance-test gap: support() used to be None for a user-defined plane."""
+    _skip_if_sdk_set_exists(part)
+    token = uuid.uuid4().hex[:8].upper()
+    plane_name = f"AUTO3DX_IT_SUPPORT_PLANE_{token}"
+    sketch_name = f"AUTO3DX_IT_SUPPORT_SKETCH_{token}"
+    origin_sketch_name = f"AUTO3DX_IT_SUPPORT_XY_{token}"
+
+    try:
+        plane = part.planes.create_offset(plane_name, "XY", PLANE_OFFSET)
+        part.update()
+        part.sketches.create(sketch_name, support=plane)
+        part.sketches.create(origin_sketch_name, support="XY")
+        part.update()
+
+        # A second wrapper shares nothing in memory with the first: whatever it
+        # resolves, it resolved from the model.
+        fresh = Catia.attach().active_part()
+        support = fresh.sketches.get(sketch_name).support()
+
+        assert isinstance(support, OffsetPlane)
+        assert support.name == plane_name
+        assert support.offset == pytest.approx(PLANE_OFFSET)
+        assert support.com_object == fresh.planes.get(plane_name).com_object
+
+        # The support round-trips into the call that takes one.
+        reused = f"{sketch_name}_REUSED"
+        fresh.sketches.create(reused, support=support)
+        fresh.update()
+        assert fresh.sketches.get(reused).support().name == plane_name
+        fresh.sketches.remove(reused)
+        fresh.update()
+
+        # A sketch on an origin plane still reports its support string.
+        assert fresh.sketches.get(origin_sketch_name).support() == "XY"
+    finally:
+        for name in (f"{sketch_name}_REUSED", sketch_name, origin_sketch_name):
+            try:
+                part.sketches.remove(name)
+            except Auto3dxError:
+                pass
+        try:
+            part.planes.remove_geometrical_set()
+        except Auto3dxError:
+            pass
+        part.update()
+
+    assert part.planes.names() == []
+    assert sketch_name not in part.inspect.sketches()
+    assert part.is_up_to_date()

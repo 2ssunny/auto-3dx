@@ -13,3 +13,13 @@ dist/
 
 # Local virtual environments, such as a disposable vanilla CPython check.
 /.venv*/
+
+# Baselines the live acceptance scripts write between their phases.
+/scripts/acceptance/*.baseline.json
+
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.idea/
+/docs/conventions.md
+/docs/plm_object_creation.md

@@ -1,5 +1,11 @@
 # 새 Part 생성 (PLM object creation) — 탐색 결과
 
+> **Contributor research note, written in Korean.** It records why auto-3dx 1.0.0 does not
+> create PLM objects (Parts, Physical Products): the creation paths tried were blocked on the
+> verified installation. Users create and open the Part in the 3DEXPERIENCE UI first. Export
+> was investigated separately (`docs/api-design.md` section 12). The user guide is
+> [`docs/v1.0.0.md`](v1.0.0.md).
+
 Step 4의 사전 조사 기록이다. **아직 아무것도 구현하지 않았고, 생성도 저장도 실행하지 않았다.**
 확인한 것은 "어떤 API를 통해야 하는가"까지다.
 

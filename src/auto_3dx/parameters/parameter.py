@@ -184,16 +184,52 @@ class Parameter:
     def value(self) -> Any:
         """Returns the parameter's current value.
 
+        Most CATIA parameter kinds expose `Value`. `EnumParam` -- the kind CATIA
+        creates for a sketch constraint's `Mode`, among others -- does not: it has
+        `ValueAsString()`, a method, and reading `Value` raises `AttributeError`
+        (probe 42, live). Since a Part that merely contains a constraint then holds such
+        parameters, reading values while listing parameters used to fail with a bare
+        Python error; this returns the enum's string instead, for example
+        `"CstAttr_Mode_Constrained"`.
+
+        Writing an `EnumParam` is not supported: `ValuateFromString` exists but no
+        write has been verified, so `set()` still refuses this kind.
+
         Returns:
-            The parameter's value, as reported by CATIA.
+            The parameter's value as reported by CATIA, or, for a kind with no `Value`
+            but a `ValueAsString()`, that string.
 
         Raises:
+            ParameterTypeError: If the parameter exposes neither `Value` nor
+                `ValueAsString()`, so there is no verified way to read it.
             Auto3dxError: If the underlying COM call fails unexpectedly.
         """
         try:
             return self._com_object.Value
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
+        except AttributeError:
+            return self._value_as_string()
+
+    def _value_as_string(self) -> str:
+        """Reads the value of a parameter kind that has no `Value`, such as `EnumParam`.
+
+        Returns:
+            The value CATIA reports as a string.
+
+        Raises:
+            ParameterTypeError: If this kind exposes no readable value either way.
+            Auto3dxError: If the underlying COM call fails unexpectedly.
+        """
+        try:
+            return str(self._com_object.ValueAsString())
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        except (AttributeError, TypeError) as error:
+            raise ParameterTypeError(
+                f"Parameter {self.kind!r} exposes neither Value nor ValueAsString(), so "
+                "this library has no verified way to read it."
+            ) from error
 
     @property
     def magnitude(self) -> str | None:

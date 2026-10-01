@@ -3,7 +3,7 @@
 Exposes `Sketch`/`SketchCollection`/`SketchElement` (2D profiles on origin
 planes, and the point/line/circle/spline elements drawn in one),
 `SketchFeature`/`Pad`/`Pocket`/`RevolvedFeature`/`Shaft`/`Groove`/`Mirror`/
-`Rib`/`Slot`/`RectangularPattern`/`ConstRadEdgeFillet`/`Chamfer`/`Shell`/
+`Rib`/`Slot`/`MultiSectionSolid`/`RectangularPattern`/`ConstRadEdgeFillet`/`Chamfer`/`Shell`/
 `Thickness`/`Hole`/`PartDesign` (extruded, pocketed, revolved, mirrored,
 ribbed, slotted, patterned, filleted, chamfered, shelled, thickened, and
 holed solid features), `Edge`/`EdgeSnapshot` and `Face`/`FaceSnapshot` (the
@@ -29,6 +29,7 @@ from auto_3dx.geometry.constraint import (
     Constraint,
     ConstraintCollection,
 )
+from auto_3dx.geometry.bodies import Body, BodyCollection
 from auto_3dx.geometry.edges import EDGE_SEARCH_QUERY, Edge, EdgeSnapshot
 from auto_3dx.geometry.faces import FACE_SEARCH_QUERY, Face, FaceSnapshot
 from auto_3dx.geometry.part_design import (
@@ -42,7 +43,15 @@ from auto_3dx.geometry.part_design import (
     EDGE_FILLET_PROPAGATION_VERIFIED,
     FULL_REVOLUTION,
     GROOVE_KIND,
+    HOLE_BOTTOM_FLAT,
+    HOLE_BOTTOM_V,
     HOLE_KIND,
+    HOLE_LIMIT_BLIND,
+    HOLE_LIMIT_THROUGH_ALL,
+    HOLE_LIMIT_UP_TO_NEXT,
+    HOLE_TYPE_COUNTERBORED,
+    HOLE_TYPE_COUNTERSUNK,
+    HOLE_TYPE_SIMPLE,
     LENGTH_TOLERANCE,
     MIRROR_KIND,
     PAD_KIND,
@@ -54,6 +63,7 @@ from auto_3dx.geometry.part_design import (
     PATTERN_DIRECTION_Z,
     POCKET_KIND,
     RECTANGULAR_PATTERN_KIND,
+    MULTI_SECTION_SOLID_KIND,
     RIB_KIND,
     SHAFT_KIND,
     SHELL_KIND,
@@ -65,6 +75,8 @@ from auto_3dx.geometry.part_design import (
     THICKNESS_KIND,
     Chamfer,
     ConstRadEdgeFillet,
+    Counterbore,
+    Countersink,
     Groove,
     Hole,
     Mirror,
@@ -73,6 +85,7 @@ from auto_3dx.geometry.part_design import (
     Pocket,
     RectangularPattern,
     RevolvedFeature,
+    MultiSectionSolid,
     Rib,
     Shaft,
     Shell,
@@ -81,6 +94,18 @@ from auto_3dx.geometry.part_design import (
     Thickness,
 )
 from auto_3dx.geometry.planes import AnglePlane, OffsetPlane, Plane, PlaneCollection
+from auto_3dx.geometry.selection import (
+    SELECTED_BODY,
+    SELECTED_EDGE,
+    SELECTED_FACE,
+    SELECTED_FEATURE,
+    SELECTED_OTHER,
+    SELECTED_PART,
+    SELECTED_SKETCH,
+    SELECTED_VERTEX,
+    PartSelection,
+    SelectedItem,
+)
 from auto_3dx.geometry.topology import Topology
 from auto_3dx.geometry.sketch import (
     AXIS_TOLERANCE,
@@ -112,6 +137,7 @@ __all__ = [
     "GROOVE_KIND",
     "MIRROR_KIND",
     "RECTANGULAR_PATTERN_KIND",
+    "MULTI_SECTION_SOLID_KIND",
     "RIB_KIND",
     "SLOT_KIND",
     "PATTERN_DIRECTION_X",
@@ -129,6 +155,9 @@ __all__ = [
     "Shaft",
     "Groove",
     "Mirror",
+    "MultiSectionSolid",
+    "Body",
+    "BodyCollection",
     "Rib",
     "Slot",
     "RectangularPattern",
@@ -152,6 +181,16 @@ __all__ = [
     "SHELL_KIND",
     "THICKNESS_KIND",
     "HOLE_KIND",
+    "HOLE_LIMIT_BLIND",
+    "HOLE_LIMIT_UP_TO_NEXT",
+    "HOLE_LIMIT_THROUGH_ALL",
+    "HOLE_BOTTOM_FLAT",
+    "HOLE_BOTTOM_V",
+    "HOLE_TYPE_SIMPLE",
+    "HOLE_TYPE_COUNTERBORED",
+    "HOLE_TYPE_COUNTERSUNK",
+    "Counterbore",
+    "Countersink",
     "ConstRadEdgeFillet",
     "Chamfer",
     "Shell",
@@ -162,6 +201,16 @@ __all__ = [
     "OffsetPlane",
     "AnglePlane",
     "PlaneCollection",
+    "PartSelection",
+    "SelectedItem",
+    "SELECTED_EDGE",
+    "SELECTED_FACE",
+    "SELECTED_VERTEX",
+    "SELECTED_FEATURE",
+    "SELECTED_SKETCH",
+    "SELECTED_BODY",
+    "SELECTED_PART",
+    "SELECTED_OTHER",
     "CONSTRAINT_HORIZONTAL",
     "CONSTRAINT_VERTICAL",
     "CONSTRAINT_LENGTH",

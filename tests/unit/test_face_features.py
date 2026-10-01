@@ -168,12 +168,24 @@ class Thickness:
         self._name = value
 
 
+class _BottomLimit:
+    """Fake `Hole.BottomLimit`: `LimitMode` (0 blind, 2 through-all) is read and written."""
+
+    def __init__(self) -> None:
+        self.LimitMode = 0
+
+
 class Hole:
-    """Fake CATIA `Hole`. `type(obj).__name__ == "Hole"`."""
+    """Fake CATIA `Hole`. `type(obj).__name__ == "Hole"`.
+
+    `BottomLimit` is the real member `create_hole` writes the blind limit through
+    (probes 43, 46n).
+    """
 
     def __init__(self, name: str, name_write_exception: "BaseException | None" = None) -> None:
         self._name = name
         self._name_write_exception = name_write_exception
+        self.BottomLimit = _BottomLimit()
 
     @property
     def Name(self) -> str:

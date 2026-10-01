@@ -154,13 +154,38 @@ class FakeHybridBody:
         self._calls.append(("AppendHybridShape", shape))
         self.appended.append(shape)
 
+    @property
+    def HybridShapes(self) -> "FakeCollection":
+        return FakeCollection(self.appended)
+
+
+class FakeCollection:
+    """Fake 1-based COM collection, as `HybridShapes` and `HybridBodies` are."""
+
+    def __init__(self, items: "list[Any]") -> None:
+        self._items = items
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def Item(self, index: int) -> Any:
+        return self._items[index - 1]
+
 
 class FakeHybridBodies:
-    """Fake CATIA `HybridBodies` collection: only `Add()` is used here."""
+    """Fake CATIA `HybridBodies` collection: `Add()`, plus `Count`/`Item` lookup."""
 
     def __init__(self, calls: "list[Any]") -> None:
         self._calls = calls
         self.bodies: "list[FakeHybridBody]" = []
+
+    @property
+    def Count(self) -> int:
+        return len(self.bodies)
+
+    def Item(self, index: int) -> FakeHybridBody:
+        return self.bodies[index - 1]
 
     def Add(self) -> FakeHybridBody:
         self._calls.append(("HybridBodies.Add",))

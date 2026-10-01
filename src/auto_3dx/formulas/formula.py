@@ -153,6 +153,75 @@ class Formula:
         except pywintypes.com_error as error:
             raise _wrap_com_error(error) from error
 
+    def inputs(self) -> "list[str]":
+        """Returns the names of the parameters this formula reads.
+
+        Read from the model with `Formula.NbInParameters` and
+        `Formula.GetInParameter(i)` (probe 43), so the answer comes from CATIA rather
+        than from parsing the body text, and is the same in any process. The names are
+        the qualified ones CATIA reports, for example
+        `"3D Shape00422558\\AUTO3DX_L"`.
+
+        Returns:
+            One name per input parameter, in CATIA's order.
+
+        Raises:
+            AutomationError: If the inputs cannot be read.
+        """
+        try:
+            count = int(self._com_object.NbInParameters)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        names: list[str] = []
+        for index in range(1, count + 1):
+            try:
+                names.append(str(self._com_object.GetInParameter(index).Name))
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+        return names
+
+    def reads(self, parameter: Any) -> bool:
+        """Reports whether this formula reads the given parameter.
+
+        Compares by COM identity first and falls back to the qualified name, because a
+        parameter read back through `GetInParameter` is a different dispatch object than
+        the one the caller holds.
+
+        Args:
+            parameter: A `Parameter`, or its raw COM object.
+
+        Returns:
+            `True` if this formula lists that parameter among its inputs.
+
+        Raises:
+            AutomationError: If the inputs cannot be read.
+        """
+        target = getattr(parameter, "com_object", parameter)
+        try:
+            count = int(self._com_object.NbInParameters)
+        except pywintypes.com_error as error:
+            raise _wrap_com_error(error) from error
+        try:
+            target_name = str(target.Name)
+        except (pywintypes.com_error, AttributeError):
+            target_name = None
+        for index in range(1, count + 1):
+            try:
+                candidate = self._com_object.GetInParameter(index)
+            except pywintypes.com_error as error:
+                raise _wrap_com_error(error) from error
+            try:
+                if bool(candidate == target):
+                    return True
+            except (pywintypes.com_error, TypeError):
+                pass
+            try:
+                if target_name is not None and str(candidate.Name) == target_name:
+                    return True
+            except (pywintypes.com_error, AttributeError):
+                continue
+        return False
+
     def modify(self, body: str) -> None:
         """Replaces the formula's body text.
 
