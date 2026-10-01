@@ -1,6 +1,6 @@
 """Phase 5 Level 2: sketch on a planar face, hole placement and limits, pattern axes, setters.
 
-The fakes follow the micro-probes (`docs/phase5-api-design.md` section 3):
+The fakes follow the micro-probes (`docs/api-design.md` Appendix A):
 
     Sketches.Add(<planar face Reference>)                    -> a sketch on that face (46i)
     AddNewHoleFromPoint(x, y, z, face, depth)                -> starts at (x, y, z) (46m)

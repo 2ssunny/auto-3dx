@@ -1,7 +1,7 @@
 """The intent layer (`auto_3dx.highlevel`) never touches COM and never rebuilds.
 
-Level 3 must be built only from the public Level 2 API (`docs/phase5-api-design.md`
-section 1). These tests parse every module of the package and fail on anything that would
+Level 3 must be built only from the public Level 2 API (`docs/api-design.md`
+section 20). These tests parse every module of the package and fail on anything that would
 let it bypass Level 2:
 
 * importing a COM library (`pywintypes`, `pythoncom`, `win32com`, `com3dx`) or the SDK's

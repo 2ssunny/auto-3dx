@@ -2,7 +2,7 @@
 
 Everything here is a frozen dataclass or pure arithmetic; nothing touches COM. The reads
 that fill these values live in `geometry.sketch` and rest on probes 46a-46h, 46ab and 46ac
-(`docs/phase5-api-design.md` section 3):
+(`docs/api-design.md` Appendix A):
 
     Line2D.GetEndPoints(seed4)     -> (x1, y1, x2, y2)
     Circle2D.GetCenter(seed2)      -> (cx, cy)        (probe 43 failed only for want of a seed)

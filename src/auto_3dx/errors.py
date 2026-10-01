@@ -200,7 +200,7 @@ class UnsupportedOperationError(ValidationError):
     determined for this sketch (`"into_material"` on a sketch not created on a face), a
     fillet over several edges at once, or a circular-pattern axis kind that was never
     driven end to end. Nothing was changed. Use the Level 2 call the message names, or a
-    request the evidence covers (`docs/phase5-api-design.md` section 3).
+    request the evidence covers (`docs/api-design.md` Appendix A).
     """
 
 

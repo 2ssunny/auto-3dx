@@ -1,9 +1,16 @@
 # auto-3dx Module & API Conventions
 
+> **Contributor reference, written in Korean.** This is the measured COM evidence log and
+> the coding conventions the implementation follows; the source code cites its sections.
+> It is not user documentation. The canonical description of the 1.0.0 public API is
+> [`docs/v1.0.0.md`](v1.0.0.md), and the architecture contract is
+> [`docs/api-design.md`](api-design.md), whose Appendix A carries the newer probe evidence.
+> Where this log records an earlier limitation that 1.0.0 has since resolved, a note says so.
+
 이 문서는 `auto-3dx` 라이브러리 코드를 작성할 때 따르는 규칙과, 첫 번째 수직 기능
 ("실행 중인 Part의 기존 Length Parameter 수정 + update")부터 축적한 실측 기록을 정의한다.
 아래 첫 표는 초기 단계의 검증 범위이며 현재 지원 범위가 아니다. 이후 절의 추가 실측과
-현재 공개 API 상태는 `docs/capabilities.md` 및 `docs/api-design.md`를 따른다.
+현재 공개 API 상태는 `docs/v1.0.0.md` 및 `docs/api-design.md`를 따른다.
 
 여러 작업자가 병렬로 구현하더라도 이 문서의 signature를 그대로 구현하면 서로 맞물린다.
 
@@ -87,9 +94,9 @@ UI 대응          : Value == 150.0  <->  CATIA UI 표시 150mm
 | `Length.Value` 읽기 / 쓰기 | 검증 완료 |
 | `Part.Update()` | 검증 완료 |
 | Length parameter 생성 / ensure / remove | 검증 완료 (아래 1.1) |
-| 그 외 Parameter 생성 (`CreateReal` 등) | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
-| Formula / Relations | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
-| Sketch / Pad / GSD | 당시 미검증; 현재 상태는 `docs/capabilities.md` 참조 |
+| 그 외 Parameter 생성 (`CreateReal` 등) | 당시 미검증; 현재 상태는 `docs/v1.0.0.md` 참조 |
+| Formula / Relations | 당시 미검증; 현재 상태는 `docs/v1.0.0.md` 참조 |
+| Sketch / Pad / GSD | 당시 미검증; 현재 상태는 `docs/v1.0.0.md` 참조 |
 | 새 Part 생성 | **미검증 — 구현 금지** |
 | Save / PLM propagate | **미검증 — 호출 금지** |
 
@@ -1293,6 +1300,9 @@ body의 모서리에는 그 body가 소비한 **스케치의 wire 모서리도 �
 받으므로 `owner_feature_name`으로 골라야 한다(라이브에서 wire 모서리에 fillet을 걸었더니
 `AddNewEdgeFilletWithConstantRadius`가 실패했다).
 
+> 1.0.0: 이제 `Edge.from_sketch`가 소유자 이름이 body의 `Sketches`에 있는지로 이 모서리를 구분하고,
+> `EdgeQuery.solid()`가 걸러내며, `part.geometry.edges()`/`find_edge`와 인접 쿼리는 처음부터 제외한다.
+
 이 사실로 `part.topology.edges(body=...)`/`faces(body=...)`와 `Edge`/`Face`의 `owner_body`,
 `owner_body_name`, `owner_feature_name`, 그리고 `CrossBodyReferenceError` 가드를 만들었다. 소유
 정보는 스냅샷을 찍을 때마다 모델에서 다시 읽으므로 새 프로세스에서도 그대로 동작한다. Python에
@@ -1742,6 +1752,10 @@ Diameter/BottomType/LimitMode를 첫 update 전에 모두 씀 -> 정확한 관�
 Reverse/SetOrigin/SetDirection/나사/카운터보어 -> 호출하지 않음 (TYPELIB_ONLY)
 ```
 
+> 1.0.0: 그 뒤 47 시리즈가 `SetOrigin`(47m), `Reverse`(47g, 제거량 0), 카운터보어·카운터싱크(47h),
+> up-to-next(47f), 원 경계 면 위 편심 Hole의 중심 스냅(47d)을 실측했다. `SetDirection`과 나사는 여전히
+> 호출하지 않는다. `docs/api-design.md` 21.3절과 부록 A.
+
 **Hole 설정은 세션 상태로 이어진다.** Phase 5 live 스테이지가 관통 Hole을 만든 뒤, 기존 Phase 2 테스트의
 `create_hole(name, face, 5.0)`이 관통 Hole(깊이 30)이 되어 실패했다. LimitMode도 BottomType처럼 이어진다.
 그래서 `create_hole`은 이제 limit을 항상 명시적으로 쓴다(깊이가 있으면 blind). 지름과 바닥은 넘긴 경우에만
@@ -1773,6 +1787,11 @@ MeasurableBetween.DistanceMinToPoint(x,y,z [, seeds]) -> "Invalid number of para
 대신 `EdgeQuery.on_plane_of(face)`는 측정된 시작·중간·끝점이 그 면의 평면 위에 있는 모서리를 남긴다.
 평면 사실이지 인접이 아니다.
 
+> 1.0.0: 46z가 실패한 것은 측정 유형을 평면(7)으로 요청했기 때문이었다. `GetMeasurable(face, 1)`은
+> `MeasurableBetween`이고 `DistanceMinToPoint(x, y, z)`는 **경계가 있는 면**까지의 거리를 준다(47l).
+> 이것으로 측정 기반 인접(`EdgeQuery.adjacent_to`, `FaceQuery.adjacent_to`,
+> `part.topology.edges_of`/`faces_of`)을 구현했다. `docs/api-design.md` 21.2절.
+
 **사각형 제약**
 
 ```text
@@ -1781,6 +1800,10 @@ H(아래), H(위), V(오른쪽), V(왼쪽)          -> 4개 모두 Parallelism(8
 ```
 
 모서리 일치 구속(점 제약)은 근거가 없어 "완전 구속" 옵션은 두지 않았다.
+
+> 1.0.0: 47i가 꼭짓점 `Point2D`를 변들이 공유하게 하고(`StartPoint`/`EndPoint`), H/V, 가로, 세로,
+> `AbsoluteAxis` 기준 거리 앵커 두 개를 거는 방식을 실측했다. 이것이 `constraints="fully"`다.
+> CATIA 솔버의 완전 구속 상태 자체는 읽지 않는다. `docs/api-design.md` 21.4절.
 
 **기타.** 허브 면을 패턴 축으로 쓴 pad를 지웠더니 그 스케치가 **연쇄 삭제되지 않았다**(46u 정리 중
 발견). probe 정리는 이제 접두어로 남은 것을 쓸어낸다(`_micro.sweep`). `inspect.facts("volume",

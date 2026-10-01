@@ -1,10 +1,11 @@
-"""Build a small mounting plate with the Phase 5 intent API.
+"""Build a small mounting plate with the auto-3dx intent API.
 
 A 60 x 40 x 10 plate, a pocket cut into its top face, a through hole on the top face
 patterned six times around the plate's centre, and a rounded vertical edge -- using only
 `part.sketches`, `sketch.rectangle`/`circle`, `body.features.*`, `part.geometry.*` and
 `part.inspect.facts`. Every call is a thin wrapper over the Level 2 API shown in the comment
-beside it, which is the fallback when the intent API cannot express something.
+beside it, which is the fallback when the intent API cannot express something. See
+docs/v1.0.0.md for the full guide.
 
 Run it with a disposable Part editor active:
 
@@ -44,14 +45,15 @@ def main() -> None:
     part.update()
 
     top = part.geometry.top_face()  # the model changed: find it again
-    # part_design.create_hole(..., origin=, diameter=, limit=, bottom=) with every attribute
-    # written explicitly, because CATIA carries hole settings over from the previous hole.
+    # part_design.create_hole(..., origin=, diameter=, limit=, bottom=, head=) with every
+    # attribute written explicitly, because CATIA carries hole settings over from the previous
+    # hole. The origin is read back before the call returns.
     hole = body.features.hole(
         f"{PREFIX}HOLE", support=top, center=(15.0, 0.0), diameter=4.0, limit="through_all"
     )
-    # part_design.create_circular_pattern(..., 60.0, "Z"): a full circle of six.
+    # part_design.create_circular_pattern(..., 60.0, "Z"): six copies spread over 360 degrees.
     body.features.circular_pattern(
-        f"{PREFIX}BOLTS", feature=hole, instances=6, total_angle_deg=360, axis="Z"
+        f"{PREFIX}BOLTS", feature=hole, instances=6, full_circle=True, axis="Z"
     )
     part.update()
 
@@ -74,5 +76,5 @@ if __name__ == "__main__":
         main()
     except Auto3dxError as error:
         # Typed errors say what to do; the model is left as CATIA left it.
-        print(f"{type(error).__name__}: {error}")
+        print(repr(error))
         raise
