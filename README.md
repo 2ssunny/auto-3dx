@@ -22,9 +22,10 @@ Part 자체의 PLM 생성과 저장은 이 라이브러리의 책임 범위가 �
 
 ## 요구 사항
 
-- Windows, 64-bit Python 3.11 이상 (검증된 버전은 아래 표)
-- 실행 중인 3DEXPERIENCE CATIA 세션
-- 3DEXPERIENCE 설치본의 `com3dx.py` (설치본에 들어 있으며 pip로 설치하지 않습니다)
+- Windows, 64-bit Python 3.11–3.14 (검증된 조합은 아래 표)
+- 설치된 3DEXPERIENCE CATIA, 그리고 `Catia.attach()`로 연결할 때 실행 중인 세션
+  (패키지 설치와 `import auto_3dx`에는 필요하지 않습니다)
+- 3DEXPERIENCE 설치본의 `com3dx.py` (설치본에 들어 있으며 PyPI로 배포하지 않습니다)
 - `pywin32` (패키지 설치 시 자동 설치)
 
 Conda는 필요하지 않습니다. pip로 의존성을 설치할 수 있는 일반 Python 환경이면 됩니다.
@@ -55,19 +56,40 @@ Python, Microsoft Store Python, 다른 3DEXPERIENCE 릴리스)은 검증하지 �
 
 ## 설치
 
-표준 CPython으로 가상 환경을 만들고 저장소 루트에서 설치합니다.
+v1.0.0 릴리스가 PyPI에 게시되면 다음 명령으로 설치합니다 (게시 전에는 아래
+"소스에서 설치 (개발)"을 사용합니다).
+
+```powershell
+python -m pip install auto-3dx
+```
+
+가상 환경을 쓰는 것을 권장합니다. 표준 CPython이든 Conda든 pip를 쓸 수 있는 64-bit
+Python 3.11–3.14 환경이면 됩니다.
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install auto-3dx
 ```
 
-Conda를 쓴다면 환경을 활성화한 뒤 같은 `python -m pip install -e .`를 실행합니다.
-어느 쪽이든 `pywin32`는 pip가 설치하고, 첫 연결 때 `com3dx`가 그 Python 전용
-COM wrapper cache(`%TEMP%\gen_py\<버전>`)를 만듭니다. 새 환경의 첫 `Catia.attach()`는
-그래서 몇 초 더 걸릴 수 있습니다.
+`pywin32`는 pip가 함께 설치합니다. `com3dx`는 PyPI 패키지에 들어 있지 않고, 연결할 때
+3DEXPERIENCE 설치본에서 찾습니다(아래 "com3dx 경로 지정"). 첫 연결 때 `com3dx`가 그
+Python 전용 COM wrapper cache(`%TEMP%\gen_py\<버전>`)를 만들므로, 새 환경의 첫
+`Catia.attach()`는 몇 초 더 걸릴 수 있습니다.
+
+### 소스에서 설치 (개발)
+
+SDK를 고치거나 테스트를 실행할 때는 저장소를 받아 editable로 설치합니다.
+
+```powershell
+git clone https://github.com/2ssunny/auto-3dx.git
+cd auto-3dx
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+```
 
 `pyproject.toml`이 패키지 이름과 import 이름을 다음처럼 구분합니다.
 
@@ -1287,13 +1309,50 @@ python -m pytest tests/integration -m integration -q
 
 단위 테스트는 가짜 COM 객체만 쓰고 3DEXPERIENCE, 레지스트리의 com3dx 항목, `com3dx`를
 건드리지 않으므로 3DEXPERIENCE가 없는 Windows에서도 실행됩니다.
-`.github/workflows/unit-tests.yml`은 새 checkout에서 `pip install ".[test]"` 후 Windows
-CPython 3.11–3.14로 단위 테스트를 실행합니다. live 통합 테스트는 CI에 넣지 않습니다.
+CI는 GitHub-hosted Windows runner에서 돌고, 3DEXPERIENCE가 필요한 것은 넣지 않습니다.
+
+| 워크플로 | 실행 시점 | 하는 일 |
+|---|---|---|
+| `unit-tests.yml` | 모든 push와 PR | 새 checkout에서 `pip install ".[test]"`(editable 아님) 후 Windows CPython 3.11–3.14로 단위 테스트 |
+| `package-check.yml` | PR, `main`·`develop` push | sdist와 wheel 빌드, `twine check --strict`, 아티팩트 안의 메타데이터 확인, 깨끗한 venv에 wheel만 설치해 소스 밖에서 import (attach하지 않음) |
+| `release.yml` | GitHub Release **게시** 때만 | 아래 "릴리스 (메인테이너)" |
+
+live CATIA/3DEXPERIENCE 통합 테스트는 로컬에서 직접 선택해 실행합니다(`-m integration`).
+hosted runner에는 3DEXPERIENCE가 없으므로, 나중에 라이선스가 있는 self-hosted Windows
+runner를 두기 전까지는 CI에 넣지 않습니다.
 
 현재 결과는 위 "검증된 Python 환경" 표와 같습니다. 단위 테스트는 1156개입니다. B428_Cloud
 live 통합 테스트는 68개이고, 2026-09-21 빈 테스트 Part에서 62개 통과, 6개 skip(빈 main body나
 수동 파라미터가 필요한 테스트)이었으며 실행 뒤 Part가 실행 전과 같았습니다. 통합 검증 범위는 설치된 3DEXPERIENCE 세션과 현재 모델에 따라
 달라집니다.
+
+## 릴리스 (메인테이너)
+
+PyPI 게시는 `.github/workflows/release.yml`이 GitHub Release를 **게시(Publish)할 때만**
+합니다. **태그를 push하는 것만으로는 PyPI에 올라가지 않고**, draft release를 저장해도
+올라가지 않습니다.
+
+1. `develop`이 릴리스할 상태인지 확인합니다.
+2. 릴리스할 작업을 `main`에 머지합니다.
+3. `main`에서 CI(`unit-tests`, `package-check`)가 통과했는지 확인합니다.
+4. `pyproject.toml`의 `version`을 릴리스 버전으로 맞춥니다. 워크플로는 버전을 고치지
+   않으므로 소스가 이미 그 버전이어야 합니다.
+5. 버전·문서 변경을 커밋해 `main`에 반영합니다.
+6. 그 `main` 커밋에 `vX.Y.Z` 태그를 만듭니다 (예: `v1.0.0`).
+7. 그 태그로 GitHub Release를 만듭니다.
+8. 릴리스 노트를 검토합니다.
+9. **Publish release**를 누릅니다.
+10. `release.yml`이 검증 → 빌드 → PyPI 게시를 순서대로 실행합니다.
+
+`release.yml`은 게시 전에 다음 중 하나라도 어긋나면 멈춥니다: 태그가 정확히 `vX.Y.Z`
+형식이 아님, 태그 버전이 `pyproject.toml`의 `version`과 다름, release가 pre-release로
+표시됨, 태그 커밋이 `main`에서 도달할 수 없음. 빌드는 검증한 그 커밋에서 하고,
+`twine check --strict`, 아티팩트 메타데이터 확인, 깨끗한 환경 설치 smoke를 통과한
+아티팩트만 PyPI에 올립니다. 업로드는 PyPI Trusted Publishing(GitHub OIDC)으로 하며
+저장소에 PyPI 토큰을 두지 않습니다.
+
+PyPI의 버전은 한 번 올리면 바꿀 수 없습니다. 게시한 `1.0.0`에 문제가 있으면 같은
+버전을 다시 올리지 말고 `1.0.1` 같은 새 버전으로 고쳐서 릴리스합니다.
 
 ## 저장소 문서
 

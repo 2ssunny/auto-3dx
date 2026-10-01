@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,31 @@ version = "1.0.0"
 description = "Python library for driving the 3DEXPERIENCE CATIA Automation object model over Windows COM."
 readme = "README.md"
 requires-python = ">=3.11"
+# SPDX license expression (PEP 639), hence setuptools>=77 above. No License :: classifier:
+# PEP 639 replaces it, and setuptools refuses both together.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["3dexperience", "catia", "cad", "automation", "com"]
 classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
 ]
 # The SDK drives COM, which exists only on Windows. `com3dx` is not a dependency: it
 # ships with the 3DEXPERIENCE installation and is found at runtime by the transport.
 dependencies = ['pywin32; sys_platform == "win32"']
+
+[project.urls]
+Homepage = "https://github.com/2ssunny/auto-3dx"
+Repository = "https://github.com/2ssunny/auto-3dx"
+Issues = "https://github.com/2ssunny/auto-3dx/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

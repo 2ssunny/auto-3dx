@@ -1,0 +1,78 @@
+# Package check: validates what users will install from PyPI, without 3DEXPERIENCE.
+#
+# Builds the sdist and the wheel from a fresh checkout, runs `twine check --strict`,
+# checks the metadata inside both artifacts (name, version, Apache-2.0 license, LICENSE
+# file, known classifiers), then installs the WHEEL -- not the source tree, not editable --
+# into a clean virtual environment and imports it from outside the checkout. Importing must
+# not need a running 3DEXPERIENCE session; this job never calls Catia.attach().
+#
+# unit-tests.yml runs the unit suite on Python 3.11-3.14. This job uses 3.11, the oldest
+# supported version, so `requires-python` and the import work at the floor. Live CATIA
+# integration tests stay local and opt-in (`-m integration`); hosted runners have no
+# 3DEXPERIENCE.
+name: package-check
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-check-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  package-check:
+    name: package-check
+    runs-on: windows-latest
+    # Each step sets $PSNativeCommandUseErrorActionPreference, so a native command that
+    # exits non-zero fails the step at once instead of only at the step's last line.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install the packaging tools
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip build twine trove-classifiers
+
+      - name: Build the sdist and the wheel
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m build
+
+      - name: Check the distribution metadata
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m twine check --strict dist/*
+
+      - name: Check the artifacts against the declared version
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          python scripts/release/check_dist.py --dist dist --expected-version $version
+          "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install the wheel into a clean environment and import it
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $venv = Join-Path $env:RUNNER_TEMP "smoke"
+          python -m venv $venv
+          $python = Join-Path $venv "Scripts\python.exe"
+          & $python -m pip install --upgrade pip
+          & $python -m pip install "dist\auto_3dx-$env:PACKAGE_VERSION-py3-none-any.whl"
+          Set-Location $env:RUNNER_TEMP
+          & $python (Join-Path $env:GITHUB_WORKSPACE "scripts\release\smoke_installed.py") `
+            --expected-version $env:PACKAGE_VERSION --forbid-path $env:GITHUB_WORKSPACE
